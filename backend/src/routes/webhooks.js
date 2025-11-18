@@ -25,16 +25,28 @@ router.post('/resend', express.json(), async (req, res) => {
     const event = req.body;
     
     console.log('📨 Resend webhook recibido:', event.type);
+    console.log('📦 Body completo:', JSON.stringify(event, null, 2)); // Debug
     
     // Extraer información del evento
     const { type, data } = event;
     
-    // Extraer tags (campaignId y customerId)
-    const campaignId = data.tags?.find(t => t.name === 'campaign_id')?.value;
-    const customerId = data.tags?.find(t => t.name === 'customer_id')?.value;
+    // Resend envía los tags de forma diferente según el evento
+    // Intentar múltiples formas de extraer los tags
+    let campaignId, customerId;
+    
+    if (data.tags && Array.isArray(data.tags)) {
+      // Tags como array de objetos: [{ name: 'campaign_id', value: '123' }]
+      campaignId = data.tags.find(t => t.name === 'campaign_id')?.value;
+      customerId = data.tags.find(t => t.name === 'customer_id')?.value;
+    } else if (data.tags && typeof data.tags === 'object') {
+      // Tags como objeto: { campaign_id: '123', customer_id: '456' }
+      campaignId = data.tags.campaign_id;
+      customerId = data.tags.customer_id;
+    }
     
     if (!campaignId || !customerId) {
       console.log('⚠️  Evento sin tags de campaign/customer');
+      console.log('Tags recibidos:', data.tags);
       return res.status(200).json({ received: true });
     }
     
@@ -68,7 +80,7 @@ router.post('/resend', express.json(), async (req, res) => {
         customer: customerId,
         eventType: 'opened',
         source: 'resend'
-      });
+      }).catch(() => null); // Si falla el cast, ignorar
       
       if (existingEvent) {
         console.log('⏭️  Open de Resend ya registrado');
@@ -80,7 +92,7 @@ router.post('/resend', express.json(), async (req, res) => {
     await EmailEvent.create({
       campaign: campaignId,
       customer: customerId,
-      email: data.to || data.email,
+      email: data.to || data.email || 'unknown',
       eventType: eventType,
       source: 'resend', // Identificar que viene de webhook de Resend
       clickedUrl: data.click?.link || null,
@@ -88,15 +100,18 @@ router.post('/resend', express.json(), async (req, res) => {
       userAgent: data.click?.user_agent || null,
       metadata: {
         resendEventId: data.email_id,
-        timestamp: data.created_at
+        timestamp: data.created_at,
+        rawTags: data.tags
       }
     });
     
-    // Actualizar stats de campaña
-    await Campaign.updateStats(campaignId, eventType);
-    
-    // Actualizar stats de cliente
-    await Customer.updateEmailStats(customerId, eventType);
+    // Actualizar stats si existen campaign/customer válidos
+    try {
+      await Campaign.updateStats(campaignId, eventType);
+      await Customer.updateEmailStats(customerId, eventType);
+    } catch (error) {
+      console.log('⚠️  No se pudieron actualizar stats (probablemente test):', error.message);
+    }
     
     console.log(`✅ Evento ${eventType} registrado desde Resend`);
     

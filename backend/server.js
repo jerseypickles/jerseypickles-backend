@@ -11,6 +11,9 @@ const { apiLimiter } = require('./src/middleware/rateLimiter');
 
 const app = express();
 
+// 🆕 AGREGAR ESTA LÍNEA para que funcione detrás de proxy (Render)
+app.set('trust proxy', true);
+
 // Conectar a MongoDB
 connectDB();
 
