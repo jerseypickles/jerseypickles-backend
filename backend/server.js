@@ -26,7 +26,7 @@ app.use(cors({
 
 // ⚠️ CRÍTICO: Raw body para webhooks DEBE ir ANTES de express.json()
 // Esto captura el raw body solo para /api/webhooks
-app.use('/api/webhooks', express.raw({ type: 'application/json' }));
+// app.use('/api/webhooks', express.raw({ type: 'application/json' }));
 
 // Body parsers (van DESPUÉS del raw)
 app.use(express.json());
@@ -112,6 +112,9 @@ app.get('/', (req, res) => {
 
 // Auth (sin autenticación requerida)
 app.use('/api/auth', require('./src/routes/auth'));
+
+// 🆕 AGREGAR ESTA LÍNEA:
+app.use('/api/test', require('./src/routes/test'));
 
 // Webhooks (validación propia de Shopify)
 app.use('/api/webhooks', require('./src/routes/webhooks'));
