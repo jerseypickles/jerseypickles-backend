@@ -18,7 +18,7 @@ const emailEventSchema = new mongoose.Schema({
   // Tipo de evento
   eventType: {
     type: String,
-    enum: ['sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained', 'unsubscribed'],
+    enum: ['sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained', 'unsubscribed', 'delayed'], // Agregué 'delayed'
     required: true,
     index: true
   },
@@ -27,6 +27,14 @@ const emailEventSchema = new mongoose.Schema({
   email: {
     type: String,
     required: true
+  },
+  
+  // 🆕 NUEVO: Identificar origen del evento
+  source: {
+    type: String,
+    enum: ['custom', 'resend'],
+    default: 'custom',
+    index: true
   },
   
   // Para clicks
@@ -42,6 +50,12 @@ const emailEventSchema = new mongoose.Schema({
   
   // ID de Resend
   resendId: String,
+  
+  // 🆕 NUEVO: Metadata adicional flexible
+  metadata: {
+    type: Object,
+    default: {}
+  },
   
   // Timestamp del evento
   eventDate: {
@@ -59,6 +73,7 @@ const emailEventSchema = new mongoose.Schema({
 emailEventSchema.index({ campaign: 1, eventType: 1 });
 emailEventSchema.index({ customer: 1, eventDate: -1 });
 emailEventSchema.index({ eventDate: -1 });
+emailEventSchema.index({ campaign: 1, customer: 1, eventType: 1, source: 1 }); // 🆕 Índice con source
 
 // Método estático para registrar evento
 emailEventSchema.statics.logEvent = async function(data) {

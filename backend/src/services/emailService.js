@@ -10,34 +10,45 @@ class EmailService {
 
   // ==================== ENVÍO SIMPLE ====================
   
-  async sendEmail({ to, subject, html, from = null, replyTo = null }) {
-    try {
-      const data = await resend.emails.send({
-        from: from || this.fromEmail,
-        to: Array.isArray(to) ? to : [to],
-        subject,
-        html,
-        reply_to: replyTo
-      });
-      
-      console.log(`✅ Email enviado a ${to}: ${data.id}`);
-      
-      return {
-        success: true,
-        id: data.id,
-        email: to
-      };
-      
-    } catch (error) {
-      console.error('❌ Error enviando email:', error);
-      
-      return {
-        success: false,
-        error: error.message,
-        email: to
-      };
+async sendEmail({ to, subject, html, from = null, replyTo = null, campaignId = null, customerId = null }) {
+  try {
+    // Preparar tags si existen campaignId y customerId
+    const tags = [];
+    if (campaignId) tags.push({ name: 'campaign_id', value: String(campaignId) });
+    if (customerId) tags.push({ name: 'customer_id', value: String(customerId) });
+    
+    // Inyectar tracking custom si aplica
+    if (campaignId && customerId) {
+      html = this.injectTracking(html, campaignId, customerId);
     }
+    
+    const data = await resend.emails.send({
+      from: from || this.fromEmail,
+      to: Array.isArray(to) ? to : [to],
+      subject,
+      html,
+      reply_to: replyTo,
+      tags: tags.length > 0 ? tags : undefined // Solo agregar tags si existen
+    });
+    
+    console.log(`✅ Email enviado a ${to}: ${data.id}`);
+    
+    return {
+      success: true,
+      id: data.id,
+      email: to
+    };
+    
+  } catch (error) {
+    console.error('❌ Error enviando email:', error);
+    
+    return {
+      success: false,
+      error: error.message,
+      email: to
+    };
   }
+}
 
   // ==================== ENVÍO MASIVO ====================
   
