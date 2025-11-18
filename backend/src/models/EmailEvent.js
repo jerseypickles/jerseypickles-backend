@@ -2,16 +2,15 @@
 const mongoose = require('mongoose');
 
 const emailEventSchema = new mongoose.Schema({
+  // 🆕 CAMBIAR TIPO: De ObjectId a Mixed (acepta cualquier cosa)
   campaign: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Campaign',
-    required: false, // ✅ Cambiar a false para permitir tests
+    type: mongoose.Schema.Types.Mixed, // Acepta ObjectId O String
+    required: false,
     index: true
   },
   customer: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Customer',
-    required: false, // ✅ Cambiar a false para permitir tests
+    type: mongoose.Schema.Types.Mixed, // Acepta ObjectId O String
+    required: false,
     index: true
   },
   
@@ -29,7 +28,7 @@ const emailEventSchema = new mongoose.Schema({
     required: true
   },
   
-  // 🆕 NUEVO: Identificar origen del evento
+  // Identificar origen del evento
   source: {
     type: String,
     enum: ['custom', 'resend'],
@@ -42,7 +41,7 @@ const emailEventSchema = new mongoose.Schema({
   
   // Para bounces
   bounceReason: String,
-  bounceType: String, // hard o soft
+  bounceType: String,
   
   // Metadata
   userAgent: String,
@@ -51,7 +50,7 @@ const emailEventSchema = new mongoose.Schema({
   // ID de Resend
   resendId: String,
   
-  // 🆕 NUEVO: Metadata adicional flexible
+  // Metadata adicional flexible
   metadata: {
     type: Object,
     default: {}
@@ -73,14 +72,14 @@ const emailEventSchema = new mongoose.Schema({
 emailEventSchema.index({ campaign: 1, eventType: 1 });
 emailEventSchema.index({ customer: 1, eventDate: -1 });
 emailEventSchema.index({ eventDate: -1 });
-emailEventSchema.index({ campaign: 1, customer: 1, eventType: 1, source: 1 }); // 🆕 Índice con source
+emailEventSchema.index({ campaign: 1, customer: 1, eventType: 1, source: 1 });
 
 // Método estático para registrar evento
 emailEventSchema.statics.logEvent = async function(data) {
   const event = await this.create(data);
   
-  // Actualizar estadísticas de la campaña si existe
-  if (data.campaign) {
+  // Actualizar estadísticas si campaign existe y es ObjectId válido
+  if (data.campaign && mongoose.Types.ObjectId.isValid(data.campaign)) {
     try {
       const Campaign = mongoose.model('Campaign');
       await Campaign.updateStats(data.campaign, data.eventType);
@@ -89,8 +88,8 @@ emailEventSchema.statics.logEvent = async function(data) {
     }
   }
   
-  // Actualizar estadísticas del cliente si existe
-  if (data.customer) {
+  // Actualizar estadísticas si customer existe y es ObjectId válido
+  if (data.customer && mongoose.Types.ObjectId.isValid(data.customer)) {
     try {
       const Customer = mongoose.model('Customer');
       await Customer.updateEmailStats(data.customer, data.eventType);
