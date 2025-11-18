@@ -1,6 +1,11 @@
 // backend/src/models/EmailEvent.js
 const mongoose = require('mongoose');
 
+// 🆕 FORZAR BORRAR MODELO CACHEADO
+if (mongoose.models.EmailEvent) {
+  delete mongoose.models.EmailEvent;
+}
+
 const emailEventSchema = new mongoose.Schema({
   // 🆕 CAMBIAR TIPO: De ObjectId a Mixed (acepta cualquier cosa)
   campaign: {
