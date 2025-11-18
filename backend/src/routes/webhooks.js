@@ -25,21 +25,17 @@ router.post('/resend', express.json(), async (req, res) => {
     const event = req.body;
     
     console.log('📨 Resend webhook recibido:', event.type);
-    console.log('📦 Body completo:', JSON.stringify(event, null, 2)); // Debug
+    console.log('📦 Body completo:', JSON.stringify(event, null, 2));
     
-    // Extraer información del evento
     const { type, data } = event;
     
-    // Resend envía los tags de forma diferente según el evento
-    // Intentar múltiples formas de extraer los tags
+    // Extraer tags (vienen como objeto según los logs)
     let campaignId, customerId;
     
     if (data.tags && Array.isArray(data.tags)) {
-      // Tags como array de objetos: [{ name: 'campaign_id', value: '123' }]
       campaignId = data.tags.find(t => t.name === 'campaign_id')?.value;
       customerId = data.tags.find(t => t.name === 'customer_id')?.value;
     } else if (data.tags && typeof data.tags === 'object') {
-      // Tags como objeto: { campaign_id: '123', customer_id: '456' }
       campaignId = data.tags.campaign_id;
       customerId = data.tags.customer_id;
     }
@@ -50,12 +46,10 @@ router.post('/resend', express.json(), async (req, res) => {
       return res.status(200).json({ received: true });
     }
     
-    // Importar modelos aquí para evitar problemas de dependencias circulares
     const EmailEvent = require('../models/EmailEvent');
     const Campaign = require('../models/Campaign');
     const Customer = require('../models/Customer');
     
-    // Mapear tipos de evento de Resend a tu sistema
     const eventTypeMap = {
       'email.sent': 'sent',
       'email.delivered': 'delivered',
@@ -73,14 +67,14 @@ router.post('/resend', express.json(), async (req, res) => {
       return res.status(200).json({ received: true });
     }
     
-    // Para opens, verificar si ya existe (evitar duplicados)
+    // Para opens, verificar duplicados
     if (eventType === 'opened') {
       const existingEvent = await EmailEvent.findOne({
         campaign: campaignId,
         customer: customerId,
         eventType: 'opened',
         source: 'resend'
-      }).catch(() => null); // Si falla el cast, ignorar
+      }).catch(() => null);
       
       if (existingEvent) {
         console.log('⏭️  Open de Resend ya registrado');
@@ -88,13 +82,16 @@ router.post('/resend', express.json(), async (req, res) => {
       }
     }
     
-    // Registrar evento en tu base de datos
+    // 🆕 ARREGLAR: Extraer email correctamente (viene como array)
+    const emailAddress = Array.isArray(data.to) ? data.to[0] : (data.to || data.email || 'unknown');
+    
+    // Registrar evento
     await EmailEvent.create({
       campaign: campaignId,
       customer: customerId,
-      email: data.to || data.email || 'unknown',
+      email: emailAddress,
       eventType: eventType,
-      source: 'resend', // Identificar que viene de webhook de Resend
+      source: 'resend',
       clickedUrl: data.click?.link || null,
       bounceReason: data.bounce?.message || null,
       userAgent: data.click?.user_agent || null,
@@ -105,12 +102,12 @@ router.post('/resend', express.json(), async (req, res) => {
       }
     });
     
-    // Actualizar stats si existen campaign/customer válidos
+    // Actualizar stats
     try {
       await Campaign.updateStats(campaignId, eventType);
       await Customer.updateEmailStats(customerId, eventType);
     } catch (error) {
-      console.log('⚠️  No se pudieron actualizar stats (probablemente test):', error.message);
+      console.log('⚠️  No se pudieron actualizar stats:', error.message);
     }
     
     console.log(`✅ Evento ${eventType} registrado desde Resend`);
@@ -119,7 +116,6 @@ router.post('/resend', express.json(), async (req, res) => {
     
   } catch (error) {
     console.error('❌ Error procesando webhook de Resend:', error);
-    // Resend espera 200 para confirmar recepción
     res.status(200).json({ received: true, error: error.message });
   }
 });
