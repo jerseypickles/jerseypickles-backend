@@ -1,0 +1,31 @@
+# render.yaml - Configuración para Render
+services:
+  # Backend API
+  - type: web
+    name: jerseypickles-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: MONGODB_URI
+        sync: false # Se configura manualmente en Render dashboard
+      - key: JWT_SECRET
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: SHOPIFY_ACCESS_TOKEN
+        sync: false
+      - key: SHOPIFY_STORE_URL
+        value: 113e43-2.myshopify.com
+      - key: SHOPIFY_WEBHOOK_SECRET
+        sync: false
+      - key: FRONTEND_URL
+        sync: false # Lo configuraremos después de crear el frontend
+      - key: APP_URL
+        sync: false
+    healthCheckPath: /health
