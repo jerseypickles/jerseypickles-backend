@@ -10,33 +10,64 @@ let emailQueue;
 try {
   const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
   
-  // ⚠️ CRÍTICO: Configuración específica para Upstash
+  // ✅ CONFIGURACIÓN OPTIMIZADA para Upstash
   const redisConfig = {
-    redis: redisUrl,
-    // Upstash requiere TLS
-    tls: redisUrl.includes('upstash.io') ? {
-      rejectUnauthorized: false
-    } : undefined
-  };
-  
-  emailQueue = new Queue('email-sending', redisConfig, {
+    redis: {
+      // Si es Upstash, parsear URL y configurar TLS + timeouts
+      ...(redisUrl.includes('upstash.io') ? {
+        port: parseInt(redisUrl.match(/:(\d+)/)?.[1]) || 6379,
+        host: redisUrl.match(/@([^:]+)/)?.[1],
+        password: redisUrl.match(/:\/\/[^:]*:([^@]+)/)?.[1],
+        tls: {
+          rejectUnauthorized: false
+        },
+        // ✅ TIMEOUTS CRÍTICOS para evitar 499
+        connectTimeout: 5000,      // 5s para conectar
+        commandTimeout: 5000,      // 5s por comando
+        keepAlive: 30000,          // Keep alive cada 30s
+        retryStrategy: (times) => {
+          if (times > 3) return null; // Máximo 3 reintentos
+          return Math.min(times * 1000, 3000);
+        },
+        enableOfflineQueue: false, // No encolar si está offline
+        maxRetriesPerRequest: 2    // Máximo 2 reintentos por request
+      } : redisUrl) // Si no es Upstash, usar URL directa
+    },
     defaultJobOptions: {
-      attempts: 3, // Reintentar hasta 3 veces
+      attempts: 3,
       backoff: {
         type: 'exponential',
-        delay: 2000 // 2s, 4s, 8s
+        delay: 2000
       },
-      removeOnComplete: true, // ⚠️ CAMBIO: true para liberar memoria con 100k emails
-      removeOnFail: false, // Mantener fallidos para debug
-      timeout: 30000 // 30s timeout por email
+      removeOnComplete: true,
+      removeOnFail: false,
+      timeout: 30000
     },
     limiter: {
-      max: 100, // ⚠️ CRÍTICO: Máximo 100 emails por minuto
-      duration: 60000 // Para cumplir límites de Resend
+      max: 100,
+      duration: 60000
+    },
+    // ✅ SETTINGS ADICIONALES
+    settings: {
+      lockDuration: 30000,
+      lockRenewTime: 15000,
+      stalledInterval: 30000,
+      maxStalledCount: 1,
+      guardInterval: 5000
     }
-  });
+  };
   
-  console.log('✅ Email queue initialized with Upstash Redis');
+  emailQueue = new Queue('email-sending', redisConfig);
+  
+  // ✅ VERIFICAR CONEXIÓN al iniciar
+  emailQueue.isReady()
+    .then(() => {
+      console.log('✅ Email queue initialized with Upstash Redis');
+    })
+    .catch(err => {
+      console.error('❌ Queue connection failed:', err.message);
+    });
+    
 } catch (error) {
   console.error('❌ Redis connection error:', error.message);
   console.warn('⚠️  Email queue NOT available - check REDIS_URL');
@@ -51,11 +82,9 @@ if (emailQueue) {
     console.log(`📧 [${job.id}] Enviando a ${customer.email}...`);
     
     try {
-      // Enviar email
       const result = await emailService.sendEmail(emailData);
       
       if (result.success) {
-        // Registrar evento
         await EmailEvent.create({
           campaign: campaignId,
           customer: customer._id,
@@ -65,17 +94,15 @@ if (emailQueue) {
           resendId: result.id
         });
         
-        // Actualizar stats
         await Campaign.findByIdAndUpdate(campaignId, {
           $inc: { 'stats.sent': 1, 'stats.delivered': 1 }
         });
         
         console.log(`✅ [${job.id}] Enviado: ${customer.email}`);
         
-        // ⚠️ NUEVO: Verificar si es el último job de la campaña
+        // Verificar si es el último job de la campaña
         const queueStatus = await emailQueue.getJobCounts();
         if (queueStatus.waiting === 0 && queueStatus.active <= 1) {
-          // Marcar campaña como completada
           await Campaign.findByIdAndUpdate(campaignId, {
             status: 'sent',
             sentAt: new Date()
@@ -92,12 +119,10 @@ if (emailQueue) {
     } catch (error) {
       console.error(`❌ [${job.id}] Error: ${error.message}`);
       
-      // Incrementar fallidos
       await Campaign.findByIdAndUpdate(campaignId, {
         $inc: { 'stats.failed': 1 }
       });
       
-      // Si es el último intento, registrar bounce
       if (job.attemptsMade >= job.opts.attempts) {
         await EmailEvent.create({
           campaign: campaignId,
@@ -109,25 +134,21 @@ if (emailQueue) {
         });
       }
       
-      throw error; // Bull hará retry automático
+      throw error;
     }
   });
   
   // Event handlers
-  emailQueue.on('completed', (job, result) => {
+  emailQueue.on('completed', (job) => {
     console.log(`✅ Job ${job.id} completado`);
   });
   
   emailQueue.on('failed', (job, err) => {
-    console.error(`❌ Job ${job.id} falló después de ${job.attemptsMade} intentos: ${err.message}`);
+    console.error(`❌ Job ${job.id} falló: ${err.message}`);
   });
   
   emailQueue.on('stalled', (job) => {
     console.warn(`⚠️  Job ${job.id} stalled - reintentando...`);
-  });
-  
-  emailQueue.on('progress', (job, progress) => {
-    console.log(`📊 Job ${job.id} progreso: ${progress}%`);
   });
 }
 
@@ -154,7 +175,7 @@ async function addEmailsToQueue(emails, campaignId) {
       }
     },
     opts: {
-      delay: index * 100, // 100ms entre cada email
+      delay: index * 100,
       jobId: `${campaignId}-${emailData.customerId || index}`,
       priority: 1
     }
@@ -170,80 +191,127 @@ async function addEmailsToQueue(emails, campaignId) {
   };
 }
 
-// Obtener estado de la cola
+// ✅ OPTIMIZADO: getQueueStatus con timeout y una sola llamada
 async function getQueueStatus() {
   if (!emailQueue) {
     return { 
       available: false,
+      waiting: 0,
+      active: 0,
+      completed: 0,
+      failed: 0,
+      delayed: 0,
+      paused: false,
+      total: 0,
       error: 'Redis queue no disponible' 
     };
   }
   
-  const [waiting, active, completed, failed, delayed, paused] = await Promise.all([
-    emailQueue.getWaitingCount(),
-    emailQueue.getActiveCount(),
-    emailQueue.getCompletedCount(),
-    emailQueue.getFailedCount(),
-    emailQueue.getDelayedCount(),
-    emailQueue.isPaused()
-  ]);
-  
-  return {
-    available: true,
-    waiting,
-    active,
-    completed,
-    failed,
-    delayed,
-    paused,
-    total: waiting + active + delayed
-  };
+  try {
+    // ✅ TIMEOUT de 5 segundos para evitar bloqueos
+    const timeout = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Redis timeout')), 5000)
+    );
+    
+    // ✅ UNA SOLA LLAMADA getJobCounts() en lugar de 6 llamadas individuales
+    const countsPromise = emailQueue.getJobCounts();
+    const pausedPromise = emailQueue.isPaused();
+    
+    const [counts, paused] = await Promise.race([
+      Promise.all([countsPromise, pausedPromise]),
+      timeout
+    ]);
+    
+    return {
+      available: true,
+      waiting: counts.waiting || 0,
+      active: counts.active || 0,
+      completed: counts.completed || 0,
+      failed: counts.failed || 0,
+      delayed: counts.delayed || 0,
+      paused: paused || false,
+      total: (counts.waiting || 0) + (counts.active || 0) + (counts.delayed || 0),
+      error: null
+    };
+    
+  } catch (error) {
+    console.error('Queue status error:', error.message);
+    
+    // ✅ RETORNAR ESTADO OFFLINE en lugar de lanzar error
+    return {
+      available: false,
+      waiting: 0,
+      active: 0,
+      completed: 0,
+      failed: 0,
+      delayed: 0,
+      paused: false,
+      total: 0,
+      error: error.message === 'Redis timeout' 
+        ? 'Redis timeout - conexión muy lenta' 
+        : error.message
+    };
+  }
 }
 
-// ⚠️ NUEVO: Pausar cola
+// Pausar cola
 async function pauseQueue() {
   if (!emailQueue) {
-    return { error: 'Queue not available' };
+    return { success: false, error: 'Queue not available' };
   }
   
-  await emailQueue.pause();
-  console.log('⏸️  Cola pausada');
-  
-  return { success: true, message: 'Queue paused' };
+  try {
+    await emailQueue.pause();
+    console.log('⏸️  Cola pausada');
+    return { success: true, message: 'Queue paused' };
+  } catch (error) {
+    console.error('Pause error:', error);
+    return { success: false, error: error.message };
+  }
 }
 
-// ⚠️ NUEVO: Resumir cola
+// Resumir cola
 async function resumeQueue() {
   if (!emailQueue) {
-    return { error: 'Queue not available' };
+    return { success: false, error: 'Queue not available' };
   }
   
-  await emailQueue.resume();
-  console.log('▶️  Cola resumida');
-  
-  return { success: true, message: 'Queue resumed' };
+  try {
+    await emailQueue.resume();
+    console.log('▶️  Cola resumida');
+    return { success: true, message: 'Queue resumed' };
+  } catch (error) {
+    console.error('Resume error:', error);
+    return { success: false, error: error.message };
+  }
 }
 
 // Limpiar trabajos completados/fallidos
 async function cleanQueue() {
   if (!emailQueue) {
-    return { error: 'Queue not available' };
+    return { success: false, error: 'Queue not available' };
   }
   
-  await emailQueue.clean(5000, 'completed'); // Older than 5s
-  await emailQueue.clean(5000, 'failed');
-  
-  console.log('🧹 Cola limpiada');
-  
-  return { success: true, message: 'Queue cleaned' };
+  try {
+    await Promise.all([
+      emailQueue.clean(5000, 'completed'),
+      emailQueue.clean(5000, 'failed')
+    ]);
+    
+    console.log('🧹 Cola limpiada');
+    return { success: true, message: 'Queue cleaned' };
+  } catch (error) {
+    console.error('Clean error:', error);
+    return { success: false, error: error.message };
+  }
 }
 
 module.exports = {
   emailQueue,
   addEmailsToQueue,
   getQueueStatus,
-  pauseQueue,    // ⚠️ AGREGADO
-  resumeQueue,   // ⚠️ AGREGADO
+  pauseQueue,
+  resumeQueue,
   cleanQueue,
   isAvailable: !!emailQueue
 };
