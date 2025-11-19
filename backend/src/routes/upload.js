@@ -2,15 +2,19 @@
 const express = require('express');
 const router = express.Router();
 const cloudinary = require('../config/cloudinary');
-const { protect } = require('../middleware/auth');
 
 // Subir imagen desde base64
-router.post('/image', protect, async (req, res) => {
+router.post('/image', async (req, res) => {
   try {
     const { image, folder = 'campaigns' } = req.body;
 
     if (!image) {
       return res.status(400).json({ error: 'No se proporcionó imagen' });
+    }
+
+    // Validar que sea base64
+    if (!image.startsWith('data:image/')) {
+      return res.status(400).json({ error: 'Formato de imagen inválido' });
     }
 
     // Subir a Cloudinary
@@ -23,6 +27,8 @@ router.post('/image', protect, async (req, res) => {
       ]
     });
 
+    console.log('✅ Imagen subida a Cloudinary:', result.secure_url);
+
     res.json({
       success: true,
       url: result.secure_url,
@@ -30,7 +36,7 @@ router.post('/image', protect, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error subiendo imagen:', error);
+    console.error('❌ Error subiendo imagen a Cloudinary:', error);
     res.status(500).json({ 
       error: 'Error subiendo imagen',
       details: error.message 
