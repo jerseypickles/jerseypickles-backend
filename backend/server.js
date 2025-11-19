@@ -11,7 +11,6 @@ const { apiLimiter } = require('./src/middleware/rateLimiter');
 
 const app = express();
 
-// 🆕 AGREGAR ESTA LÍNEA para que funcione detrás de proxy (Render)
 app.set('trust proxy', true);
 
 // Conectar a MongoDB
@@ -23,10 +22,9 @@ connectDB();
 app.use(helmet());
 app.use(compression());
 
-// 🆕 CONFIGURACIÓN CORS MEJORADA
+// CORS MEJORADA
 const corsOptions = {
   origin: function (origin, callback) {
-    // Permitir requests sin origin (como Postman, curl, mobile apps)
     if (!origin) {
       return callback(null, true);
     }
@@ -39,17 +37,12 @@ const corsOptions = {
       'https://www.jerseypickles.com'
     ];
     
-    // Regex para permitir TODOS los subdominios de Vercel
-    // Esto permite tanto production como preview deployments
     const vercelPatterns = [
       /^https:\/\/jerseypickles-frontend.*\.vercel\.app$/,
       /^https:\/\/.*-jerseypickles-projects\.vercel\.app$/
     ];
     
-    // Verificar si el origin está en la lista permitida
     const isAllowedOrigin = allowedOrigins.includes(origin);
-    
-    // Verificar si el origin coincide con algún patrón de Vercel
     const isVercelDomain = vercelPatterns.some(pattern => pattern.test(origin));
     
     if (isAllowedOrigin || isVercelDomain) {
@@ -63,22 +56,17 @@ const corsOptions = {
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
-  maxAge: 600 // Cache preflight por 10 minutos
+  maxAge: 600
 };
 
 app.use(cors(corsOptions));
 
-// ⚠️ CRÍTICO: Raw body para webhooks DEBE ir ANTES de express.json()
-// Esto captura el raw body solo para /api/webhooks
-// app.use('/api/webhooks', express.raw({ type: 'application/json' }));
-
-// Body parsers (van DESPUÉS del raw)
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// ✅ AUMENTAR LÍMITE A 10MB PARA SOPORTAR IMÁGENES BASE64
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // Rate limiting para rutas API (excepto webhooks)
 app.use('/api/', (req, res, next) => {
-  // No aplicar rate limit a webhooks
   if (req.path.startsWith('/webhooks')) {
     return next();
   }
@@ -96,7 +84,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Ruta raíz - Información de la API
 app.get('/', (req, res) => {
   res.json({ 
     message: '🥒 Jersey Pickles Email Marketing API',
@@ -112,58 +99,15 @@ app.get('/', (req, res) => {
       webhooks: '/api/webhooks',
       tracking: '/api/track',
       analytics: '/api/analytics'
-    },
-    documentation: {
-      auth: {
-        register: 'POST /api/auth/register',
-        login: 'POST /api/auth/login',
-        me: 'GET /api/auth/me'
-      },
-      customers: {
-        list: 'GET /api/customers',
-        sync: 'POST /api/customers/sync',
-        stats: 'GET /api/customers/stats',
-        testShopify: 'GET /api/customers/test-shopify'
-      },
-      orders: {
-        list: 'GET /api/orders',
-        sync: 'POST /api/orders/sync',
-        stats: 'GET /api/orders/stats'
-      },
-      segments: {
-        list: 'GET /api/segments',
-        create: 'POST /api/segments',
-        preview: 'POST /api/segments/preview',
-        predefined: 'POST /api/segments/predefined/create-all'
-      },
-      campaigns: {
-        list: 'GET /api/campaigns',
-        create: 'POST /api/campaigns',
-        send: 'POST /api/campaigns/:id/send',
-        fromTemplate: 'POST /api/campaigns/from-template'
-      },
-      analytics: {
-        dashboard: 'GET /api/analytics/dashboard',
-        topCustomers: 'GET /api/analytics/top-customers',
-        revenueTimeline: 'GET /api/analytics/revenue-timeline',
-        campaignPerformance: 'GET /api/analytics/campaign-performance'
-      }
     }
   });
 });
 
 // ==================== ROUTES ====================
 
-// Auth (sin autenticación requerida)
 app.use('/api/auth', require('./src/routes/auth'));
-
-// Test endpoints
 app.use('/api/test', require('./src/routes/test'));
-
-// Webhooks (validación propia de Shopify)
 app.use('/api/webhooks', require('./src/routes/webhooks'));
-
-// API Routes (requieren autenticación - se valida dentro de cada ruta)
 app.use('/api/customers', require('./src/routes/customers'));
 app.use('/api/orders', require('./src/routes/orders'));
 app.use('/api/segments', require('./src/routes/segments'));
@@ -171,27 +115,14 @@ app.use('/api/campaigns', require('./src/routes/campaigns'));
 app.use('/api/track', require('./src/routes/tracking'));
 app.use('/api/analytics', require('./src/routes/analytics'));
 
-// Ruta 404 - Manejo de rutas no encontradas
 app.use('*', (req, res) => {
   res.status(404).json({ 
     error: 'Ruta no encontrada',
-    path: req.originalUrl,
-    availableEndpoints: [
-      '/health',
-      '/api/auth',
-      '/api/customers',
-      '/api/orders',
-      '/api/segments',
-      '/api/campaigns',
-      '/api/webhooks',
-      '/api/track',
-      '/api/analytics'
-    ]
+    path: req.originalUrl
   });
 });
 
 // ==================== ERROR HANDLER ====================
-// Debe ir AL FINAL, después de todas las rutas
 app.use(errorHandler);
 
 // ==================== START SERVER ====================
@@ -205,52 +136,17 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔗 MongoDB: ${mongoose.connection.readyState === 1 ? '✅ Connected' : '⏳ Connecting...'}`);
-  console.log(`🌐 API URL: http://localhost:${PORT}`);
-  console.log('');
-  console.log('📡 Available endpoints:');
-  console.log(`   - Health Check:        http://localhost:${PORT}/health`);
-  console.log(`   - API Documentation:   http://localhost:${PORT}/`);
-  console.log('');
-  console.log('🔐 Authentication:');
-  console.log(`   - Register:            POST http://localhost:${PORT}/api/auth/register`);
-  console.log(`   - Login:               POST http://localhost:${PORT}/api/auth/login`);
-  console.log('');
-  console.log('👥 Customers:');
-  console.log(`   - List:                GET  http://localhost:${PORT}/api/customers`);
-  console.log(`   - Sync from Shopify:   POST http://localhost:${PORT}/api/customers/sync`);
-  console.log(`   - Test Connection:     GET  http://localhost:${PORT}/api/customers/test-shopify`);
-  console.log('');
-  console.log('📦 Orders:');
-  console.log(`   - List:                GET  http://localhost:${PORT}/api/orders`);
-  console.log(`   - Sync from Shopify:   POST http://localhost:${PORT}/api/orders/sync`);
-  console.log('');
-  console.log('🎯 Segments:');
-  console.log(`   - List:                GET  http://localhost:${PORT}/api/segments`);
-  console.log(`   - Create Predefined:   POST http://localhost:${PORT}/api/segments/predefined/create-all`);
-  console.log('');
-  console.log('📧 Campaigns:');
-  console.log(`   - List:                GET  http://localhost:${PORT}/api/campaigns`);
-  console.log(`   - Create:              POST http://localhost:${PORT}/api/campaigns`);
-  console.log(`   - Send:                POST http://localhost:${PORT}/api/campaigns/:id/send`);
-  console.log('');
-  console.log('📊 Analytics:');
-  console.log(`   - Dashboard:           GET  http://localhost:${PORT}/api/analytics/dashboard`);
-  console.log('');
-  console.log('✅ Server ready to accept requests!');
-  console.log('═══════════════════════════════════════════\n');
+  console.log(`✅ Server ready - Payload limit: 10MB`);
 });
 
 // ==================== GRACEFUL SHUTDOWN ====================
 
-// Manejar cierre graceful
 const gracefulShutdown = async (signal) => {
   console.log(`\n${signal} received. Starting graceful shutdown...`);
   
-  // Cerrar servidor HTTP
   server.close(async () => {
     console.log('✅ HTTP server closed');
     
-    // Cerrar conexión de MongoDB
     try {
       await mongoose.connection.close();
       console.log('✅ MongoDB connection closed');
@@ -262,22 +158,17 @@ const gracefulShutdown = async (signal) => {
     process.exit(0);
   });
   
-  // Forzar cierre después de 10 segundos
   setTimeout(() => {
     console.error('⚠️  Forcing shutdown after timeout');
     process.exit(1);
   }, 10000);
 };
 
-// Escuchar señales de terminación
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Manejar errores no capturados
 process.on('unhandledRejection', (err) => {
   console.error('❌ Unhandled Promise Rejection:', err);
-  console.error('Stack:', err.stack);
-  // En producción, considera cerrar el servidor
   if (process.env.NODE_ENV === 'production') {
     gracefulShutdown('unhandledRejection');
   }
@@ -285,10 +176,7 @@ process.on('unhandledRejection', (err) => {
 
 process.on('uncaughtException', (err) => {
   console.error('❌ Uncaught Exception:', err);
-  console.error('Stack:', err.stack);
-  // Siempre cerrar en excepciones no capturadas
   gracefulShutdown('uncaughtException');
 });
 
-// Exportar para testing
 module.exports = app;
