@@ -114,6 +114,7 @@ app.use('/api/segments', require('./src/routes/segments'));
 app.use('/api/campaigns', require('./src/routes/campaigns'));
 app.use('/api/track', require('./src/routes/tracking'));
 app.use('/api/analytics', require('./src/routes/analytics'));
+app.use('/api/upload', require('./src/routes/upload'));
 
 app.use('*', (req, res) => {
   res.status(404).json({ 
