@@ -223,120 +223,200 @@ class ListsController {
   // ==================== IMPORTAR CSV ====================
 
   // Importar lista desde CSV
-  async importCSV(req, res) {
-    try {
-      const { name, description, csvData } = req.body;
-      
-      if (!csvData) {
-        return res.status(400).json({ error: 'csvData es requerido' });
-      }
-      
-      console.log(`\n📥 Importando lista desde CSV: ${name}`);
-      
-      // Parsear CSV
-      const rows = [];
-      const stream = Readable.from(csvData);
-      
-      await new Promise((resolve, reject) => {
-        stream
-          .pipe(csv())
-          .on('data', (row) => {
-            rows.push(row);
-          })
-          .on('end', resolve)
-          .on('error', reject);
+// backend/src/controllers/listsController.js
+// Reemplaza solo la función importCSV
+
+async importCSV(req, res) {
+  try {
+    const { name, description, csvData } = req.body;
+    
+    if (!csvData) {
+      return res.status(400).json({ error: 'csvData es requerido' });
+    }
+    
+    console.log(`\n📥 Importando lista desde CSV: ${name}`);
+    
+    // Parsear CSV
+    const rows = [];
+    const stream = Readable.from(csvData);
+    
+    await new Promise((resolve, reject) => {
+      stream
+        .pipe(csv())
+        .on('data', (row) => {
+          rows.push(row);
+        })
+        .on('end', resolve)
+        .on('error', reject);
+    });
+    
+    console.log(`📄 ${rows.length} filas parseadas del CSV`);
+    
+    if (rows.length === 0) {
+      return res.status(400).json({ 
+        error: 'El CSV está vacío o no tiene el formato correcto' 
       });
-      
-      console.log(`📄 ${rows.length} filas parseadas del CSV`);
-      
-      if (rows.length === 0) {
-        return res.status(400).json({ 
-          error: 'El CSV está vacío o no tiene el formato correcto' 
-        });
-      }
-      
-      // Procesar filas y crear/encontrar customers
-      const customerIds = [];
-      const stats = {
-        created: 0,
-        found: 0,
-        errors: 0,
-        total: rows.length
-      };
-      
-      for (const row of rows) {
-        try {
-          // El CSV debe tener al menos "email"
-          const email = row.email || row.Email || row.EMAIL;
-          
-          if (!email) {
-            stats.errors++;
-            continue;
-          }
-          
-          const firstName = row.firstName || row.first_name || row.FirstName || '';
-          const lastName = row.lastName || row.last_name || row.LastName || '';
-          const phone = row.phone || row.Phone || row.PHONE || '';
-          
-          let customer = await Customer.findOne({ email: email.toLowerCase().trim() });
-          
-          if (!customer) {
-            customer = await Customer.create({
-              email: email.toLowerCase().trim(),
-              firstName: firstName.trim(),
-              lastName: lastName.trim(),
-              phone: phone.trim(),
-              source: 'csv_import'
-            });
-            stats.created++;
-          } else {
-            stats.found++;
-          }
-          
-          customerIds.push(customer._id);
-          
-        } catch (error) {
-          console.error('Error procesando fila:', error.message);
-          stats.errors++;
+    }
+    
+    // Detectar columnas de email (case-insensitive y variaciones)
+    const firstRow = rows[0];
+    const emailColumn = Object.keys(firstRow).find(key => 
+      /^e-?mail$/i.test(key.trim()) || /^correo$/i.test(key.trim())
+    );
+    
+    if (!emailColumn) {
+      return res.status(400).json({ 
+        error: 'El CSV debe tener al menos una columna "email"',
+        columnsFound: Object.keys(firstRow).join(', ')
+      });
+    }
+    
+    console.log(`✅ Columna de email detectada: "${emailColumn}"`);
+    console.log(`📋 Columnas disponibles: ${Object.keys(firstRow).join(', ')}`);
+    
+    // Función helper para buscar columnas con variaciones
+    const findColumn = (row, variations) => {
+      const key = Object.keys(row).find(k => 
+        variations.some(v => new RegExp(`^${v}$`, 'i').test(k.trim()))
+      );
+      return key ? row[key] : '';
+    };
+    
+    // Procesar filas y crear/encontrar customers
+    const customerIds = [];
+    const stats = {
+      created: 0,
+      found: 0,
+      errors: 0,
+      skipped: 0,
+      total: rows.length
+    };
+    
+    for (const row of rows) {
+      try {
+        // Buscar email con variaciones
+        const email = row[emailColumn]?.trim();
+        
+        if (!email) {
+          stats.skipped++;
+          continue;
         }
-      }
-      
-      console.log(`✅ Clientes: ${stats.created} creados, ${stats.found} encontrados, ${stats.errors} errores`);
-      
-      // Crear o actualizar lista
-      let list = await List.findOne({ name });
-      
-      if (list) {
-        // Actualizar lista existente
-        await list.addMembers(customerIds);
-        console.log(`🔄 Lista actualizada: ${list.name} (${list.memberCount} miembros)`);
-      } else {
-        // Crear nueva lista
-        list = await List.create({
-          name,
-          description: description || `Importada desde CSV`,
-          members: [],
-          memberCount: 0
+        
+        // Validar formato de email básico
+        if (!email.includes('@') || !email.includes('.')) {
+          console.log(`⚠️  Email inválido: ${email}`);
+          stats.errors++;
+          continue;
+        }
+        
+        // Buscar otros campos opcionales con variaciones
+        const firstName = findColumn(row, [
+          'firstName', 'first_name', 'FirstName', 'First Name', 
+          'nombre', 'Nombre', 'name', 'Name'
+        ]);
+        
+        const lastName = findColumn(row, [
+          'lastName', 'last_name', 'LastName', 'Last Name',
+          'apellido', 'Apellido', 'surname', 'Surname'
+        ]);
+        
+        const phone = findColumn(row, [
+          'phone', 'Phone', 'PHONE', 'telefono', 'teléfono', 
+          'Telefono', 'Teléfono', 'mobile', 'cel', 'celular'
+        ]);
+        
+        // Buscar o crear customer
+        let customer = await Customer.findOne({ 
+          email: email.toLowerCase().trim() 
         });
         
-        await list.addMembers(customerIds);
-        console.log(`✅ Lista creada: ${list.name} (${list.memberCount} miembros)`);
-      }
-      
-      res.json({
-        success: true,
-        list,
-        stats: {
-          ...stats,
-          totalMembers: list.memberCount
+        if (!customer) {
+          customer = await Customer.create({
+            email: email.toLowerCase().trim(),
+            firstName: firstName.trim(),
+            lastName: lastName.trim(),
+            phone: phone.trim(),
+            source: 'csv_import'
+          });
+          stats.created++;
+          console.log(`✨ Cliente creado: ${email}`);
+        } else {
+          // Actualizar campos si están vacíos y vienen en el CSV
+          let updated = false;
+          if (!customer.firstName && firstName) {
+            customer.firstName = firstName.trim();
+            updated = true;
+          }
+          if (!customer.lastName && lastName) {
+            customer.lastName = lastName.trim();
+            updated = true;
+          }
+          if (!customer.phone && phone) {
+            customer.phone = phone.trim();
+            updated = true;
+          }
+          if (updated) {
+            await customer.save();
+            console.log(`🔄 Cliente actualizado: ${email}`);
+          }
+          stats.found++;
         }
+        
+        customerIds.push(customer._id);
+        
+      } catch (error) {
+        console.error('Error procesando fila:', error.message);
+        stats.errors++;
+      }
+    }
+    
+    console.log(`✅ Procesamiento completado:`);
+    console.log(`   - Creados: ${stats.created}`);
+    console.log(`   - Encontrados: ${stats.found}`);
+    console.log(`   - Errores: ${stats.errors}`);
+    console.log(`   - Saltados (sin email): ${stats.skipped}`);
+    
+    if (customerIds.length === 0) {
+      return res.status(400).json({ 
+        error: 'No se pudieron procesar emails del CSV',
+        stats
+      });
+    }
+    
+    // Crear o actualizar lista
+    let list = await List.findOne({ name });
+    
+    if (list) {
+      // Actualizar lista existente
+      await list.addMembers(customerIds);
+      console.log(`🔄 Lista actualizada: ${list.name} (${list.memberCount} miembros)`);
+    } else {
+      // Crear nueva lista
+      list = await List.create({
+        name,
+        description: description || `Importada desde CSV`,
+        members: [],
+        memberCount: 0
       });
       
-    } catch (error) {
-      console.error('Error importando CSV:', error);
-      res.status(500).json({ error: error.message });
+      await list.addMembers(customerIds);
+      console.log(`✅ Lista creada: ${list.name} (${list.memberCount} miembros)`);
     }
+    
+    res.json({
+      success: true,
+      list,
+      stats: {
+        ...stats,
+        totalMembers: list.memberCount
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error importando CSV:', error);
+    res.status(500).json({ error: error.message });
   }
+}
 
   // Agregar múltiples miembros por email (bulk)
   async addMembersByEmail(req, res) {
