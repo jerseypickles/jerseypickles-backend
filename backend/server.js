@@ -8,11 +8,10 @@ const mongoose = require('mongoose');
 const connectDB = require('./src/config/database');
 const errorHandler = require('./src/middleware/errorHandler');
 const { apiLimiter } = require('./src/middleware/rateLimiter');
-const { closeQueue } = require('./src/jobs/emailQueue'); // ✅ AGREGAR
+const { closeQueue } = require('./src/jobs/emailQueue');
 
 const app = express();
 
-// ✅ CAMBIAR DE true A 1 para evitar error de rate limiter
 app.set('trust proxy', 1);
 
 // Conectar a MongoDB
@@ -63,7 +62,7 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
-// ✅ AUMENTAR LÍMITE A 10MB PARA SOPORTAR IMÁGENES BASE64
+// ✅ AUMENTAR LÍMITE A 10MB PARA SOPORTAR CSV E IMÁGENES
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
@@ -98,6 +97,7 @@ app.get('/', (req, res) => {
       orders: '/api/orders',
       segments: '/api/segments',
       campaigns: '/api/campaigns',
+      lists: '/api/lists', // ✅ NUEVO
       webhooks: '/api/webhooks',
       tracking: '/api/track',
       analytics: '/api/analytics'
@@ -114,6 +114,7 @@ app.use('/api/customers', require('./src/routes/customers'));
 app.use('/api/orders', require('./src/routes/orders'));
 app.use('/api/segments', require('./src/routes/segments'));
 app.use('/api/campaigns', require('./src/routes/campaigns'));
+app.use('/api/lists', require('./src/routes/lists')); // ✅ NUEVO
 app.use('/api/track', require('./src/routes/tracking'));
 app.use('/api/analytics', require('./src/routes/analytics'));
 app.use('/api/upload', require('./src/routes/upload'));
