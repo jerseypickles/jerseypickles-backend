@@ -92,7 +92,7 @@ class CampaignsController {
         previewText,
         segment: segmentId,
         fromName: fromName || 'Jersey Pickles',
-        fromEmail: fromEmail || 'orders@jerseypickles.com',
+        fromEmail: fromEmail || 'info@jerseypickles.com',
         replyTo,
         scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
         tags,
