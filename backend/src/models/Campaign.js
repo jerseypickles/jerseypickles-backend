@@ -62,7 +62,7 @@ const campaignSchema = new mongoose.Schema({
   },
   fromEmail: {
     type: String,
-    default: 'orders@jerseypickles.com'
+    default: 'info@jerseypickles.com'
   },
   replyTo: String,
   
