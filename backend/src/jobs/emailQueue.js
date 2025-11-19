@@ -4,9 +4,9 @@ const emailService = require('../services/emailService');
 const Campaign = require('../models/Campaign');
 const EmailEvent = require('../models/EmailEvent');
 
-// Crear cola con configuración para Upstash
 let emailQueue;
 let isQueueReady = false;
+let processorInitialized = false;
 
 async function initializeQueue() {
   try {
@@ -17,47 +17,27 @@ async function initializeQueue() {
       return null;
     }
 
-    console.log('🔄 Conectando a Upstash Redis...');
+    console.log('🔄 Inicializando Bull Queue con Upstash Redis...');
     
-    // ✅ CONFIGURACIÓN CORRECTA para Bull + Upstash
+    // ✅ CONFIGURACIÓN CORRECTA SEGÚN DOCUMENTACIÓN DE UPSTASH
     const queueOptions = {
-      redis: {
-        // ✅ CRÍTICO: enableOfflineQueue debe estar aquí
-        enableOfflineQueue: true,
-        
-        // ✅ TLS para Upstash
-        tls: redisUrl.includes('upstash.io') ? {
-          rejectUnauthorized: false
-        } : undefined,
-        
-        // ✅ TIMEOUTS
-        connectTimeout: 10000,
-        commandTimeout: 5000,
-        keepAlive: 30000,
-        
-        // ✅ ESTRATEGIA DE RECONEXIÓN
-        retryStrategy: (times) => {
-          if (times > 5) {
-            console.error('❌ Máximo de reintentos alcanzado');
-            return null;
-          }
-          const delay = Math.min(times * 1000, 5000);
-          console.log(`🔄 Reintentando conexión Redis (${times}/5) en ${delay}ms...`);
-          return delay;
-        },
-        
-        // ✅ CONFIGURACIÓN ADICIONAL
-        maxRetriesPerRequest: 3,
-        enableReadyCheck: true,
-        lazyConnect: false,
-        
-        // ✅ MANEJO DE ERRORES
-        reconnectOnError: (err) => {
-          console.error('❌ Redis error:', err.message);
-          return true; // Intentar reconectar
+      redis: redisUrl,
+      // ✅ Upstash requiere TLS
+      ...(redisUrl.includes('upstash.io') && {
+        redis: {
+          tls: {}
         }
+      }),
+      // ✅ CRITICAL: Settings específicos para Upstash
+      settings: {
+        stalledInterval: 300000,  // 5 minutos - Upstash necesita intervalos largos
+        guardInterval: 300000,    // 5 minutos - Reducir llamadas a Redis
+        drainDelay: 300,          // Timeout cuando queue está vacía
+        lockDuration: 30000,
+        lockRenewTime: 15000,
+        maxStalledCount: 1,
+        retryProcessDelay: 5000
       },
-      
       defaultJobOptions: {
         attempts: 3,
         backoff: {
@@ -73,35 +53,76 @@ async function initializeQueue() {
         },
         timeout: 30000
       },
-      
       limiter: {
         max: 100,
         duration: 60000
-      },
-      
-      settings: {
-        lockDuration: 30000,
-        lockRenewTime: 15000,
-        stalledInterval: 30000,
-        maxStalledCount: 1,
-        guardInterval: 5000
       }
     };
     
-    // ✅ CREAR QUEUE
-    emailQueue = new Queue('email-sending', redisUrl, queueOptions);
+    emailQueue = new Queue('email-sending', queueOptions);
     
-    // ✅ ESPERAR A QUE ESTÉ LISTA antes de procesar
-    await emailQueue.isReady();
-    
-    console.log('✅ Redis conectado y listo');
-    isQueueReady = true;
-    
-    // ✅ AHORA SÍ inicializar el processor
-    setupProcessor();
-    setupEventListeners();
-    
-    return emailQueue;
+    // ✅ ESPERAR A QUE REDIS ESTÉ READY
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Redis connection timeout after 10s'));
+      }, 10000);
+      
+      // ✅ Event listeners ANTES de isReady()
+      emailQueue.on('error', (error) => {
+        console.error('❌ Queue error:', error.message);
+        isQueueReady = false;
+      });
+      
+      // ✅ Escuchar el evento 'ready' del cliente Redis interno
+      if (emailQueue.client) {
+        emailQueue.client.once('ready', () => {
+          clearTimeout(timeout);
+          isQueueReady = true;
+          console.log('✅ Redis connected and ready');
+          
+          // ✅ SOLO AHORA inicializar el processor
+          if (!processorInitialized) {
+            setupProcessor();
+            setupEventListeners();
+            processorInitialized = true;
+          }
+          
+          resolve(emailQueue);
+        });
+        
+        emailQueue.client.on('error', (err) => {
+          console.error('❌ Redis client error:', err.message);
+          isQueueReady = false;
+        });
+        
+        emailQueue.client.on('end', () => {
+          console.log('⚠️  Redis connection closed');
+          isQueueReady = false;
+        });
+        
+        emailQueue.client.on('reconnecting', () => {
+          console.log('🔄 Reconnecting to Redis...');
+          isQueueReady = false;
+        });
+      } else {
+        // Fallback si no hay acceso al client
+        emailQueue.isReady()
+          .then(() => {
+            clearTimeout(timeout);
+            isQueueReady = true;
+            console.log('✅ Queue ready');
+            
+            if (!processorInitialized) {
+              setupProcessor();
+              setupEventListeners();
+              processorInitialized = true;
+            }
+            
+            resolve(emailQueue);
+          })
+          .catch(reject);
+      }
+    });
     
   } catch (error) {
     console.error('❌ Error inicializando queue:', error.message);
@@ -113,10 +134,12 @@ async function initializeQueue() {
 
 // ✅ CONFIGURAR PROCESSOR solo después de que Redis esté listo
 function setupProcessor() {
-  if (!emailQueue || !isQueueReady) {
-    console.warn('⚠️  No se puede inicializar processor - Queue no está lista');
+  if (!emailQueue) {
+    console.warn('⚠️  No se puede inicializar processor - Queue no existe');
     return;
   }
+  
+  console.log('🔧 Configurando processor...');
   
   emailQueue.process(20, async (job) => {
     const { campaignId, customer, emailData } = job.data;
@@ -153,7 +176,7 @@ function setupProcessor() {
             console.log(`\n🎉 Campaña ${campaignId} completada!\n`);
           }
         } catch (err) {
-          // Ignorar error de status check
+          // Ignorar errores de status check
         }
         
         return { success: true, email: customer.email, id: result.id };
@@ -187,14 +210,8 @@ function setupProcessor() {
   console.log('✅ Email processor iniciado (20 concurrentes)');
 }
 
-// ✅ CONFIGURAR EVENT LISTENERS
 function setupEventListeners() {
   if (!emailQueue) return;
-  
-  emailQueue.on('error', (error) => {
-    console.error('❌ Queue error:', error.message);
-    isQueueReady = false;
-  });
   
   emailQueue.on('completed', (job) => {
     console.log(`✅ Job ${job.id} completado`);
@@ -207,39 +224,18 @@ function setupEventListeners() {
   emailQueue.on('stalled', (job) => {
     console.warn(`⚠️  Job ${job.id} stalled`);
   });
-  
-  // ✅ Event listeners del cliente Redis
-  if (emailQueue.client) {
-    emailQueue.client.on('connect', () => {
-      console.log('🔗 Redis conectado');
-    });
-    
-    emailQueue.client.on('ready', () => {
-      console.log('✅ Redis listo');
-      isQueueReady = true;
-    });
-    
-    emailQueue.client.on('reconnecting', () => {
-      console.log('🔄 Reconectando a Redis...');
-      isQueueReady = false;
-    });
-    
-    emailQueue.client.on('error', (err) => {
-      console.error('❌ Redis client error:', err.message);
-      isQueueReady = false;
-    });
-    
-    emailQueue.client.on('end', () => {
-      console.log('⚠️  Conexión Redis cerrada');
-      isQueueReady = false;
-    });
-  }
 }
 
-// ✅ INICIALIZAR al cargar el módulo
-initializeQueue().catch(err => {
-  console.error('❌ Failed to initialize queue:', err.message);
-});
+// ✅ INICIALIZAR de forma asíncrona
+initializeQueue()
+  .then(() => {
+    console.log('✅ Email queue initialized with Upstash Redis');
+  })
+  .catch(err => {
+    console.error('❌ Failed to initialize queue:', err.message);
+    emailQueue = null;
+    isQueueReady = false;
+  });
 
 // Función helper para agregar emails a la cola
 async function addEmailsToQueue(emails, campaignId) {
@@ -280,7 +276,7 @@ async function addEmailsToQueue(emails, campaignId) {
   };
 }
 
-// ✅ getQueueStatus MEJORADO
+// ✅ getQueueStatus OPTIMIZADO
 async function getQueueStatus() {
   if (!emailQueue) {
     return { 
@@ -311,7 +307,6 @@ async function getQueueStatus() {
   }
   
   try {
-    // ✅ TIMEOUT de 3 segundos
     const timeout = new Promise((_, reject) => 
       setTimeout(() => reject(new Error('Redis timeout')), 3000)
     );
@@ -353,7 +348,6 @@ async function getQueueStatus() {
   }
 }
 
-// Pausar cola
 async function pauseQueue() {
   if (!emailQueue || !isQueueReady) {
     return { success: false, error: 'Queue not available' };
@@ -369,7 +363,6 @@ async function pauseQueue() {
   }
 }
 
-// Resumir cola
 async function resumeQueue() {
   if (!emailQueue || !isQueueReady) {
     return { success: false, error: 'Queue not available' };
@@ -385,7 +378,6 @@ async function resumeQueue() {
   }
 }
 
-// Limpiar trabajos completados/fallidos
 async function cleanQueue() {
   if (!emailQueue || !isQueueReady) {
     return { success: false, error: 'Queue not available' };
@@ -405,7 +397,6 @@ async function cleanQueue() {
   }
 }
 
-// ✅ GRACEFUL SHUTDOWN
 async function closeQueue() {
   if (emailQueue) {
     console.log('🔄 Cerrando queue...');
