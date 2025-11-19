@@ -8,66 +8,108 @@ const EmailEvent = require('../models/EmailEvent');
 let emailQueue;
 
 try {
-  const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+  const redisUrl = process.env.REDIS_URL;
   
-  // ✅ CONFIGURACIÓN OPTIMIZADA para Upstash
-  const redisConfig = {
-    redis: {
-      // Si es Upstash, parsear URL y configurar TLS + timeouts
-      ...(redisUrl.includes('upstash.io') ? {
-        port: parseInt(redisUrl.match(/:(\d+)/)?.[1]) || 6379,
-        host: redisUrl.match(/@([^:]+)/)?.[1],
-        password: redisUrl.match(/:\/\/[^:]*:([^@]+)/)?.[1],
-        tls: {
+  if (!redisUrl) {
+    console.warn('⚠️  REDIS_URL no configurado - Queue no disponible');
+    emailQueue = null;
+  } else {
+    console.log('🔄 Conectando a Redis...');
+    
+    // ✅ CONFIGURACIÓN CORRECTA para Upstash con Bull
+    emailQueue = new Queue('email-sending', redisUrl, {
+      redis: {
+        // ✅ Upstash requiere TLS
+        tls: redisUrl.includes('upstash.io') ? {
           rejectUnauthorized: false
-        },
-        // ✅ TIMEOUTS CRÍTICOS para evitar 499
-        connectTimeout: 5000,      // 5s para conectar
-        commandTimeout: 5000,      // 5s por comando
-        keepAlive: 30000,          // Keep alive cada 30s
+        } : undefined,
+        
+        // ✅ TIMEOUTS y RECONEXIÓN
+        connectTimeout: 10000,
+        commandTimeout: 5000,
+        keepAlive: 30000,
+        
+        // ✅ ESTRATEGIA DE REINTENTOS
         retryStrategy: (times) => {
-          if (times > 3) return null; // Máximo 3 reintentos
-          return Math.min(times * 1000, 3000);
+          const delay = Math.min(times * 500, 3000);
+          console.log(`🔄 Reintentando conexión Redis (${times})...`);
+          return delay;
         },
-        enableOfflineQueue: false, // No encolar si está offline
-        maxRetriesPerRequest: 2    // Máximo 2 reintentos por request
-      } : redisUrl) // Si no es Upstash, usar URL directa
-    },
-    defaultJobOptions: {
-      attempts: 3,
-      backoff: {
-        type: 'exponential',
-        delay: 2000
+        
+        // ✅ CRÍTICO: Habilitar offline queue para evitar crashes
+        enableOfflineQueue: true,
+        
+        // ✅ REINTENTOS POR REQUEST
+        maxRetriesPerRequest: 3,
+        
+        // ✅ ENABLE READY CHECK
+        enableReadyCheck: true,
+        
+        // ✅ LAZY CONNECT (conectar cuando se use)
+        lazyConnect: false
       },
-      removeOnComplete: true,
-      removeOnFail: false,
-      timeout: 30000
-    },
-    limiter: {
-      max: 100,
-      duration: 60000
-    },
-    // ✅ SETTINGS ADICIONALES
-    settings: {
-      lockDuration: 30000,
-      lockRenewTime: 15000,
-      stalledInterval: 30000,
-      maxStalledCount: 1,
-      guardInterval: 5000
-    }
-  };
-  
-  emailQueue = new Queue('email-sending', redisConfig);
-  
-  // ✅ VERIFICAR CONEXIÓN al iniciar
-  emailQueue.isReady()
-    .then(() => {
-      console.log('✅ Email queue initialized with Upstash Redis');
-    })
-    .catch(err => {
-      console.error('❌ Queue connection failed:', err.message);
+      
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 2000
+        },
+        removeOnComplete: {
+          age: 3600 // Mantener 1 hora
+        },
+        removeOnFail: {
+          age: 86400 // Mantener 24 horas
+        },
+        timeout: 30000
+      },
+      
+      limiter: {
+        max: 100,
+        duration: 60000
+      },
+      
+      settings: {
+        lockDuration: 30000,
+        lockRenewTime: 15000,
+        stalledInterval: 30000,
+        maxStalledCount: 1,
+        guardInterval: 5000
+      }
     });
     
+    // ✅ EVENT LISTENERS PARA CONEXIÓN
+    emailQueue.on('error', (error) => {
+      console.error('❌ Queue error:', error.message);
+    });
+    
+    emailQueue.client.on('connect', () => {
+      console.log('✅ Redis conectado');
+    });
+    
+    emailQueue.client.on('ready', () => {
+      console.log('✅ Redis listo');
+    });
+    
+    emailQueue.client.on('reconnecting', () => {
+      console.log('🔄 Reconectando a Redis...');
+    });
+    
+    emailQueue.client.on('end', () => {
+      console.log('⚠️  Conexión Redis cerrada');
+    });
+    
+    // ✅ VERIFICAR CONEXIÓN
+    emailQueue.isReady()
+      .then(() => {
+        console.log('✅ Email queue initialized with Upstash Redis');
+      })
+      .catch((err) => {
+        console.error('❌ Queue initialization failed:', err.message);
+        emailQueue = null;
+      });
+  }
+  
 } catch (error) {
   console.error('❌ Redis connection error:', error.message);
   console.warn('⚠️  Email queue NOT available - check REDIS_URL');
@@ -100,14 +142,18 @@ if (emailQueue) {
         
         console.log(`✅ [${job.id}] Enviado: ${customer.email}`);
         
-        // Verificar si es el último job de la campaña
-        const queueStatus = await emailQueue.getJobCounts();
-        if (queueStatus.waiting === 0 && queueStatus.active <= 1) {
-          await Campaign.findByIdAndUpdate(campaignId, {
-            status: 'sent',
-            sentAt: new Date()
-          });
-          console.log(`\n🎉 Campaña ${campaignId} completada!\n`);
+        // Verificar si es el último job
+        try {
+          const queueStatus = await emailQueue.getJobCounts();
+          if (queueStatus.waiting === 0 && queueStatus.active <= 1) {
+            await Campaign.findByIdAndUpdate(campaignId, {
+              status: 'sent',
+              sentAt: new Date()
+            });
+            console.log(`\n🎉 Campaña ${campaignId} completada!\n`);
+          }
+        } catch (err) {
+          console.error('Error checking queue status:', err.message);
         }
         
         return { success: true, email: customer.email, id: result.id };
@@ -148,7 +194,7 @@ if (emailQueue) {
   });
   
   emailQueue.on('stalled', (job) => {
-    console.warn(`⚠️  Job ${job.id} stalled - reintentando...`);
+    console.warn(`⚠️  Job ${job.id} stalled`);
   });
 }
 
@@ -191,8 +237,9 @@ async function addEmailsToQueue(emails, campaignId) {
   };
 }
 
-// ✅ OPTIMIZADO: getQueueStatus con timeout y una sola llamada
+// ✅ getQueueStatus MEJORADO con mejor manejo de errores
 async function getQueueStatus() {
+  // Si emailQueue es null, retornar offline inmediatamente
   if (!emailQueue) {
     return { 
       available: false,
@@ -203,17 +250,22 @@ async function getQueueStatus() {
       delayed: 0,
       paused: false,
       total: 0,
-      error: 'Redis queue no disponible' 
+      error: 'Redis queue no configurado - verifica REDIS_URL' 
     };
   }
   
   try {
-    // ✅ TIMEOUT de 5 segundos para evitar bloqueos
+    // ✅ TIMEOUT de 3 segundos (más corto)
     const timeout = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Redis timeout')), 5000)
+      setTimeout(() => reject(new Error('Redis timeout')), 3000)
     );
     
-    // ✅ UNA SOLA LLAMADA getJobCounts() en lugar de 6 llamadas individuales
+    // ✅ Verificar que el cliente esté conectado
+    if (!emailQueue.client || emailQueue.client.status !== 'ready') {
+      throw new Error('Redis no está listo');
+    }
+    
+    // ✅ UNA SOLA LLAMADA
     const countsPromise = emailQueue.getJobCounts();
     const pausedPromise = emailQueue.isPaused();
     
@@ -237,7 +289,6 @@ async function getQueueStatus() {
   } catch (error) {
     console.error('Queue status error:', error.message);
     
-    // ✅ RETORNAR ESTADO OFFLINE en lugar de lanzar error
     return {
       available: false,
       waiting: 0,
@@ -248,8 +299,8 @@ async function getQueueStatus() {
       paused: false,
       total: 0,
       error: error.message === 'Redis timeout' 
-        ? 'Redis timeout - conexión muy lenta' 
-        : error.message
+        ? 'Redis timeout (>3s)' 
+        : `Redis error: ${error.message}`
     };
   }
 }
