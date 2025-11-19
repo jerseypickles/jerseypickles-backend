@@ -22,10 +22,51 @@ connectDB();
 // Seguridad y compresión
 app.use(helmet());
 app.use(compression());
-app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
-  credentials: true
-}));
+
+// 🆕 CONFIGURACIÓN CORS MEJORADA
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Permitir requests sin origin (como Postman, curl, mobile apps)
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    const allowedOrigins = [
+      'http://localhost:5173',
+      'http://localhost:3000',
+      'http://localhost:5174',
+      'https://jerseypickles.com',
+      'https://www.jerseypickles.com'
+    ];
+    
+    // Regex para permitir TODOS los subdominios de Vercel
+    // Esto permite tanto production como preview deployments
+    const vercelPatterns = [
+      /^https:\/\/jerseypickles-frontend.*\.vercel\.app$/,
+      /^https:\/\/.*-jerseypickles-projects\.vercel\.app$/
+    ];
+    
+    // Verificar si el origin está en la lista permitida
+    const isAllowedOrigin = allowedOrigins.includes(origin);
+    
+    // Verificar si el origin coincide con algún patrón de Vercel
+    const isVercelDomain = vercelPatterns.some(pattern => pattern.test(origin));
+    
+    if (isAllowedOrigin || isVercelDomain) {
+      callback(null, true);
+    } else {
+      console.log(`❌ CORS blocked origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  maxAge: 600 // Cache preflight por 10 minutos
+};
+
+app.use(cors(corsOptions));
 
 // ⚠️ CRÍTICO: Raw body para webhooks DEBE ir ANTES de express.json()
 // Esto captura el raw body solo para /api/webhooks
@@ -116,7 +157,7 @@ app.get('/', (req, res) => {
 // Auth (sin autenticación requerida)
 app.use('/api/auth', require('./src/routes/auth'));
 
-// 🆕 AGREGAR ESTA LÍNEA:
+// Test endpoints
 app.use('/api/test', require('./src/routes/test'));
 
 // Webhooks (validación propia de Shopify)
