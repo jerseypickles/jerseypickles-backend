@@ -262,7 +262,9 @@ class CampaignsController {
           subject: `[TEST] ${campaign.subject}`,
           html,
           from: `${campaign.fromName} <${campaign.fromEmail}>`,
-          replyTo: campaign.replyTo
+          replyTo: campaign.replyTo,
+          campaignId: campaign._id,
+          customerId: testCustomer._id || 'test'
         });
         
         if (result.success) {
@@ -297,8 +299,8 @@ class CampaignsController {
           html,
           from: `${campaign.fromName} <${campaign.fromEmail}>`,
           replyTo: campaign.replyTo,
-          customerId: customer._id,
-          campaignId: campaign._id
+          campaignId: campaign._id,
+          customerId: customer._id
         };
       });
       
@@ -320,6 +322,7 @@ class CampaignsController {
               customer: customer._id,
               email: customer.email,
               eventType: 'sent',
+              source: 'custom',
               resendId: detail.id
             });
             sent++;
@@ -335,7 +338,7 @@ class CampaignsController {
       campaign.status = 'sent';
       campaign.sentAt = new Date();
       campaign.stats.sent = sent;
-      campaign.stats.delivered = sent; // Asumimos que si se envió, se entregó
+      campaign.stats.delivered = sent;
       campaign.updateRates();
       await campaign.save();
       
@@ -412,7 +415,7 @@ class CampaignsController {
     }
   }
 
-  // Estadísticas de una campaña
+  // 🆕 ESTADÍSTICAS DETALLADAS DE UNA CAMPAÑA
   async getStats(req, res) {
     try {
       const campaign = await Campaign.findById(req.params.id);
@@ -421,38 +424,160 @@ class CampaignsController {
         return res.status(404).json({ error: 'Campaña no encontrada' });
       }
       
-      // Obtener eventos agrupados
-      const eventStats = await EmailEvent.aggregate([
-        {
-          $match: { campaign: campaign._id }
-        },
-        {
-          $group: {
-            _id: '$eventType',
-            count: { $sum: 1 }
-          }
-        }
-      ]);
-      
-      // Últimos eventos
-      const recentEvents = await EmailEvent.find({ campaign: campaign._id })
+      // Obtener todos los eventos de esta campaña
+      const events = await EmailEvent.find({ campaign: req.params.id })
         .populate('customer', 'email firstName lastName')
-        .sort({ eventDate: -1 })
-        .limit(50);
+        .sort({ eventDate: -1 });
+      
+      // Calcular estadísticas por tipo de evento
+      const stats = {
+        sent: events.filter(e => e.eventType === 'sent').length,
+        delivered: events.filter(e => e.eventType === 'delivered').length,
+        opened: events.filter(e => e.eventType === 'opened').length,
+        clicked: events.filter(e => e.eventType === 'clicked').length,
+        bounced: events.filter(e => e.eventType === 'bounced').length,
+        complained: events.filter(e => e.eventType === 'complained').length,
+      };
+      
+      // Calcular tasas
+      const totalDelivered = stats.delivered || stats.sent || 1;
+      const rates = {
+        deliveryRate: stats.sent > 0 ? ((stats.delivered / stats.sent) * 100).toFixed(1) : '0.0',
+        openRate: totalDelivered > 0 ? ((stats.opened / totalDelivered) * 100).toFixed(1) : '0.0',
+        clickRate: stats.opened > 0 ? ((stats.clicked / stats.opened) * 100).toFixed(1) : '0.0',
+        bounceRate: stats.sent > 0 ? ((stats.bounced / stats.sent) * 100).toFixed(1) : '0.0',
+        clickToOpenRate: stats.opened > 0 ? ((stats.clicked / stats.opened) * 100).toFixed(1) : '0.0',
+      };
+      
+      // Stats por fuente (custom vs resend)
+      const statsBySource = {
+        custom: events.filter(e => e.source === 'custom').length,
+        resend: events.filter(e => e.source === 'resend').length,
+      };
+      
+      // Top links clickeados
+      const clickEvents = events.filter(e => e.eventType === 'clicked' && e.clickedUrl);
+      const linkCounts = {};
+      clickEvents.forEach(event => {
+        linkCounts[event.clickedUrl] = (linkCounts[event.clickedUrl] || 0) + 1;
+      });
+      const topLinks = Object.entries(linkCounts)
+        .map(([url, clicks]) => ({ url, clicks }))
+        .sort((a, b) => b.clicks - a.clicks)
+        .slice(0, 10);
+      
+      // Eventos recientes (últimos 50)
+      const recentEvents = events.slice(0, 50);
+      
+      // Timeline por día (últimos 7 días)
+      const last7Days = Array.from({ length: 7 }, (_, i) => {
+        const date = new Date();
+        date.setDate(date.getDate() - (6 - i));
+        date.setHours(0, 0, 0, 0);
+        return date;
+      });
+      
+      const timeline = last7Days.map(date => {
+        const nextDay = new Date(date);
+        nextDay.setDate(nextDay.getDate() + 1);
+        
+        const dayEvents = events.filter(e => {
+          const eventDate = new Date(e.eventDate);
+          return eventDate >= date && eventDate < nextDay;
+        });
+        
+        return {
+          date: date.toISOString().split('T')[0],
+          dateLabel: date.toLocaleDateString('es-ES', { month: 'short', day: 'numeric' }),
+          sent: dayEvents.filter(e => e.eventType === 'sent').length,
+          opened: dayEvents.filter(e => e.eventType === 'opened').length,
+          clicked: dayEvents.filter(e => e.eventType === 'clicked').length,
+          bounced: dayEvents.filter(e => e.eventType === 'bounced').length,
+        };
+      });
+      
+      // Clientes más activos (más opens + clicks)
+      const customerActivity = {};
+      events.forEach(event => {
+        if (event.customer && (event.eventType === 'opened' || event.eventType === 'clicked')) {
+          const customerId = event.customer._id.toString();
+          if (!customerActivity[customerId]) {
+            customerActivity[customerId] = {
+              customer: event.customer,
+              opens: 0,
+              clicks: 0,
+              total: 0
+            };
+          }
+          if (event.eventType === 'opened') customerActivity[customerId].opens++;
+          if (event.eventType === 'clicked') customerActivity[customerId].clicks++;
+          customerActivity[customerId].total++;
+        }
+      });
+      
+      const topCustomers = Object.values(customerActivity)
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 10);
       
       res.json({
         campaign: {
           id: campaign._id,
           name: campaign.name,
+          subject: campaign.subject,
           status: campaign.status,
-          stats: campaign.stats
+          sentAt: campaign.sentAt,
+          stats: campaign.stats,
         },
-        eventStats,
-        recentEvents
+        stats,
+        rates,
+        statsBySource,
+        topLinks,
+        topCustomers,
+        recentEvents,
+        timeline,
+        totalEvents: events.length,
       });
       
     } catch (error) {
       console.error('Error obteniendo stats de campaña:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // 🆕 OBTENER EVENTOS CON PAGINACIÓN Y FILTROS
+  async getEvents(req, res) {
+    try {
+      const { page = 1, limit = 50, eventType, source } = req.query;
+      
+      const campaign = await Campaign.findById(req.params.id);
+      if (!campaign) {
+        return res.status(404).json({ error: 'Campaña no encontrada' });
+      }
+      
+      const filter = { campaign: req.params.id };
+      if (eventType) filter.eventType = eventType;
+      if (source) filter.source = source;
+      
+      const events = await EmailEvent.find(filter)
+        .populate('customer', 'email firstName lastName')
+        .sort({ eventDate: -1 })
+        .limit(parseInt(limit))
+        .skip((parseInt(page) - 1) * parseInt(limit));
+      
+      const total = await EmailEvent.countDocuments(filter);
+      
+      res.json({
+        events,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          pages: Math.ceil(total / parseInt(limit)),
+        },
+      });
+      
+    } catch (error) {
+      console.error('Error obteniendo eventos:', error);
       res.status(500).json({ error: error.message });
     }
   }

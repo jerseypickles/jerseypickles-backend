@@ -16,6 +16,9 @@ router.get('/:id', campaignsController.getOne);
 // Estadísticas de una campaña
 router.get('/:id/stats', campaignsController.getStats);
 
+// Obtener eventos de una campaña
+router.get('/:id/events', campaignsController.getEvents);
+
 // ==================== CRUD (admin/manager) ====================
 
 // Crear campaña
