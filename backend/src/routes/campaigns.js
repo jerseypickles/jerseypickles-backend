@@ -7,10 +7,29 @@ const { auth, authorize } = require('../middleware/auth');
 // Aplicar autenticación a todas las rutas
 router.use(auth);
 
-// ==================== CONSULTAS (todos) ====================
+// ==================== RUTAS SIN PARÁMETROS (PRIMERO) ====================
 
 // Listar campañas
 router.get('/', campaignsController.list);
+
+// Crear campaña
+router.post('/', authorize('admin', 'manager'), campaignsController.create);
+
+// ==================== RUTAS ESPECÍFICAS (ANTES DE /:id) ====================
+
+// Queue management
+router.get('/queue/status', authorize('admin', 'manager'), campaignsController.getQueueStatus);
+router.post('/queue/pause', authorize('admin'), campaignsController.pauseQueue);
+router.post('/queue/resume', authorize('admin'), campaignsController.resumeQueue);
+router.post('/queue/clean', authorize('admin'), campaignsController.cleanQueue);
+
+// Crear desde template
+router.post('/from-template', authorize('admin', 'manager'), campaignsController.createFromTemplate);
+
+// Limpiar campañas borrador
+router.delete('/cleanup/drafts', authorize('admin'), campaignsController.cleanupDrafts);
+
+// ==================== RUTAS CON PARÁMETROS /:id (AL FINAL) ====================
 
 // Obtener una campaña
 router.get('/:id', campaignsController.getOne);
@@ -21,43 +40,16 @@ router.get('/:id/stats', campaignsController.getStats);
 // Obtener eventos de una campaña
 router.get('/:id/events', campaignsController.getEvents);
 
-// ==================== QUEUE MANAGEMENT (admin/manager) ====================
-
-// Obtener estado de la cola
-router.get('/queue/status', authorize('admin', 'manager'), campaignsController.getQueueStatus);
-
-// Pausar cola (útil para emergencias)
-router.post('/queue/pause', authorize('admin'), campaignsController.pauseQueue);
-
-// Resumir cola
-router.post('/queue/resume', authorize('admin'), campaignsController.resumeQueue);
-
-// Limpiar cola (jobs completados/fallidos)
-router.post('/queue/clean', authorize('admin'), campaignsController.cleanQueue);
-
-// ==================== CRUD (admin/manager) ====================
-
-// Crear campaña
-router.post('/', authorize('admin', 'manager'), campaignsController.create);
-
-// Crear desde template
-router.post('/from-template', authorize('admin', 'manager'), campaignsController.createFromTemplate);
-
 // Actualizar campaña
 router.put('/:id', authorize('admin', 'manager'), campaignsController.update);
 
 // Duplicar campaña
 router.post('/:id/duplicate', authorize('admin', 'manager'), campaignsController.duplicate);
 
-// Eliminar campaña
-router.delete('/:id', authorize('admin'), campaignsController.delete);
-
-// Limpiar campañas borrador (solo desarrollo/admin)
-router.delete('/cleanup/drafts', authorize('admin'), campaignsController.cleanupDrafts);
-
-// ==================== ENVÍO (admin/manager) ====================
-
 // Enviar campaña
 router.post('/:id/send', authorize('admin', 'manager'), campaignsController.send);
+
+// Eliminar campaña
+router.delete('/:id', authorize('admin'), campaignsController.delete);
 
 module.exports = router;
