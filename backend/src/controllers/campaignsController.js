@@ -283,8 +283,9 @@ class CampaignsController {
       
       const { emailQueue, addEmailsToQueue, isAvailable } = require('../jobs/emailQueue');
       
+      // ✅ CAMBIO CRÍTICO: Llamar isAvailable como función
       // Verificar que la cola esté disponible
-      if (!isAvailable) {
+      if (!isAvailable()) {  // ✅ CAMBIO AQUÍ: agregar ()
         console.warn('⚠️  Cola no disponible, usando envío directo limitado');
         
         const MAX_DIRECT_SEND = 50;
@@ -732,83 +733,83 @@ class CampaignsController {
     }
   }
 
-// ==================== QUEUE MANAGEMENT ====================
+  // ==================== QUEUE MANAGEMENT ====================
 
-// Obtener estado de la cola
-async getQueueStatus(req, res) {
-  try {
-    const { getQueueStatus } = require('../jobs/emailQueue');
-    const status = await getQueueStatus();
-    
-    // ✅ SIEMPRE responder, nunca fallar
-    res.json(status);
-  } catch (error) {
-    console.error('Error obteniendo estado de cola:', error);
-    
-    // ✅ Responder con estado offline en caso de error
-    res.json({
-      available: false,
-      waiting: 0,
-      active: 0,
-      completed: 0,
-      failed: 0,
-      delayed: 0,
-      paused: false,
-      total: 0,
-      error: error.message || 'Error obteniendo estado de la cola'
-    });
-  }
-}
-
-// Pausar cola
-async pauseQueue(req, res) {
-  try {
-    const { pauseQueue } = require('../jobs/emailQueue');
-    const result = await pauseQueue();
-    
-    if (result.success) {
-      res.json(result);
-    } else {
-      res.status(400).json(result);
+  // Obtener estado de la cola
+  async getQueueStatus(req, res) {
+    try {
+      const { getQueueStatus } = require('../jobs/emailQueue');
+      const status = await getQueueStatus();
+      
+      // ✅ SIEMPRE responder, nunca fallar
+      res.json(status);
+    } catch (error) {
+      console.error('Error obteniendo estado de cola:', error);
+      
+      // ✅ Responder con estado offline en caso de error
+      res.json({
+        available: false,
+        waiting: 0,
+        active: 0,
+        completed: 0,
+        failed: 0,
+        delayed: 0,
+        paused: false,
+        total: 0,
+        error: error.message || 'Error obteniendo estado de la cola'
+      });
     }
-  } catch (error) {
-    console.error('Error pausando cola:', error);
-    res.status(500).json({ success: false, error: error.message });
   }
-}
 
-// Resumir cola
-async resumeQueue(req, res) {
-  try {
-    const { resumeQueue } = require('../jobs/emailQueue');
-    const result = await resumeQueue();
-    
-    if (result.success) {
-      res.json(result);
-    } else {
-      res.status(400).json(result);
+  // Pausar cola
+  async pauseQueue(req, res) {
+    try {
+      const { pauseQueue } = require('../jobs/emailQueue');
+      const result = await pauseQueue();
+      
+      if (result.success) {
+        res.json(result);
+      } else {
+        res.status(400).json(result);
+      }
+    } catch (error) {
+      console.error('Error pausando cola:', error);
+      res.status(500).json({ success: false, error: error.message });
     }
-  } catch (error) {
-    console.error('Error resumiendo cola:', error);
-    res.status(500).json({ success: false, error: error.message });
   }
-}
 
-// Limpiar cola
-async cleanQueue(req, res) {
-  try {
-    const { cleanQueue } = require('../jobs/emailQueue');
-    const result = await cleanQueue();
-    
-    if (result.success) {
-      res.json(result);
-    } else {
-      res.status(400).json(result);
+  // Resumir cola
+  async resumeQueue(req, res) {
+    try {
+      const { resumeQueue } = require('../jobs/emailQueue');
+      const result = await resumeQueue();
+      
+      if (result.success) {
+        res.json(result);
+      } else {
+        res.status(400).json(result);
+      }
+    } catch (error) {
+      console.error('Error resumiendo cola:', error);
+      res.status(500).json({ success: false, error: error.message });
     }
-  } catch (error) {
-    console.error('Error limpiando cola:', error);
-    res.status(500).json({ success: false, error: error.message });
   }
+
+  // Limpiar cola
+  async cleanQueue(req, res) {
+    try {
+      const { cleanQueue } = require('../jobs/emailQueue');
+      const result = await cleanQueue();
+      
+      if (result.success) {
+        res.json(result);
+      } else {
+        res.status(400).json(result);
+      }
+    } catch (error) {
+      console.error('Error limpiando cola:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
   }
 }
 

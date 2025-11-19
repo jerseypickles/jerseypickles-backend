@@ -8,10 +8,12 @@ const mongoose = require('mongoose');
 const connectDB = require('./src/config/database');
 const errorHandler = require('./src/middleware/errorHandler');
 const { apiLimiter } = require('./src/middleware/rateLimiter');
+const { closeQueue } = require('./src/jobs/emailQueue'); // ✅ AGREGAR
 
 const app = express();
 
-app.set('trust proxy', true);
+// ✅ CAMBIAR DE true A 1 para evitar error de rate limiter
+app.set('trust proxy', 1);
 
 // Conectar a MongoDB
 connectDB();
@@ -148,6 +150,15 @@ const gracefulShutdown = async (signal) => {
   server.close(async () => {
     console.log('✅ HTTP server closed');
     
+    // ✅ CERRAR EMAIL QUEUE
+    try {
+      await closeQueue();
+      console.log('✅ Email queue closed');
+    } catch (err) {
+      console.error('❌ Error closing email queue:', err);
+    }
+    
+    // Cerrar MongoDB
     try {
       await mongoose.connection.close();
       console.log('✅ MongoDB connection closed');
@@ -159,24 +170,32 @@ const gracefulShutdown = async (signal) => {
     process.exit(0);
   });
   
+  // Timeout de 10 segundos
   setTimeout(() => {
     console.error('⚠️  Forcing shutdown after timeout');
     process.exit(1);
   }, 10000);
 };
 
+// ✅ SIGNALS para shutdown
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
+// ✅ UNHANDLED REJECTION - NO HACER SHUTDOWN en producción
 process.on('unhandledRejection', (err) => {
   console.error('❌ Unhandled Promise Rejection:', err);
-  if (process.env.NODE_ENV === 'production') {
-    gracefulShutdown('unhandledRejection');
-  }
+  console.error('Stack:', err.stack);
+  
+  // ✅ NO cerrar servidor - solo loggear el error
+  // El servidor debe seguir corriendo a pesar del error
 });
 
+// ✅ UNCAUGHT EXCEPTION - Este sí es crítico
 process.on('uncaughtException', (err) => {
   console.error('❌ Uncaught Exception:', err);
+  console.error('Stack:', err.stack);
+  
+  // ✅ Este sí debería cerrar el servidor porque es más grave
   gracefulShutdown('uncaughtException');
 });
 
