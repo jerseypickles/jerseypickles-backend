@@ -645,6 +645,24 @@ class CampaignsController {
       res.status(500).json({ error: error.message });
     }
   }
+
+  // 🆕 LIMPIAR CAMPAÑAS BORRADOR
+  async cleanupDrafts(req, res) {
+    try {
+      const result = await Campaign.deleteMany({ status: 'draft' });
+      console.log(`🗑️  ${result.deletedCount} campañas borrador eliminadas`);
+      
+      res.json({ 
+        success: true, 
+        message: `${result.deletedCount} campañas borrador eliminadas`,
+        deletedCount: result.deletedCount
+      });
+      
+    } catch (error) {
+      console.error('Error limpiando borradores:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
 }
 
 module.exports = new CampaignsController();

@@ -36,6 +36,9 @@ router.post('/:id/duplicate', authorize('admin', 'manager'), campaignsController
 // Eliminar campaña
 router.delete('/:id', authorize('admin'), campaignsController.delete);
 
+// 🆕 Limpiar campañas borrador (solo desarrollo/admin)
+router.delete('/cleanup/drafts', authorize('admin'), campaignsController.cleanupDrafts);
+
 // ==================== ENVÍO (admin/manager) ====================
 
 // Enviar campaña
