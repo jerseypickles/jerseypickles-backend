@@ -4,7 +4,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 
 class EmailService {
   constructor() {
-    this.fromEmail = 'Jersey Pickles <orders@jerseypickles.com>';
+    this.fromEmail = 'Jersey Pickles <info@jerseypickles.com>';
     this.appUrl = process.env.APP_URL;
   }
 
