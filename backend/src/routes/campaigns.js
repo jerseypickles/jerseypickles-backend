@@ -7,6 +7,8 @@ const { auth, authorize } = require('../middleware/auth');
 // Aplicar autenticación a todas las rutas
 router.use(auth);
 
+// ==================== CONSULTAS (todos) ====================
+
 // Listar campañas
 router.get('/', campaignsController.list);
 
@@ -18,6 +20,20 @@ router.get('/:id/stats', campaignsController.getStats);
 
 // Obtener eventos de una campaña
 router.get('/:id/events', campaignsController.getEvents);
+
+// ==================== QUEUE MANAGEMENT (admin/manager) ====================
+
+// Obtener estado de la cola
+router.get('/queue/status', authorize('admin', 'manager'), campaignsController.getQueueStatus);
+
+// Pausar cola (útil para emergencias)
+router.post('/queue/pause', authorize('admin'), campaignsController.pauseQueue);
+
+// Resumir cola
+router.post('/queue/resume', authorize('admin'), campaignsController.resumeQueue);
+
+// Limpiar cola (jobs completados/fallidos)
+router.post('/queue/clean', authorize('admin'), campaignsController.cleanQueue);
 
 // ==================== CRUD (admin/manager) ====================
 
@@ -36,7 +52,7 @@ router.post('/:id/duplicate', authorize('admin', 'manager'), campaignsController
 // Eliminar campaña
 router.delete('/:id', authorize('admin'), campaignsController.delete);
 
-// 🆕 Limpiar campañas borrador (solo desarrollo/admin)
+// Limpiar campañas borrador (solo desarrollo/admin)
 router.delete('/cleanup/drafts', authorize('admin'), campaignsController.cleanupDrafts);
 
 // ==================== ENVÍO (admin/manager) ====================

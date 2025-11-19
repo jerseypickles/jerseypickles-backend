@@ -6,7 +6,6 @@ const EmailEvent = require('../models/EmailEvent');
 const emailService = require('../services/emailService');
 const templateService = require('../services/templateService');
 const segmentationService = require('../services/segmentationService');
-const emailQueue = require('../jobs/emailQueue');
 
 class CampaignsController {
   
@@ -76,7 +75,8 @@ class CampaignsController {
         fromEmail,
         replyTo,
         scheduledAt,
-        tags
+        tags,
+        templateBlocks
       } = req.body;
       
       // Validar que el segmento existe
@@ -96,6 +96,7 @@ class CampaignsController {
         replyTo,
         scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
         tags,
+        templateBlocks: templateBlocks || [],
         'stats.totalRecipients': segment.customerCount
       });
       
@@ -135,7 +136,8 @@ class CampaignsController {
         fromEmail,
         replyTo,
         scheduledAt,
-        tags
+        tags,
+        templateBlocks
       } = req.body;
       
       if (name) campaign.name = name;
@@ -147,6 +149,7 @@ class CampaignsController {
       if (replyTo !== undefined) campaign.replyTo = replyTo;
       if (scheduledAt !== undefined) campaign.scheduledAt = scheduledAt ? new Date(scheduledAt) : null;
       if (tags) campaign.tags = tags;
+      if (templateBlocks) campaign.templateBlocks = templateBlocks;
       
       if (segmentId && segmentId !== campaign.segment.toString()) {
         const segment = await Segment.findById(segmentId);
@@ -235,16 +238,11 @@ class CampaignsController {
       
       console.log(`👥 Destinatarios: ${customers.length} clientes`);
       
-      // Actualizar estado de campaña
-      campaign.status = 'sending';
-      campaign.stats.totalRecipients = customers.length;
-      await campaign.save();
-      
       // Opciones de envío
       const { testMode = false, testEmail = null } = req.body;
       
+      // ==================== MODO TEST ====================
       if (testMode && testEmail) {
-        // MODO TEST: Enviar solo a email de prueba
         console.log(`🧪 MODO TEST: Enviando a ${testEmail}\n`);
         
         const testCustomer = customers[0] || { 
@@ -280,20 +278,118 @@ class CampaignsController {
         }
       }
       
-      // MODO PRODUCCIÓN: Envío masivo
-      console.log('🚀 Iniciando envío masivo...\n');
+      // ==================== MODO PRODUCCIÓN CON COLA ====================
+      console.log('🚀 Preparando envío con cola de Redis...\n');
+      
+      const { emailQueue, addEmailsToQueue, isAvailable } = require('../jobs/emailQueue');
+      
+      // Verificar que la cola esté disponible
+      if (!isAvailable) {
+        console.warn('⚠️  Cola no disponible, usando envío directo limitado');
+        
+        const MAX_DIRECT_SEND = 50;
+        if (customers.length > MAX_DIRECT_SEND) {
+          return res.status(400).json({
+            error: `Redis no está disponible. El envío directo está limitado a ${MAX_DIRECT_SEND} emails.`,
+            message: 'Configura Redis (REDIS_URL) para envíos masivos.',
+            customersCount: customers.length,
+            limit: MAX_DIRECT_SEND
+          });
+        }
+        
+        // Fallback: Envío directo sincrónico
+        console.log('⚠️  Enviando directamente (sin cola)...\n');
+        
+        const startTime = Date.now();
+        
+        campaign.status = 'sending';
+        await campaign.save();
+        
+        const emails = customers.map(customer => {
+          let html = campaign.htmlContent;
+          html = emailService.personalize(html, customer);
+          html = emailService.injectTracking(html, campaign._id, customer._id);
+          
+          return {
+            to: customer.email,
+            subject: campaign.subject,
+            html,
+            from: `${campaign.fromName} <${campaign.fromEmail}>`,
+            replyTo: campaign.replyTo,
+            campaignId: campaign._id,
+            customerId: customer._id
+          };
+        });
+        
+        const results = await emailService.sendBulkEmails(emails, {
+          chunkSize: 5,
+          delayBetweenChunks: 1000
+        });
+        
+        // Registrar eventos
+        let sent = 0;
+        let failed = 0;
+        
+        for (const detail of results.details) {
+          try {
+            const customer = customers.find(c => c.email === detail.email);
+            
+            if (detail.status === 'sent' && customer) {
+              await EmailEvent.create({
+                campaign: campaign._id,
+                customer: customer._id,
+                email: customer.email,
+                eventType: 'sent',
+                source: 'custom',
+                resendId: detail.id
+              });
+              sent++;
+            } else {
+              failed++;
+            }
+          } catch (error) {
+            console.error('Error registrando evento:', error.message);
+          }
+        }
+        
+        campaign.status = 'sent';
+        campaign.sentAt = new Date();
+        campaign.stats.sent = sent;
+        campaign.stats.delivered = sent;
+        campaign.stats.totalRecipients = customers.length;
+        campaign.updateRates();
+        await campaign.save();
+        
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        
+        console.log(`✅ Envío directo completado: ${sent} enviados, ${failed} fallidos (${duration}s)\n`);
+        
+        return res.json({
+          success: true,
+          campaign: campaign.toObject(),
+          results: { sent, failed, total: customers.length, duration: `${duration}s` },
+          warning: 'Enviado sin cola. Configura Redis para mejor rendimiento.'
+        });
+      }
+      
+      // ==================== ENVÍO CON COLA (Método preferido) ====================
+      console.log('📥 Agregando emails a la cola de Redis...\n');
       
       const startTime = Date.now();
-      let sent = 0;
-      let failed = 0;
       
-      // Preparar emails
+      // Preparar emails para la cola
       const emails = customers.map(customer => {
         let html = campaign.htmlContent;
         html = emailService.personalize(html, customer);
         html = emailService.injectTracking(html, campaign._id, customer._id);
         
         return {
+          customer: {
+            _id: customer._id,
+            email: customer.email,
+            firstName: customer.firstName,
+            lastName: customer.lastName
+          },
           to: customer.email,
           subject: campaign.subject,
           html,
@@ -304,70 +400,41 @@ class CampaignsController {
         };
       });
       
-      // Enviar en lotes de 10 con delays
-      const results = await emailService.sendBulkEmails(emails, {
-        chunkSize: 10,
-        delayBetweenChunks: 1000
-      });
+      // Agregar a la cola
+      const queueResult = await addEmailsToQueue(emails, campaign._id);
       
-      // Registrar eventos
-      for (const detail of results.details) {
-        try {
-          const customer = customers.find(c => c.email === detail.email);
-          
-          if (detail.status === 'sent' && customer) {
-            // Registrar como enviado
-            await EmailEvent.create({
-              campaign: campaign._id,
-              customer: customer._id,
-              email: customer.email,
-              eventType: 'sent',
-              source: 'custom',
-              resendId: detail.id
-            });
-            sent++;
-          } else {
-            failed++;
-          }
-        } catch (error) {
-          console.error('Error registrando evento:', error.message);
-        }
-      }
-      
-      // Actualizar estadísticas de campaña
-      campaign.status = 'sent';
-      campaign.sentAt = new Date();
-      campaign.stats.sent = sent;
-      campaign.stats.delivered = sent;
-      campaign.updateRates();
+      // Actualizar campaña a "sending"
+      campaign.status = 'sending';
+      campaign.stats.totalRecipients = customers.length;
       await campaign.save();
       
       const duration = ((Date.now() - startTime) / 1000).toFixed(2);
       
       console.log('\n╔═══════════════════════════════════════════════╗');
-      console.log('║  ✅ CAMPAÑA ENVIADA                           ║');
+      console.log('║  ✅ EMAILS AGREGADOS A LA COLA                ║');
       console.log('╚═══════════════════════════════════════════════╝');
-      console.log(`📊 Total destinatarios: ${customers.length}`);
-      console.log(`✅ Enviados: ${sent}`);
-      console.log(`❌ Fallidos: ${failed}`);
-      console.log(`⏱️  Tiempo: ${duration}s`);
+      console.log(`📊 Total emails en cola: ${queueResult.total}`);
+      console.log(`⏱️  Tiempo de encolado: ${duration}s`);
+      console.log(`🔄 Los emails se enviarán en segundo plano`);
+      console.log(`📈 Rate: 100 emails/minuto (configurable)`);
+      console.log(`🔄 Retry: 3 intentos automáticos por email`);
       console.log('═══════════════════════════════════════════════\n');
       
       res.json({
         success: true,
         campaign: campaign.toObject(),
-        results: {
-          sent,
-          failed,
-          total: customers.length,
-          duration: `${duration}s`
+        queue: {
+          totalQueued: queueResult.total,
+          estimatedTime: `${Math.ceil(queueResult.total / 100)} minutos`,
+          message: 'Emails agregados a la cola. Se están enviando en segundo plano.',
+          checkStatusAt: `/api/campaigns/${campaign._id}/stats`
         }
       });
       
     } catch (error) {
       console.error('\n❌ Error enviando campaña:', error);
       
-      // Marcar campaña como fallida
+      // Marcar campaña como draft si falla
       try {
         await Campaign.findByIdAndUpdate(req.params.id, {
           status: 'draft'
@@ -402,6 +469,7 @@ class CampaignsController {
         fromEmail: original.fromEmail,
         replyTo: original.replyTo,
         tags: original.tags,
+        templateBlocks: original.templateBlocks || [],
         status: 'draft'
       });
       
@@ -415,7 +483,7 @@ class CampaignsController {
     }
   }
 
-  // 🆕 ESTADÍSTICAS DETALLADAS DE UNA CAMPAÑA
+  // ESTADÍSTICAS DETALLADAS DE UNA CAMPAÑA
   async getStats(req, res) {
     try {
       const campaign = await Campaign.findById(req.params.id);
@@ -544,7 +612,7 @@ class CampaignsController {
     }
   }
 
-  // 🆕 OBTENER EVENTOS CON PAGINACIÓN Y FILTROS
+  // OBTENER EVENTOS CON PAGINACIÓN Y FILTROS
   async getEvents(req, res) {
     try {
       const { page = 1, limit = 50, eventType, source } = req.query;
@@ -646,7 +714,7 @@ class CampaignsController {
     }
   }
 
-  // 🆕 LIMPIAR CAMPAÑAS BORRADOR
+  // LIMPIAR CAMPAÑAS BORRADOR
   async cleanupDrafts(req, res) {
     try {
       const result = await Campaign.deleteMany({ status: 'draft' });
@@ -660,6 +728,60 @@ class CampaignsController {
       
     } catch (error) {
       console.error('Error limpiando borradores:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // ==================== QUEUE MANAGEMENT ====================
+
+  // Obtener estado de la cola
+  async getQueueStatus(req, res) {
+    try {
+      const { getQueueStatus } = require('../jobs/emailQueue');
+      const status = await getQueueStatus();
+      
+      res.json(status);
+    } catch (error) {
+      console.error('Error obteniendo estado de cola:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // Pausar cola
+  async pauseQueue(req, res) {
+    try {
+      const { pauseQueue } = require('../jobs/emailQueue');
+      const result = await pauseQueue();
+      
+      res.json(result);
+    } catch (error) {
+      console.error('Error pausando cola:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // Resumir cola
+  async resumeQueue(req, res) {
+    try {
+      const { resumeQueue } = require('../jobs/emailQueue');
+      const result = await resumeQueue();
+      
+      res.json(result);
+    } catch (error) {
+      console.error('Error resumiendo cola:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // Limpiar cola
+  async cleanQueue(req, res) {
+    try {
+      const { cleanQueue } = require('../jobs/emailQueue');
+      const result = await cleanQueue();
+      
+      res.json(result);
+    } catch (error) {
+      console.error('Error limpiando cola:', error);
       res.status(500).json({ error: error.message });
     }
   }
