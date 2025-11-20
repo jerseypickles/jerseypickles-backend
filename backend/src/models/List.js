@@ -1,43 +1,85 @@
-// backend/src/routes/lists.js
-const express = require('express');
-const router = express.Router();
-const listsController = require('../controllers/listsController');
-const { auth, authorize } = require('../middleware/auth');
+// backend/src/models/List.js
+const mongoose = require('mongoose');
 
-// Aplicar autenticación a todas las rutas
-router.use(auth);
+const listSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true,
+    unique: true
+  },
+  
+  description: {
+    type: String,
+    trim: true
+  },
+  
+  // Miembros de la lista (solo IDs de customers)
+  members: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Customer'
+  }],
+  
+  // Estadísticas
+  memberCount: {
+    type: Number,
+    default: 0
+  },
+  
+  // Tags para organización
+  tags: [String],
+  
+  // Estado
+  isActive: {
+    type: Boolean,
+    default: true
+  }
+  
+}, {
+  timestamps: true
+});
 
-// Listar listas
-router.get('/', listsController.list);
+// Índices
+listSchema.index({ name: 1 });
+listSchema.index({ members: 1 });
+listSchema.index({ createdAt: -1 });
 
-// Obtener una lista
-router.get('/:id', listsController.getOne);
+// Método para actualizar conteo
+listSchema.methods.updateMemberCount = function() {
+  this.memberCount = this.members.length;
+  return this.save();
+};
 
-// Obtener miembros de una lista (paginado)
-router.get('/:id/members', listsController.getMembers);
+// Método para agregar miembro
+listSchema.methods.addMember = function(customerId) {
+  if (!this.members.includes(customerId)) {
+    this.members.push(customerId);
+    this.memberCount = this.members.length;
+  }
+  return this.save();
+};
 
-// ==================== ANÁLISIS Y LIMPIEZA ====================
-// Analizar engagement de una lista
-router.get('/:id/engagement', listsController.analyzeEngagement);
+// Método para remover miembro
+listSchema.methods.removeMember = function(customerId) {
+  this.members = this.members.filter(id => id.toString() !== customerId.toString());
+  this.memberCount = this.members.length;
+  return this.save();
+};
 
-// Limpiar lista (remover miembros inactivos)
-router.post('/:id/clean', authorize('admin', 'manager'), listsController.cleanMembers);
+// Método para agregar múltiples miembros
+listSchema.methods.addMembers = function(customerIds) {
+  const existingIds = new Set(this.members.map(id => id.toString()));
+  
+  customerIds.forEach(customerId => {
+    const idString = customerId.toString();
+    if (!existingIds.has(idString)) {
+      this.members.push(customerId);
+      existingIds.add(idString);
+    }
+  });
+  
+  this.memberCount = this.members.length;
+  return this.save();
+};
 
-// Crear lista
-router.post('/', authorize('admin', 'manager'), listsController.create);
-
-// Actualizar lista
-router.put('/:id', authorize('admin', 'manager'), listsController.update);
-
-// Eliminar lista
-router.delete('/:id', authorize('admin'), listsController.delete);
-
-// Importar desde CSV
-router.post('/import/csv', authorize('admin', 'manager'), listsController.importCSV);
-
-// Gestión de miembros
-router.post('/:id/members', authorize('admin', 'manager'), listsController.addMember);
-router.post('/:id/members/bulk', authorize('admin', 'manager'), listsController.addMembersByEmail);
-router.delete('/:id/members/:customerId', authorize('admin', 'manager'), listsController.removeMember);
-
-module.exports = router;
+module.exports = mongoose.model('List', listSchema);
