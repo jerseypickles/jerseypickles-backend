@@ -8,6 +8,61 @@ let emailQueue;
 let emailWorker;
 let isQueueReady = false;
 
+// ✅ CONFIGURACIÓN DE RATE LIMIT según plan de Resend
+const RATE_LIMIT_CONFIG = {
+  // Plan gratuito: 2 req/s, 100 emails/día, 3000 emails/mes
+  free: {
+    concurrency: 1,
+    max: 2,
+    duration: 1000,
+    emailsPerMinute: 120,
+    dailyLimit: 100,
+    monthlyLimit: 3000
+  },
+  // Plan Pro: 10 req/s, sin límite diario
+  pro: {
+    concurrency: 5,
+    max: 10,
+    duration: 1000,
+    emailsPerMinute: 600,
+    dailyLimit: null,
+    monthlyLimit: 50000
+  },
+  // Plan Scale: 50 req/s, sin límite diario, 200k/mes
+  scale: {
+    concurrency: 10,
+    max: 50,
+    duration: 1000,
+    emailsPerMinute: 3000,
+    dailyLimit: null,
+    monthlyLimit: 200000
+  },
+  // Plan Enterprise: sin límites
+  enterprise: {
+    concurrency: 20,
+    max: 100,
+    duration: 1000,
+    emailsPerMinute: 6000,
+    dailyLimit: null,
+    monthlyLimit: null
+  }
+};
+
+// ✅ Usar plan Scale
+const RESEND_PLAN = process.env.RESEND_PLAN || 'scale';
+const RATE_LIMIT = RATE_LIMIT_CONFIG[RESEND_PLAN] || RATE_LIMIT_CONFIG.scale;
+
+console.log(`📊 Configuración de Rate Limit: Plan "${RESEND_PLAN}"`);
+console.log(`⚡ Rate: ${RATE_LIMIT.max} req/s (${RATE_LIMIT.emailsPerMinute} emails/min)`);
+if (RATE_LIMIT.dailyLimit) {
+  console.log(`📅 Límite diario: ${RATE_LIMIT.dailyLimit} emails`);
+} else {
+  console.log(`📅 Sin límite diario ✅`);
+}
+if (RATE_LIMIT.monthlyLimit) {
+  console.log(`📆 Límite mensual: ${RATE_LIMIT.monthlyLimit} emails`);
+}
+
 async function initializeQueue() {
   try {
     const redisUrl = process.env.REDIS_URL;
@@ -52,7 +107,7 @@ async function initializeQueue() {
       }
     });
     
-    // ✅ CREAR WORKER (para procesar jobs)
+    // ✅ CREAR WORKER (para procesar jobs) CON RATE LIMIT OPTIMIZADO
     emailWorker = new Worker(
       'email-sending',
       async (job) => {
@@ -102,6 +157,15 @@ async function initializeQueue() {
         } catch (error) {
           console.error(`❌ [${job.id}] Error: ${error.message}`);
           
+          // ✅ Detectar rate limit de Resend
+          if (error.message && error.message.includes('rate_limit_exceeded')) {
+            console.warn('⚠️  Rate limit de Resend alcanzado - reintentando...');
+            await Campaign.findByIdAndUpdate(campaignId, {
+              $inc: { 'stats.rateLimited': 1 }
+            });
+            throw error; // Reintentar automáticamente
+          }
+          
           await Campaign.findByIdAndUpdate(campaignId, {
             $inc: { 'stats.failed': 1 }
           });
@@ -122,10 +186,10 @@ async function initializeQueue() {
       },
       {
         connection,
-        concurrency: 20,
+        concurrency: RATE_LIMIT.concurrency,  // ✅ 10 emails simultáneos
         limiter: {
-          max: 100,
-          duration: 60000
+          max: RATE_LIMIT.max,      // ✅ 50 requests por segundo
+          duration: RATE_LIMIT.duration // ✅ 1000ms = 1 segundo
         }
       }
     );
@@ -146,6 +210,8 @@ async function initializeQueue() {
     // ✅ Marcar como ready
     isQueueReady = true;
     console.log('✅ BullMQ Queue initialized with Upstash Redis');
+    console.log(`⚡ Rate Limit: ${RATE_LIMIT.max} req/s | Concurrency: ${RATE_LIMIT.concurrency}`);
+    console.log(`🚀 Velocidad: ~${RATE_LIMIT.emailsPerMinute} emails/minuto`);
     
     return emailQueue;
     
@@ -170,6 +236,7 @@ async function addEmailsToQueue(emails, campaignId) {
   }
   
   console.log(`📥 Agregando ${emails.length} emails a la cola...`);
+  console.log(`⏱️  Tiempo estimado: ~${Math.ceil(emails.length / RATE_LIMIT.emailsPerMinute)} minutos`);
   
   const jobs = emails.map((emailData, index) => ({
     name: 'send-email',
@@ -187,7 +254,7 @@ async function addEmailsToQueue(emails, campaignId) {
       }
     },
     opts: {
-      delay: index * 100,
+      delay: index * 20, // ✅ Delay más corto (20ms) por velocidad
       jobId: `${campaignId}-${emailData.customerId || index}`,
       priority: 1
     }
@@ -200,7 +267,8 @@ async function addEmailsToQueue(emails, campaignId) {
   
   return {
     jobIds: addedJobs.map(j => j.id),
-    total: jobs.length
+    total: jobs.length,
+    estimatedMinutes: Math.ceil(jobs.length / RATE_LIMIT.emailsPerMinute)
   };
 }
 
@@ -216,6 +284,7 @@ async function getQueueStatus() {
       delayed: 0,
       paused: false,
       total: 0,
+      rateLimit: RATE_LIMIT,
       error: !emailQueue ? 'Redis queue no configurado' : 'Redis conectando...'
     };
   }
@@ -243,6 +312,7 @@ async function getQueueStatus() {
       delayed: counts.delayed || 0,
       paused: paused || false,
       total: (counts.waiting || 0) + (counts.active || 0) + (counts.delayed || 0),
+      rateLimit: RATE_LIMIT,
       error: null
     };
     
@@ -258,6 +328,7 @@ async function getQueueStatus() {
       delayed: 0,
       paused: false,
       total: 0,
+      rateLimit: RATE_LIMIT,
       error: error.message
     };
   }
@@ -323,6 +394,7 @@ async function closeQueue() {
   console.log('✅ Queue cerrada');
 }
 
+// ✅ Exportar también la configuración de rate limit
 module.exports = {
   emailQueue,
   addEmailsToQueue,
@@ -331,5 +403,6 @@ module.exports = {
   resumeQueue,
   cleanQueue,
   closeQueue,
-  isAvailable: () => emailQueue && isQueueReady
+  isAvailable: () => emailQueue && isQueueReady,
+  getRateLimitConfig: () => RATE_LIMIT
 };
