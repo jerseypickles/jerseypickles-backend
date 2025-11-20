@@ -8,8 +8,8 @@ const { Readable } = require('stream');
 
 class ListsController {
   
-  // Listar todas las listas
-  async list(req, res) {
+  // Listar todas las listas - ✅ RENOMBRADO
+  async getAll(req, res) {  // ← ERA "list", ahora "getAll"
     try {
       const { 
         page = 1, 
@@ -26,7 +26,7 @@ class ListsController {
         ];
       }
       
-      const lists = await List.find(query)
+      const lists = await List.find(query)  // ← Ahora funciona
         .sort({ createdAt: -1 })
         .limit(limit * 1)
         .skip((page - 1) * limit)
@@ -46,7 +46,7 @@ class ListsController {
       res.status(500).json({ error: error.message });
     }
   }
-
+  
   // Obtener una lista específica
   async getOne(req, res) {
     try {

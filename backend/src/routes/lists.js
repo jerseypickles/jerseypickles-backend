@@ -8,7 +8,7 @@ const { auth, authorize } = require('../middleware/auth');
 router.use(auth);
 
 // Listar listas
-router.get('/', listsController.list);
+router.get('/', listsController.getAll);
 
 // Obtener una lista
 router.get('/:id', listsController.getOne);
