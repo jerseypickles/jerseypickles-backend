@@ -7,14 +7,21 @@ const { auth, authorize } = require('../middleware/auth');
 // Aplicar autenticación a todas las rutas
 router.use(auth);
 
-// Listar listas
-router.get('/', listsController.getAll);
+// Listar listas - ✅ ACTUALIZADO
+router.get('/', listsController.getAll);  // ← Cambió de "list" a "getAll"
 
 // Obtener una lista
 router.get('/:id', listsController.getOne);
 
 // Obtener miembros de una lista (paginado)
 router.get('/:id/members', listsController.getMembers);
+
+// ==================== ANÁLISIS Y LIMPIEZA ====================
+// ✅ NUEVO: Analizar engagement de una lista
+router.get('/:id/engagement', listsController.analyzeEngagement);
+
+// ✅ NUEVO: Limpiar lista (remover miembros inactivos)
+router.post('/:id/clean', authorize('admin', 'manager'), listsController.cleanMembers);
 
 // Crear lista
 router.post('/', authorize('admin', 'manager'), listsController.create);
