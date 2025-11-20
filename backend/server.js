@@ -63,18 +63,15 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
-// 🆕 EXPRESS.JSON CON VERIFY PARA CAPTURAR RAW BODY (WEBHOOKS)
-// Esta es la forma correcta de capturar el raw body sin romper el stream
-app.use(express.json({ 
-  limit: '10mb',
-  verify: (req, res, buf, encoding) => {
-    // Solo guardar raw body para webhooks de Shopify
-    if (req.originalUrl.includes('/webhooks')) {
-      req.rawBody = buf.toString(encoding || 'utf8');
-    }
-  }
+// 🆕 SOLUCIÓN DEFINITIVA: express.raw() SOLO para webhooks de Shopify
+// Esto captura el body como Buffer ANTES de parsearlo
+app.use('/api/webhooks', express.raw({ 
+  type: 'application/json',
+  limit: '10mb'
 }));
 
+// express.json() para todas las demás rutas
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // COOKIE PARSER (para attribution tracking)

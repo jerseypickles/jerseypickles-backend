@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const validateShopifyWebhook = (req, res, next) => {
   try {
     const hmac = req.headers['x-shopify-hmac-sha256'];
+    const topic = req.headers['x-shopify-topic'];
     const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
     
     // Validar que existan los requisitos
@@ -17,8 +18,22 @@ const validateShopifyWebhook = (req, res, next) => {
       return res.status(500).json({ error: 'Webhook secret not configured' });
     }
     
-    // Usar raw body (el string original sin parsear)
-    const body = req.rawBody || JSON.stringify(req.body);
+    // 🆕 El body viene como Buffer desde express.raw()
+    let body;
+    
+    if (Buffer.isBuffer(req.body)) {
+      // Si es Buffer, convertir a string
+      body = req.body.toString('utf8');
+      // También guardar el objeto parseado en req.body para los controllers
+      req.bodyParsed = JSON.parse(body);
+    } else if (typeof req.body === 'string') {
+      body = req.body;
+      req.bodyParsed = JSON.parse(body);
+    } else {
+      // Fallback: ya está parseado
+      body = JSON.stringify(req.body);
+      req.bodyParsed = req.body;
+    }
     
     // Calcular HMAC
     const hash = crypto
@@ -29,13 +44,19 @@ const validateShopifyWebhook = (req, res, next) => {
     // Comparar HMAC
     if (hash !== hmac) {
       console.error('❌ HMAC inválido');
-      console.error(`   Expected: ${hash}`);
-      console.error(`   Received: ${hmac}`);
-      console.error(`   Topic: ${req.headers['x-shopify-topic']}`);
+      console.error(`   Calculated: ${hash}`);
+      console.error(`   Shopify:    ${hmac}`);
+      console.error(`   Topic:      ${topic}`);
+      console.error(`   Body type:  ${Buffer.isBuffer(req.body) ? 'Buffer' : typeof req.body}`);
+      console.error(`   Body len:   ${body.length}`);
       return res.status(401).json({ error: 'Invalid HMAC signature' });
     }
     
-    console.log(`✅ Webhook verificado: ${req.headers['x-shopify-topic']}`);
+    console.log(`✅ Webhook verificado: ${topic}`);
+    
+    // Reemplazar req.body con el objeto parseado
+    req.body = req.bodyParsed;
+    
     next();
     
   } catch (error) {
