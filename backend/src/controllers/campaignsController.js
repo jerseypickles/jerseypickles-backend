@@ -632,25 +632,34 @@ class CampaignsController {
       });
       
       // Clientes más activos (más opens + clicks) - ✅ CORREGIDO
+      // Clientes más activos (más opens + clicks) - ✅ SOLUCIÓN MÁS SEGURA
       const customerActivity = {};
-      events.forEach(event => {
-        // ✅ VALIDACIÓN MEJORADA: Verificar que customer y customer._id existan
-        if (event.customer && event.customer._id && (event.eventType === 'opened' || event.eventType === 'clicked')) {
-          const customerId = event.customer._id.toString();
-          if (!customerActivity[customerId]) {
-            customerActivity[customerId] = {
-              customer: event.customer,
-              opens: 0,
-              clicks: 0,
-              total: 0
-            };
-          }
-          if (event.eventType === 'opened') customerActivity[customerId].opens++;
-          if (event.eventType === 'clicked') customerActivity[customerId].clicks++;
-          customerActivity[customerId].total++;
+
+      // Primero filtrar solo eventos válidos
+      const validEvents = events.filter(event => 
+        event.customer && 
+        event.customer._id && 
+        (event.eventType === 'opened' || event.eventType === 'clicked')
+      );
+
+      // Luego procesar solo los eventos válidos
+      validEvents.forEach(event => {
+        const customerId = event.customer._id.toString();
+        
+        if (!customerActivity[customerId]) {
+          customerActivity[customerId] = {
+            customer: event.customer,
+            opens: 0,
+            clicks: 0,
+            total: 0
+          };
         }
+        
+        if (event.eventType === 'opened') customerActivity[customerId].opens++;
+        if (event.eventType === 'clicked') customerActivity[customerId].clicks++;
+        customerActivity[customerId].total++;
       });
-      
+
       const topCustomers = Object.values(customerActivity)
         .sort((a, b) => b.total - a.total)
         .slice(0, 10);
