@@ -46,7 +46,7 @@ class ListsController {
       res.status(500).json({ error: error.message });
     }
   }
-  
+
   // Obtener una lista específica
   async getOne(req, res) {
     try {
@@ -541,18 +541,29 @@ class ListsController {
         status: 'sent'
       }).select('_id name sentAt');
       
-      if (campaigns.length === 0) {
+        if (campaigns.length === 0) {
         return res.json({
-          list: {
+            list: {
             id: list._id,
             name: list.name,
             memberCount: list.memberCount
-          },
-          campaignsSent: 0,
-          message: 'No hay campañas enviadas a esta lista aún',
-          members: []
+            },
+            campaignsSent: 0,
+            message: 'No hay campañas enviadas a esta lista aún',
+            // ✅ AGREGAR ESTO:
+            stats: {
+            total: list.memberCount,
+            highlyEngaged: 0,
+            engaged: 0,
+            lowEngagement: 0,
+            neverOpened: 0,
+            bounced: 0,
+            neverSent: list.memberCount,
+            engagedPercent: 0
+            },
+            members: []
         });
-      }
+        }
       
       console.log(`📧 Analizando ${campaigns.length} campañas enviadas`);
       
