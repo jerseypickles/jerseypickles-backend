@@ -4,9 +4,8 @@ const mongoose = require('mongoose');
 const customerSchema = new mongoose.Schema({
   shopifyId: {
     type: String,
-    required: true,
     unique: true,
-    index: true
+    sparse: true, 
   },
   email: {
     type: String,

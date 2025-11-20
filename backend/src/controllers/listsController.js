@@ -264,7 +264,7 @@ class ListsController {
     }
   }
 
-  // Obtener miembros de una lista (paginado) - ARREGLADO
+  // Obtener miembros de una lista (paginado)
   async getMembers(req, res) {
     try {
       const { page = 1, limit = 50 } = req.query;
@@ -367,7 +367,7 @@ class ListsController {
       
       // Procesar filas y crear/encontrar customers
       const customerIds = [];
-      const emailsImported = []; // Para mostrar en resultado
+      const emailsImported = [];
       const stats = {
         created: 0,
         found: 0,
@@ -415,13 +415,20 @@ class ListsController {
           });
           
           if (!customer) {
-            customer = await Customer.create({
+            // ✅ CREAR CUSTOMER SIN shopifyId (campo opcional)
+            const customerData = {
               email: email.toLowerCase().trim(),
-              firstName: firstName.trim(),
-              lastName: lastName.trim(),
-              phone: phone.trim(),
-              source: 'csv_import'
-            });
+              firstName: firstName?.trim() || '',
+              lastName: lastName?.trim() || '',
+              phone: phone?.trim() || null,
+              source: 'csv-import',  // ✅ Usar guion en lugar de underscore
+              tags: ['imported-from-csv']
+            };
+            
+            // Solo agregar shopifyId si existe (como opcional)
+            // No lo agregamos para imports CSV
+            
+            customer = await Customer.create(customerData);
             stats.created++;
             console.log(`✨ Cliente creado: ${email}`);
           } else {
@@ -439,6 +446,14 @@ class ListsController {
               customer.phone = phone.trim();
               updated = true;
             }
+            
+            // Agregar tag si no lo tiene
+            if (!customer.tags) customer.tags = [];
+            if (!customer.tags.includes('imported-from-csv')) {
+              customer.tags.push('imported-from-csv');
+              updated = true;
+            }
+            
             if (updated) {
               await customer.save();
               console.log(`🔄 Cliente actualizado: ${email}`);
@@ -458,7 +473,7 @@ class ListsController {
         }
       }
       
-      console.log(`✅ Procesamiento completado:`);
+      console.log(`\n✅ Procesamiento completado:`);
       console.log(`   - Creados: ${stats.created}`);
       console.log(`   - Encontrados: ${stats.found}`);
       console.log(`   - Errores: ${stats.errors}`);
@@ -482,13 +497,14 @@ class ListsController {
         // Crear nueva lista
         list = await List.create({
           name,
-          description: description || `Importada desde CSV`,
+          description: description || `Importada desde CSV el ${new Date().toLocaleDateString()}`,
           members: [],
-          memberCount: 0
+          memberCount: 0,
+          tags: ['csv-import']
         });
         
         await list.addMembers(customerIds);
-        console.log(`✅ Lista creada: ${list.name} (${list.memberCount} miembros)`);
+        console.log(`✅ Lista creada: ${list.name} (${list.memberCount} miembros)\n`);
       }
       
       res.json({
@@ -503,7 +519,7 @@ class ListsController {
       });
       
     } catch (error) {
-      console.error('Error importando CSV:', error);
+      console.error('❌ Error importando CSV:', error);
       res.status(500).json({ error: error.message });
     }
   }
