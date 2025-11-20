@@ -1,7 +1,7 @@
 // backend/src/controllers/campaignsController.js
 const Campaign = require('../models/Campaign');
 const Segment = require('../models/Segment');
-const List = require('../models/List'); // NUEVO
+const List = require('../models/List');
 const Customer = require('../models/Customer');
 const EmailEvent = require('../models/EmailEvent');
 const emailService = require('../services/emailService');
@@ -26,7 +26,7 @@ class CampaignsController {
       
       const campaigns = await Campaign.find(query)
         .populate('segment', 'name customerCount')
-        .populate('list', 'name memberCount') // NUEVO
+        .populate('list', 'name memberCount')
         .sort({ createdAt: -1 })
         .limit(limit * 1)
         .skip((page - 1) * limit);
@@ -51,7 +51,7 @@ class CampaignsController {
     try {
       const campaign = await Campaign.findById(req.params.id)
         .populate('segment')
-        .populate('list'); // NUEVO
+        .populate('list');
       
       if (!campaign) {
         return res.status(404).json({ error: 'Campaña no encontrada' });
@@ -65,7 +65,7 @@ class CampaignsController {
     }
   }
 
-  // Crear campaña - ACTUALIZADO
+  // Crear campaña
   async create(req, res) {
     try {
       const {
@@ -73,9 +73,9 @@ class CampaignsController {
         subject,
         htmlContent,
         previewText,
-        targetType = 'segment', // NUEVO
+        targetType = 'segment',
         segmentId,
-        listId, // NUEVO
+        listId,
         fromName,
         fromEmail,
         replyTo,
@@ -134,7 +134,7 @@ class CampaignsController {
     }
   }
 
-  // Actualizar campaña - ACTUALIZADO
+  // Actualizar campaña
   async update(req, res) {
     try {
       const campaign = await Campaign.findById(req.params.id);
@@ -177,7 +177,7 @@ class CampaignsController {
       if (tags) campaign.tags = tags;
       if (templateBlocks) campaign.templateBlocks = templateBlocks;
       
-      // NUEVO: Actualizar targetType y referencias
+      // Actualizar targetType y referencias
       if (targetType) {
         campaign.targetType = targetType;
         
@@ -247,12 +247,12 @@ class CampaignsController {
     }
   }
 
-  // Enviar campaña - ACTUALIZADO
+  // Enviar campaña
   async send(req, res) {
     try {
       const campaign = await Campaign.findById(req.params.id)
         .populate('segment')
-        .populate('list'); // NUEVO
+        .populate('list');
       
       if (!campaign) {
         return res.status(404).json({ error: 'Campaña no encontrada' });
@@ -271,23 +271,20 @@ class CampaignsController {
       
       let customers;
       
-      // NUEVO: Obtener clientes según targetType
+      // Obtener clientes según targetType
       if (campaign.targetType === 'list') {
         console.log(`📋 Obteniendo clientes de la lista: ${campaign.list.name}`);
         
-        // Obtener la lista completa con sus miembros
         const list = await List.findById(campaign.list._id);
         if (!list || list.members.length === 0) {
           return res.status(400).json({ error: 'La lista no tiene miembros' });
         }
         
-        // Buscar los customers
         customers = await Customer.find({
           _id: { $in: list.members }
         }).select('email firstName lastName _id');
         
       } else {
-        // Método existente para segmentos
         console.log(`🎯 Evaluando segmento: ${campaign.segment.name}`);
         customers = await segmentationService.evaluateSegment(
           campaign.segment.conditions,
@@ -350,7 +347,6 @@ class CampaignsController {
       
       const { emailQueue, addEmailsToQueue, isAvailable } = require('../jobs/emailQueue');
       
-      // Verificar que la cola esté disponible
       if (!isAvailable()) {
         console.warn('⚠️  Cola no disponible, usando envío directo limitado');
         
@@ -517,7 +513,7 @@ class CampaignsController {
     }
   }
 
-  // Duplicar campaña - ACTUALIZADO
+  // Duplicar campaña
   async duplicate(req, res) {
     try {
       const original = await Campaign.findById(req.params.id);
@@ -531,9 +527,9 @@ class CampaignsController {
         subject: original.subject,
         htmlContent: original.htmlContent,
         previewText: original.previewText,
-        targetType: original.targetType, // NUEVO
+        targetType: original.targetType,
         segment: original.segment,
-        list: original.list, // NUEVO
+        list: original.list,
         fromName: original.fromName,
         fromEmail: original.fromEmail,
         replyTo: original.replyTo,
@@ -552,12 +548,12 @@ class CampaignsController {
     }
   }
 
-  // ESTADÍSTICAS DETALLADAS DE UNA CAMPAÑA
+  // ESTADÍSTICAS DETALLADAS DE UNA CAMPAÑA - ✅ CORREGIDO
   async getStats(req, res) {
     try {
       const campaign = await Campaign.findById(req.params.id)
         .populate('segment', 'name')
-        .populate('list', 'name'); // NUEVO
+        .populate('list', 'name');
       
       if (!campaign) {
         return res.status(404).json({ error: 'Campaña no encontrada' });
@@ -635,10 +631,11 @@ class CampaignsController {
         };
       });
       
-      // Clientes más activos (más opens + clicks)
+      // Clientes más activos (más opens + clicks) - ✅ CORREGIDO
       const customerActivity = {};
       events.forEach(event => {
-        if (event.customer && (event.eventType === 'opened' || event.eventType === 'clicked')) {
+        // ✅ VALIDACIÓN MEJORADA: Verificar que customer y customer._id existan
+        if (event.customer && event.customer._id && (event.eventType === 'opened' || event.eventType === 'clicked')) {
           const customerId = event.customer._id.toString();
           if (!customerActivity[customerId]) {
             customerActivity[customerId] = {
@@ -665,8 +662,8 @@ class CampaignsController {
           subject: campaign.subject,
           status: campaign.status,
           sentAt: campaign.sentAt,
-          targetType: campaign.targetType, // NUEVO
-          list: campaign.list, // NUEVO
+          targetType: campaign.targetType,
+          list: campaign.list,
           segment: campaign.segment,
           stats: campaign.stats,
         },
@@ -724,7 +721,7 @@ class CampaignsController {
     }
   }
 
-  // Crear campaña rápida con template - ACTUALIZADO
+  // Crear campaña rápida con template
   async createFromTemplate(req, res) {
     try {
       const { 
@@ -733,7 +730,7 @@ class CampaignsController {
         subject,
         targetType = 'segment',
         segmentId,
-        listId, // NUEVO
+        listId,
         templateData = {}
       } = req.body;
       
