@@ -52,12 +52,14 @@ const customerSchema = new mongoose.Schema({
     ref: 'Segment'
   }],
   
-  // Tracking
+  // 🆕 TRACKING CON REVENUE
   emailStats: {
     sent: { type: Number, default: 0 },
     opened: { type: Number, default: 0 },
     clicked: { type: Number, default: 0 },
     bounced: { type: Number, default: 0 },
+    purchased: { type: Number, default: 0 }, // 🆕
+    totalRevenue: { type: Number, default: 0 }, // 🆕
     lastOpenedAt: Date,
     lastClickedAt: Date
   },
@@ -114,8 +116,8 @@ customerSchema.methods.matchesSegment = function(segment) {
 
 // ==================== MÉTODOS ESTÁTICOS ====================
 
-// Actualizar estadísticas de email (llamado desde tracking)
-customerSchema.statics.updateEmailStats = async function(customerId, eventType) {
+// 🆕 ACTUALIZAR ESTADÍSTICAS DE EMAIL CON REVENUE
+customerSchema.statics.updateEmailStats = async function(customerId, eventType, revenueAmount = 0) {
   try {
     const updates = {
       $inc: {}
@@ -132,6 +134,12 @@ customerSchema.statics.updateEmailStats = async function(customerId, eventType) 
       updates.$set = { 'emailStats.lastClickedAt': new Date() };
     } else if (eventType === 'bounced') {
       updates.$inc['emailStats.bounced'] = 1;
+    } else if (eventType === 'purchased') {
+      // 🆕 REVENUE TRACKING
+      updates.$inc['emailStats.purchased'] = 1;
+      if (revenueAmount > 0) {
+        updates.$inc['emailStats.totalRevenue'] = revenueAmount;
+      }
     }
     
     await this.findByIdAndUpdate(customerId, updates);

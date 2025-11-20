@@ -1,4 +1,4 @@
-// backend/src/models/Campaign.js
+// backend/src/models/Campaign.js (ACTUALIZADO CON REVENUE)
 const mongoose = require('mongoose');
 
 const campaignSchema = new mongoose.Schema({
@@ -11,35 +11,28 @@ const campaignSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  
-  // Contenido
   htmlContent: {
     type: String,
     required: true
   },
   previewText: String,
   
-  // ==================== NUEVO: TARGET TYPE ====================
   targetType: {
     type: String,
     enum: ['list', 'segment'],
     default: 'segment'
   },
   
-  // Segmento objetivo (existente)
   segment: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Segment'
   },
   
-  // NUEVO: Lista objetivo
   list: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'List'
   },
-  // ============================================================
   
-  // Estado
   status: {
     type: String,
     enum: ['draft', 'scheduled', 'sending', 'sent', 'paused', 'failed'],
@@ -47,11 +40,10 @@ const campaignSchema = new mongoose.Schema({
     index: true
   },
   
-  // Programación
   scheduledAt: Date,
   sentAt: Date,
   
-  // Métricas
+  // 🆕 REVENUE STATS
   stats: {
     totalRecipients: { type: Number, default: 0 },
     sent: { type: Number, default: 0 },
@@ -62,13 +54,19 @@ const campaignSchema = new mongoose.Schema({
     complained: { type: Number, default: 0 },
     unsubscribed: { type: Number, default: 0 },
     
+    // 🆕 REVENUE METRICS
+    purchased: { type: Number, default: 0 },
+    totalRevenue: { type: Number, default: 0 },
+    averageOrderValue: { type: Number, default: 0 },
+    
     // Rates
     openRate: { type: Number, default: 0 },
     clickRate: { type: Number, default: 0 },
-    bounceRate: { type: Number, default: 0 }
+    bounceRate: { type: Number, default: 0 },
+    conversionRate: { type: Number, default: 0 }, // 🆕
+    revenuePerEmail: { type: Number, default: 0 } // 🆕
   },
   
-  // Configuración
   fromName: {
     type: String,
     default: 'Jersey Pickles'
@@ -79,7 +77,6 @@ const campaignSchema = new mongoose.Schema({
   },
   replyTo: String,
   
-  // Tracking
   trackOpens: {
     type: Boolean,
     default: true
@@ -89,7 +86,6 @@ const campaignSchema = new mongoose.Schema({
     default: true
   },
   
-  // Metadata
   tags: [String],
   notes: String
   
@@ -98,13 +94,11 @@ const campaignSchema = new mongoose.Schema({
   collection: 'campaigns'
 });
 
-// Índices
 campaignSchema.index({ status: 1, scheduledAt: 1 });
 campaignSchema.index({ createdAt: -1 });
-campaignSchema.index({ list: 1 }); // NUEVO
-campaignSchema.index({ targetType: 1 }); // NUEVO
+campaignSchema.index({ list: 1 });
+campaignSchema.index({ targetType: 1 });
 
-// Validación: debe tener o segment o list según targetType
 campaignSchema.pre('save', function(next) {
   if (this.targetType === 'list' && !this.list) {
     next(new Error('Debe especificar una lista cuando targetType es "list"'));
@@ -115,29 +109,37 @@ campaignSchema.pre('save', function(next) {
   }
 });
 
-// ==================== MÉTODOS DE INSTANCIA ====================
-
-// Método para actualizar rates calculados
+// 🆕 MÉTODO ACTUALIZADO CON REVENUE
 campaignSchema.methods.updateRates = function() {
   if (this.stats.delivered > 0) {
     this.stats.openRate = parseFloat(((this.stats.opened / this.stats.delivered) * 100).toFixed(2));
     this.stats.clickRate = parseFloat(((this.stats.clicked / this.stats.delivered) * 100).toFixed(2));
+    this.stats.conversionRate = parseFloat(((this.stats.purchased / this.stats.delivered) * 100).toFixed(2));
   }
   
   if (this.stats.sent > 0) {
     this.stats.bounceRate = parseFloat(((this.stats.bounced / this.stats.sent) * 100).toFixed(2));
+    this.stats.revenuePerEmail = parseFloat((this.stats.totalRevenue / this.stats.sent).toFixed(2));
+  }
+  
+  if (this.stats.purchased > 0) {
+    this.stats.averageOrderValue = parseFloat((this.stats.totalRevenue / this.stats.purchased).toFixed(2));
   }
 };
 
-// ==================== MÉTODOS ESTÁTICOS ====================
-
-// Actualizar estadísticas desde eventos (llamado desde tracking)
-campaignSchema.statics.updateStats = async function(campaignId, eventType) {
+// 🆕 MÉTODO ESTÁTICO ACTUALIZADO CON REVENUE
+campaignSchema.statics.updateStats = async function(campaignId, eventType, revenueAmount = 0) {
   try {
-    const statField = `stats.${eventType}`;
-    await this.findByIdAndUpdate(campaignId, {
-      $inc: { [statField]: 1 }
-    });
+    const updateData = {
+      $inc: { [`stats.${eventType}`]: 1 }
+    };
+    
+    // Si es una compra, actualizar revenue
+    if (eventType === 'purchased' && revenueAmount > 0) {
+      updateData.$inc['stats.totalRevenue'] = revenueAmount;
+    }
+    
+    await this.findByIdAndUpdate(campaignId, updateData);
     
     const campaign = await this.findById(campaignId);
     if (campaign) {

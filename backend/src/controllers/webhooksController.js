@@ -1,6 +1,9 @@
-// backend/src/controllers/webhooksController.js
+// backend/src/controllers/webhooksController.js (ACTUALIZADO CON REVENUE)
 const Customer = require('../models/Customer');
 const Order = require('../models/Order');
+const EmailEvent = require('../models/EmailEvent');
+const Campaign = require('../models/Campaign');
+const AttributionService = require('../middleware/attributionTracking');
 
 class WebhooksController {
   
@@ -79,13 +82,15 @@ class WebhooksController {
     }
   }
 
-  // ==================== ORDERS ====================
+  // ==================== ORDERS CON REVENUE TRACKING ====================
   
   async orderCreate(req, res) {
     try {
       const shopifyOrder = req.body;
       
-      console.log('📥 Webhook: Order Create', shopifyOrder.id);
+      console.log('\n💰 ==================== NEW ORDER ====================');
+      console.log(`📥 Webhook: Order Create #${shopifyOrder.order_number}`);
+      console.log(`💵 Order Value: $${shopifyOrder.total_price} ${shopifyOrder.currency}`);
       
       // Buscar o crear cliente
       let customer = await Customer.findOne({ 
@@ -100,6 +105,7 @@ class WebhooksController {
           lastName: shopifyOrder.customer.last_name,
           acceptsMarketing: shopifyOrder.customer.accepts_marketing || false
         });
+        console.log('✅ Nuevo cliente creado:', customer.email);
       }
       
       // Crear orden
@@ -138,7 +144,98 @@ class WebhooksController {
         }
       });
       
-      console.log('✅ Orden creada:', order.orderNumber);
+      console.log('✅ Orden creada en DB:', order.orderNumber);
+      
+      // 🆕 ==================== REVENUE ATTRIBUTION ====================
+      
+      // 🍪 MÉTODO 1: Buscar attribution cookie (si viene en el request)
+      // NOTA: Los webhooks de Shopify NO incluyen cookies del usuario
+      // Esta parte es para cuando implementes un endpoint de confirmation
+      const attribution = AttributionService.getAttribution(req);
+      
+      // 🔍 MÉTODO 2: Buscar por UTM params guardados en la orden
+      // Shopify guarda landing_site con UTM parameters
+      let campaignId = null;
+      let customerId = customer._id;
+      let attributionMethod = 'none';
+      
+      if (attribution) {
+        campaignId = attribution.campaignId;
+        customerId = attribution.customerId;
+        attributionMethod = 'cookie';
+        console.log(`🍪 Attribution found via cookie: Campaign ${campaignId}`);
+      } else if (shopifyOrder.landing_site) {
+        // Extraer campaign_id de UTM params
+        const urlParams = new URLSearchParams(shopifyOrder.landing_site);
+        const utmCampaign = urlParams.get('utm_campaign');
+        
+        if (utmCampaign && utmCampaign.startsWith('email_')) {
+          campaignId = utmCampaign.replace('email_', '');
+          attributionMethod = 'utm';
+          console.log(`🔗 Attribution found via UTM: Campaign ${campaignId}`);
+        }
+      }
+      
+      // 🔍 MÉTODO 3: Buscar último click en los últimos 7 días
+      if (!campaignId) {
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+        
+        const lastClickEvent = await EmailEvent.findOne({
+          customer: customer._id,
+          eventType: 'clicked',
+          eventDate: { $gte: sevenDaysAgo }
+        }).sort({ eventDate: -1 });
+        
+        if (lastClickEvent) {
+          campaignId = lastClickEvent.campaign;
+          attributionMethod = 'last_click';
+          console.log(`🔙 Attribution found via last click: Campaign ${campaignId}`);
+        }
+      }
+      
+      // Si encontramos atribución, registrar revenue event
+      if (campaignId) {
+        console.log(`\n💰 ATTRIBUTING REVENUE TO CAMPAIGN`);
+        console.log(`   Method: ${attributionMethod}`);
+        console.log(`   Campaign: ${campaignId}`);
+        console.log(`   Revenue: $${shopifyOrder.total_price}`);
+        
+        // Registrar evento de purchase
+        await EmailEvent.create({
+          campaign: campaignId,
+          customer: customerId,
+          email: customer.email,
+          eventType: 'purchased',
+          source: 'shopify',
+          revenue: {
+            orderValue: parseFloat(shopifyOrder.total_price),
+            orderId: shopifyOrder.id.toString(),
+            orderNumber: shopifyOrder.order_number,
+            currency: shopifyOrder.currency,
+            products: shopifyOrder.line_items.map(item => ({
+              productId: item.product_id?.toString(),
+              title: item.title,
+              quantity: item.quantity,
+              price: parseFloat(item.price)
+            }))
+          },
+          metadata: {
+            attributionMethod,
+            financialStatus: shopifyOrder.financial_status,
+            discountCodes: shopifyOrder.discount_codes?.map(d => d.code) || []
+          }
+        });
+        
+        // Actualizar stats de campaña
+        await Campaign.updateStats(campaignId, 'purchased', parseFloat(shopifyOrder.total_price));
+        
+        console.log(`✅ Revenue tracked successfully!`);
+        console.log(`====================================================\n`);
+      } else {
+        console.log(`ℹ️  No attribution found for this order`);
+        console.log(`====================================================\n`);
+      }
       
       res.status(200).json({ success: true });
       
