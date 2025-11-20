@@ -9,40 +9,50 @@ class WebhooksController {
   
   // ==================== CUSTOMERS ====================
   
-  async customerCreate(req, res) {
-    try {
-      const shopifyCustomer = req.body;
-      
-      console.log('📥 Webhook: Customer Create', shopifyCustomer.id);
-      
-      const customer = await Customer.create({
-        shopifyId: shopifyCustomer.id.toString(),
-        email: shopifyCustomer.email,
-        firstName: shopifyCustomer.first_name,
-        lastName: shopifyCustomer.last_name,
-        phone: shopifyCustomer.phone,
-        ordersCount: shopifyCustomer.orders_count || 0,
-        totalSpent: parseFloat(shopifyCustomer.total_spent) || 0,
-        acceptsMarketing: shopifyCustomer.accepts_marketing || false,
-        tags: shopifyCustomer.tags?.split(', ') || [],
-        address: {
-          city: shopifyCustomer.default_address?.city,
-          province: shopifyCustomer.default_address?.province,
-          country: shopifyCustomer.default_address?.country,
-          zip: shopifyCustomer.default_address?.zip
-        },
-        shopifyData: shopifyCustomer
-      });
-      
-      console.log('✅ Cliente creado:', customer.email);
-      
-      res.status(200).json({ success: true });
-      
-    } catch (error) {
-      console.error('❌ Error en customerCreate:', error);
-      res.status(500).json({ error: error.message });
-    }
+async customerCreate(req, res) {
+  try {
+    const shopifyCustomer = req.body;
+    
+    console.log('📥 Webhook: Customer Create', shopifyCustomer.id);
+    
+    // ✅ CAMBIAR A findOneAndUpdate con upsert
+    const customer = await Customer.findOneAndUpdate(
+      { shopifyId: shopifyCustomer.id.toString() }, // Buscar por shopifyId
+      {
+        $set: {
+          email: shopifyCustomer.email,
+          firstName: shopifyCustomer.first_name,
+          lastName: shopifyCustomer.last_name,
+          phone: shopifyCustomer.phone,
+          ordersCount: shopifyCustomer.orders_count || 0,
+          totalSpent: parseFloat(shopifyCustomer.total_spent) || 0,
+          acceptsMarketing: shopifyCustomer.accepts_marketing || false,
+          tags: shopifyCustomer.tags?.split(', ') || [],
+          address: {
+            city: shopifyCustomer.default_address?.city,
+            province: shopifyCustomer.default_address?.province,
+            country: shopifyCustomer.default_address?.country,
+            zip: shopifyCustomer.default_address?.zip
+          },
+          shopifyData: shopifyCustomer
+        }
+      },
+      { 
+        upsert: true,              // Crea si no existe
+        new: true,                 // Retorna el documento nuevo/actualizado
+        setDefaultsOnInsert: true  // Aplica defaults del schema si es nuevo
+      }
+    );
+    
+    console.log('✅ Cliente creado/actualizado:', customer.email);
+    
+    res.status(200).json({ success: true });
+    
+  } catch (error) {
+    console.error('❌ Error en customerCreate:', error);
+    res.status(500).json({ error: error.message });
   }
+}
 
   async customerUpdate(req, res) {
     try {
