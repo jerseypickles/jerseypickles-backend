@@ -1,6 +1,8 @@
 // backend/src/controllers/listsController.js
 const List = require('../models/List');
 const Customer = require('../models/Customer');
+const Campaign = require('../models/Campaign');
+const EmailEvent = require('../models/EmailEvent');
 const csv = require('csv-parser');
 const { Readable } = require('stream');
 
@@ -415,18 +417,14 @@ class ListsController {
           });
           
           if (!customer) {
-            // ✅ CREAR CUSTOMER SIN shopifyId (campo opcional)
             const customerData = {
               email: email.toLowerCase().trim(),
               firstName: firstName?.trim() || '',
               lastName: lastName?.trim() || '',
               phone: phone?.trim() || null,
-              source: 'csv-import',  // ✅ Usar guion en lugar de underscore
+              source: 'csv-import',
               tags: ['imported-from-csv']
             };
-            
-            // Solo agregar shopifyId si existe (como opcional)
-            // No lo agregamos para imports CSV
             
             customer = await Customer.create(customerData);
             stats.created++;
@@ -514,12 +512,357 @@ class ListsController {
           ...stats,
           totalMembers: list.memberCount
         },
-        // Enviar muestra de emails (primeros 10)
         emailsSample: emailsImported.slice(0, 10)
       });
       
     } catch (error) {
       console.error('❌ Error importando CSV:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // ==================== ANÁLISIS DE ENGAGEMENT ====================
+
+  // Analizar engagement de los miembros de una lista
+  async analyzeEngagement(req, res) {
+    try {
+      const list = await List.findById(req.params.id);
+      
+      if (!list) {
+        return res.status(404).json({ error: 'Lista no encontrada' });
+      }
+      
+      console.log(`📊 Analizando engagement de lista: ${list.name}`);
+      
+      // Obtener todas las campañas enviadas a esta lista
+      const campaigns = await Campaign.find({
+        targetType: 'list',
+        list: list._id,
+        status: 'sent'
+      }).select('_id name sentAt');
+      
+      if (campaigns.length === 0) {
+        return res.json({
+          list: {
+            id: list._id,
+            name: list.name,
+            memberCount: list.memberCount
+          },
+          campaignsSent: 0,
+          message: 'No hay campañas enviadas a esta lista aún',
+          members: []
+        });
+      }
+      
+      console.log(`📧 Analizando ${campaigns.length} campañas enviadas`);
+      
+      const campaignIds = campaigns.map(c => c._id);
+      
+      // Obtener todos los eventos de estas campañas
+      const events = await EmailEvent.find({
+        campaign: { $in: campaignIds }
+      }).populate('customer', 'email firstName lastName');
+      
+      console.log(`📈 ${events.length} eventos encontrados`);
+      
+      // Analizar engagement por customer
+      const memberEngagement = {};
+      
+      // Inicializar todos los miembros de la lista
+      for (const memberId of list.members) {
+        memberEngagement[memberId.toString()] = {
+          customerId: memberId,
+          campaignsSent: 0,
+          opens: 0,
+          clicks: 0,
+          bounces: 0,
+          lastOpenDate: null,
+          engagementScore: 0,
+          status: 'no-activity'
+        };
+      }
+      
+      // Contar eventos por customer - ✅ VALIDACIÓN SEGURA
+      const validEvents = events.filter(event => 
+        event.customer && event.customer._id
+      );
+      
+      validEvents.forEach(event => {
+        const customerId = event.customer._id.toString();
+        
+        if (!memberEngagement[customerId]) {
+          memberEngagement[customerId] = {
+            customerId: event.customer._id,
+            customer: event.customer,
+            campaignsSent: 0,
+            opens: 0,
+            clicks: 0,
+            bounces: 0,
+            lastOpenDate: null,
+            engagementScore: 0
+          };
+        }
+        
+        const engagement = memberEngagement[customerId];
+        
+        switch (event.eventType) {
+          case 'sent':
+            engagement.campaignsSent++;
+            break;
+          case 'opened':
+            engagement.opens++;
+            if (!engagement.lastOpenDate || new Date(event.eventDate) > new Date(engagement.lastOpenDate)) {
+              engagement.lastOpenDate = event.eventDate;
+            }
+            break;
+          case 'clicked':
+            engagement.clicks++;
+            break;
+          case 'bounced':
+            engagement.bounces++;
+            break;
+        }
+      });
+      
+      // Cargar información de customers
+      const customerIds = Object.keys(memberEngagement);
+      const customers = await Customer.find({
+        _id: { $in: customerIds }
+      }).select('email firstName lastName').lean();
+      
+      const customersMap = {};
+      customers.forEach(c => {
+        customersMap[c._id.toString()] = c;
+      });
+      
+      // Calcular engagement score y clasificar
+      const members = Object.values(memberEngagement).map(engagement => {
+        const customer = customersMap[engagement.customerId.toString()];
+        
+        if (!customer) return null;
+        
+        // Calcular score: opens (5pts) + clicks (10pts) - bounces (20pts)
+        const score = (engagement.opens * 5) + (engagement.clicks * 10) - (engagement.bounces * 20);
+        engagement.engagementScore = score;
+        
+        // Clasificar engagement
+        if (engagement.bounces > 0) {
+          engagement.status = 'bounced';
+        } else if (engagement.campaignsSent === 0) {
+          engagement.status = 'never-sent';
+        } else if (engagement.opens === 0) {
+          engagement.status = 'never-opened';
+        } else if (engagement.clicks > 0) {
+          engagement.status = 'highly-engaged';
+        } else if (engagement.opens >= engagement.campaignsSent * 0.5) {
+          engagement.status = 'engaged';
+        } else {
+          engagement.status = 'low-engagement';
+        }
+        
+        // Calcular open rate
+        engagement.openRate = engagement.campaignsSent > 0 
+          ? ((engagement.opens / engagement.campaignsSent) * 100).toFixed(1)
+          : 0;
+        
+        engagement.customer = customer;
+        
+        return engagement;
+      }).filter(Boolean);
+      
+      // Calcular estadísticas
+      const stats = {
+        total: members.length,
+        highlyEngaged: members.filter(m => m.status === 'highly-engaged').length,
+        engaged: members.filter(m => m.status === 'engaged').length,
+        lowEngagement: members.filter(m => m.status === 'low-engagement').length,
+        neverOpened: members.filter(m => m.status === 'never-opened').length,
+        bounced: members.filter(m => m.status === 'bounced').length,
+        neverSent: members.filter(m => m.status === 'never-sent').length
+      };
+      
+      // Calcular porcentajes
+      stats.engagedPercent = stats.total > 0 
+        ? (((stats.highlyEngaged + stats.engaged) / stats.total) * 100).toFixed(1)
+        : 0;
+      
+      console.log(`✅ Análisis completado: ${stats.engagedPercent}% engaged`);
+      
+      res.json({
+        list: {
+          id: list._id,
+          name: list.name,
+          memberCount: list.memberCount
+        },
+        campaignsSent: campaigns.length,
+        campaigns: campaigns.map(c => ({
+          id: c._id,
+          name: c.name,
+          sentAt: c.sentAt
+        })),
+        stats,
+        members: members.sort((a, b) => b.engagementScore - a.engagementScore)
+      });
+      
+    } catch (error) {
+      console.error('Error analizando engagement:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // Limpiar miembros inactivos de una lista
+  async cleanMembers(req, res) {
+    try {
+      const list = await List.findById(req.params.id);
+      
+      if (!list) {
+        return res.status(404).json({ error: 'Lista no encontrada' });
+      }
+      
+      const { criteria, dryRun = true } = req.body;
+      
+      if (!criteria) {
+        return res.status(400).json({ 
+          error: 'Debes especificar un criterio de limpieza' 
+        });
+      }
+      
+      console.log(`🧹 Limpiando lista: ${list.name} (${dryRun ? 'simulación' : 'real'})`);
+      console.log(`📋 Criterio: ${criteria}`);
+      
+      let customersToRemove = [];
+      
+      if (criteria === 'custom' && req.body.customerIds) {
+        customersToRemove = req.body.customerIds;
+      } else {
+        // Obtener análisis de engagement
+        const campaigns = await Campaign.find({
+          targetType: 'list',
+          list: list._id,
+          status: 'sent'
+        }).select('_id');
+        
+        if (campaigns.length === 0) {
+          return res.status(400).json({ 
+            error: 'No hay campañas enviadas para analizar engagement' 
+          });
+        }
+        
+        const campaignIds = campaigns.map(c => c._id);
+        const events = await EmailEvent.find({
+          campaign: { $in: campaignIds }
+        });
+        
+        // Analizar por customer
+        const customerActivity = {};
+        
+        events.forEach(event => {
+          if (!event.customer) return;
+          
+          const customerId = event.customer.toString();
+          
+          if (!customerActivity[customerId]) {
+            customerActivity[customerId] = {
+              sent: 0,
+              opens: 0,
+              bounces: 0,
+              lastOpen: null
+            };
+          }
+          
+          switch (event.eventType) {
+            case 'sent':
+              customerActivity[customerId].sent++;
+              break;
+            case 'opened':
+              customerActivity[customerId].opens++;
+              customerActivity[customerId].lastOpen = event.eventDate;
+              break;
+            case 'bounced':
+              customerActivity[customerId].bounces++;
+              break;
+          }
+        });
+        
+        // Filtrar según criterio
+        const now = new Date();
+        const ninetyDaysAgo = new Date(now.getTime() - (90 * 24 * 60 * 60 * 1000));
+        
+        for (const memberId of list.members) {
+          const memberIdStr = memberId.toString();
+          const activity = customerActivity[memberIdStr];
+          
+          let shouldRemove = false;
+          
+          switch (criteria) {
+            case 'never-opened':
+              shouldRemove = activity && activity.sent > 0 && activity.opens === 0;
+              break;
+              
+            case 'bounced':
+              shouldRemove = activity && activity.bounces > 0;
+              break;
+              
+            case 'low-engagement':
+              if (activity && activity.sent > 0) {
+                const openRate = (activity.opens / activity.sent) * 100;
+                shouldRemove = openRate < 25;
+              }
+              break;
+              
+            case 'inactive-90-days':
+              if (activity && activity.lastOpen) {
+                const lastOpen = new Date(activity.lastOpen);
+                shouldRemove = lastOpen < ninetyDaysAgo;
+              } else if (activity && activity.sent > 0) {
+                shouldRemove = true;
+              }
+              break;
+          }
+          
+          if (shouldRemove) {
+            customersToRemove.push(memberId);
+          }
+        }
+      }
+      
+      console.log(`🔍 Encontrados ${customersToRemove.length} miembros para remover`);
+      
+      // Si es dry run, solo retornar la simulación
+      if (dryRun) {
+        const customersInfo = await Customer.find({
+          _id: { $in: customersToRemove }
+        }).select('email firstName lastName').limit(20);
+        
+        return res.json({
+          dryRun: true,
+          toRemove: customersToRemove.length,
+          currentMembers: list.memberCount,
+          afterClean: list.memberCount - customersToRemove.length,
+          preview: customersInfo,
+          message: 'Esta es una simulación. Usa dryRun=false para ejecutar.'
+        });
+      }
+      
+      // Ejecutar limpieza real
+      const originalCount = list.memberCount;
+      
+      for (const customerId of customersToRemove) {
+        await list.removeMember(customerId);
+      }
+      
+      console.log(`✅ Limpieza completada: ${customersToRemove.length} miembros removidos`);
+      
+      res.json({
+        success: true,
+        removed: customersToRemove.length,
+        before: originalCount,
+        after: list.memberCount,
+        list
+      });
+      
+    } catch (error) {
+      console.error('Error limpiando lista:', error);
       res.status(500).json({ error: error.message });
     }
   }
