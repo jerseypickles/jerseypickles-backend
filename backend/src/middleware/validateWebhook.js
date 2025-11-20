@@ -3,37 +3,39 @@ const crypto = require('crypto');
 
 const validateShopifyWebhook = (req, res, next) => {
   try {
-    // Obtener HMAC del header
     const hmac = req.headers['x-shopify-hmac-sha256'];
+    const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
     
+    // Validar que existan los requisitos
     if (!hmac) {
-      console.error('❌ Webhook sin HMAC');
+      console.error('❌ Webhook sin HMAC header');
       return res.status(401).json({ error: 'No HMAC header' });
     }
     
-    // Obtener el raw body
-    const body = req.body;
-    const bodyString = typeof body === 'string' ? body : JSON.stringify(body);
+    if (!secret) {
+      console.error('❌ SHOPIFY_WEBHOOK_SECRET no configurado');
+      return res.status(500).json({ error: 'Webhook secret not configured' });
+    }
+    
+    // Usar raw body (el string original sin parsear)
+    const body = req.rawBody || JSON.stringify(req.body);
     
     // Calcular HMAC
     const hash = crypto
-      .createHmac('sha256', process.env.SHOPIFY_WEBHOOK_SECRET)
-      .update(bodyString, 'utf8')
+      .createHmac('sha256', secret)
+      .update(body, 'utf8')
       .digest('base64');
     
-    // Comparar
+    // Comparar HMAC
     if (hash !== hmac) {
       console.error('❌ HMAC inválido');
-      return res.status(401).json({ error: 'Invalid HMAC' });
+      console.error(`   Expected: ${hash}`);
+      console.error(`   Received: ${hmac}`);
+      console.error(`   Topic: ${req.headers['x-shopify-topic']}`);
+      return res.status(401).json({ error: 'Invalid HMAC signature' });
     }
     
-    console.log('✅ Webhook verificado');
-    
-    // Parsear body si es string
-    if (typeof body === 'string') {
-      req.body = JSON.parse(body);
-    }
-    
+    console.log(`✅ Webhook verificado: ${req.headers['x-shopify-topic']}`);
     next();
     
   } catch (error) {
