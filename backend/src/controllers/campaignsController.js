@@ -1,6 +1,7 @@
 // backend/src/controllers/campaignsController.js
 const Campaign = require('../models/Campaign');
 const Segment = require('../models/Segment');
+const List = require('../models/List'); // NUEVO
 const Customer = require('../models/Customer');
 const EmailEvent = require('../models/EmailEvent');
 const emailService = require('../services/emailService');
@@ -25,6 +26,7 @@ class CampaignsController {
       
       const campaigns = await Campaign.find(query)
         .populate('segment', 'name customerCount')
+        .populate('list', 'name memberCount') // NUEVO
         .sort({ createdAt: -1 })
         .limit(limit * 1)
         .skip((page - 1) * limit);
@@ -48,7 +50,8 @@ class CampaignsController {
   async getOne(req, res) {
     try {
       const campaign = await Campaign.findById(req.params.id)
-        .populate('segment');
+        .populate('segment')
+        .populate('list'); // NUEVO
       
       if (!campaign) {
         return res.status(404).json({ error: 'Campaña no encontrada' });
@@ -62,7 +65,7 @@ class CampaignsController {
     }
   }
 
-  // Crear campaña
+  // Crear campaña - ACTUALIZADO
   async create(req, res) {
     try {
       const {
@@ -70,7 +73,9 @@ class CampaignsController {
         subject,
         htmlContent,
         previewText,
+        targetType = 'segment', // NUEVO
         segmentId,
+        listId, // NUEVO
         fromName,
         fromEmail,
         replyTo,
@@ -79,10 +84,27 @@ class CampaignsController {
         templateBlocks
       } = req.body;
       
-      // Validar que el segmento existe
-      const segment = await Segment.findById(segmentId);
-      if (!segment) {
-        return res.status(404).json({ error: 'Segmento no encontrado' });
+      let totalRecipients = 0;
+      
+      // Validar según targetType
+      if (targetType === 'segment') {
+        if (!segmentId) {
+          return res.status(400).json({ error: 'Debes seleccionar un segmento' });
+        }
+        const segment = await Segment.findById(segmentId);
+        if (!segment) {
+          return res.status(404).json({ error: 'Segmento no encontrado' });
+        }
+        totalRecipients = segment.customerCount;
+      } else if (targetType === 'list') {
+        if (!listId) {
+          return res.status(400).json({ error: 'Debes seleccionar una lista' });
+        }
+        const list = await List.findById(listId);
+        if (!list) {
+          return res.status(404).json({ error: 'Lista no encontrada' });
+        }
+        totalRecipients = list.memberCount;
       }
       
       const campaign = await Campaign.create({
@@ -90,17 +112,19 @@ class CampaignsController {
         subject,
         htmlContent,
         previewText,
-        segment: segmentId,
+        targetType,
+        segment: targetType === 'segment' ? segmentId : null,
+        list: targetType === 'list' ? listId : null,
         fromName: fromName || 'Jersey Pickles',
         fromEmail: fromEmail || 'info@jerseypickles.com',
         replyTo,
         scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
         tags,
         templateBlocks: templateBlocks || [],
-        'stats.totalRecipients': segment.customerCount
+        'stats.totalRecipients': totalRecipients
       });
       
-      console.log(`✅ Campaña creada: ${name}`);
+      console.log(`✅ Campaña creada: ${name} (${targetType})`);
       
       res.status(201).json(campaign);
       
@@ -110,7 +134,7 @@ class CampaignsController {
     }
   }
 
-  // Actualizar campaña
+  // Actualizar campaña - ACTUALIZADO
   async update(req, res) {
     try {
       const campaign = await Campaign.findById(req.params.id);
@@ -131,7 +155,9 @@ class CampaignsController {
         subject,
         htmlContent,
         previewText,
+        targetType,
         segmentId,
+        listId,
         fromName,
         fromEmail,
         replyTo,
@@ -151,13 +177,31 @@ class CampaignsController {
       if (tags) campaign.tags = tags;
       if (templateBlocks) campaign.templateBlocks = templateBlocks;
       
-      if (segmentId && segmentId !== campaign.segment.toString()) {
-        const segment = await Segment.findById(segmentId);
-        if (!segment) {
-          return res.status(404).json({ error: 'Segmento no encontrado' });
+      // NUEVO: Actualizar targetType y referencias
+      if (targetType) {
+        campaign.targetType = targetType;
+        
+        if (targetType === 'segment') {
+          if (segmentId && segmentId !== campaign.segment?.toString()) {
+            const segment = await Segment.findById(segmentId);
+            if (!segment) {
+              return res.status(404).json({ error: 'Segmento no encontrado' });
+            }
+            campaign.segment = segmentId;
+            campaign.list = null;
+            campaign.stats.totalRecipients = segment.customerCount;
+          }
+        } else if (targetType === 'list') {
+          if (listId && listId !== campaign.list?.toString()) {
+            const list = await List.findById(listId);
+            if (!list) {
+              return res.status(404).json({ error: 'Lista no encontrada' });
+            }
+            campaign.list = listId;
+            campaign.segment = null;
+            campaign.stats.totalRecipients = list.memberCount;
+          }
         }
-        campaign.segment = segmentId;
-        campaign.stats.totalRecipients = segment.customerCount;
       }
       
       await campaign.save();
@@ -203,11 +247,12 @@ class CampaignsController {
     }
   }
 
-  // Enviar campaña (el más importante)
+  // Enviar campaña - ACTUALIZADO
   async send(req, res) {
     try {
       const campaign = await Campaign.findById(req.params.id)
-        .populate('segment');
+        .populate('segment')
+        .populate('list'); // NUEVO
       
       if (!campaign) {
         return res.status(404).json({ error: 'Campaña no encontrada' });
@@ -224,15 +269,37 @@ class CampaignsController {
       console.log(`║  📧 ENVIANDO CAMPAÑA: ${campaign.name}`);
       console.log('╚═══════════════════════════════════════════════╝\n');
       
-      // Obtener clientes del segmento
-      const customers = await segmentationService.evaluateSegment(
-        campaign.segment.conditions,
-        { select: 'email firstName lastName _id' }
-      );
+      let customers;
+      
+      // NUEVO: Obtener clientes según targetType
+      if (campaign.targetType === 'list') {
+        console.log(`📋 Obteniendo clientes de la lista: ${campaign.list.name}`);
+        
+        // Obtener la lista completa con sus miembros
+        const list = await List.findById(campaign.list._id);
+        if (!list || list.members.length === 0) {
+          return res.status(400).json({ error: 'La lista no tiene miembros' });
+        }
+        
+        // Buscar los customers
+        customers = await Customer.find({
+          _id: { $in: list.members }
+        }).select('email firstName lastName _id');
+        
+      } else {
+        // Método existente para segmentos
+        console.log(`🎯 Evaluando segmento: ${campaign.segment.name}`);
+        customers = await segmentationService.evaluateSegment(
+          campaign.segment.conditions,
+          { select: 'email firstName lastName _id' }
+        );
+      }
       
       if (customers.length === 0) {
         return res.status(400).json({ 
-          error: 'El segmento no tiene clientes' 
+          error: campaign.targetType === 'list' 
+            ? 'La lista no tiene miembros' 
+            : 'El segmento no tiene clientes' 
         });
       }
       
@@ -283,9 +350,8 @@ class CampaignsController {
       
       const { emailQueue, addEmailsToQueue, isAvailable } = require('../jobs/emailQueue');
       
-      // ✅ CAMBIO CRÍTICO: Llamar isAvailable como función
       // Verificar que la cola esté disponible
-      if (!isAvailable()) {  // ✅ CAMBIO AQUÍ: agregar ()
+      if (!isAvailable()) {
         console.warn('⚠️  Cola no disponible, usando envío directo limitado');
         
         const MAX_DIRECT_SEND = 50;
@@ -451,7 +517,7 @@ class CampaignsController {
     }
   }
 
-  // Duplicar campaña
+  // Duplicar campaña - ACTUALIZADO
   async duplicate(req, res) {
     try {
       const original = await Campaign.findById(req.params.id);
@@ -465,7 +531,9 @@ class CampaignsController {
         subject: original.subject,
         htmlContent: original.htmlContent,
         previewText: original.previewText,
+        targetType: original.targetType, // NUEVO
         segment: original.segment,
+        list: original.list, // NUEVO
         fromName: original.fromName,
         fromEmail: original.fromEmail,
         replyTo: original.replyTo,
@@ -487,7 +555,9 @@ class CampaignsController {
   // ESTADÍSTICAS DETALLADAS DE UNA CAMPAÑA
   async getStats(req, res) {
     try {
-      const campaign = await Campaign.findById(req.params.id);
+      const campaign = await Campaign.findById(req.params.id)
+        .populate('segment', 'name')
+        .populate('list', 'name'); // NUEVO
       
       if (!campaign) {
         return res.status(404).json({ error: 'Campaña no encontrada' });
@@ -595,6 +665,9 @@ class CampaignsController {
           subject: campaign.subject,
           status: campaign.status,
           sentAt: campaign.sentAt,
+          targetType: campaign.targetType, // NUEVO
+          list: campaign.list, // NUEVO
+          segment: campaign.segment,
           stats: campaign.stats,
         },
         stats,
@@ -651,14 +724,16 @@ class CampaignsController {
     }
   }
 
-  // Crear campaña rápida con template
+  // Crear campaña rápida con template - ACTUALIZADO
   async createFromTemplate(req, res) {
     try {
       const { 
         templateType, 
         name, 
         subject,
+        targetType = 'segment',
         segmentId,
+        listId, // NUEVO
         templateData = {}
       } = req.body;
       
@@ -701,7 +776,9 @@ class CampaignsController {
         name: name || `Campaña ${templateType}`,
         subject: subject || `Mensaje de Jersey Pickles`,
         htmlContent,
-        segment: segmentId,
+        targetType,
+        segment: targetType === 'segment' ? segmentId : null,
+        list: targetType === 'list' ? listId : null,
         status: 'draft'
       });
       
@@ -741,12 +818,10 @@ class CampaignsController {
       const { getQueueStatus } = require('../jobs/emailQueue');
       const status = await getQueueStatus();
       
-      // ✅ SIEMPRE responder, nunca fallar
       res.json(status);
     } catch (error) {
       console.error('Error obteniendo estado de cola:', error);
       
-      // ✅ Responder con estado offline en caso de error
       res.json({
         available: false,
         waiting: 0,

@@ -19,12 +19,25 @@ const campaignSchema = new mongoose.Schema({
   },
   previewText: String,
   
-  // Segmento objetivo
+  // ==================== NUEVO: TARGET TYPE ====================
+  targetType: {
+    type: String,
+    enum: ['list', 'segment'],
+    default: 'segment'
+  },
+  
+  // Segmento objetivo (existente)
   segment: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'Segment',
-    required: true
+    ref: 'Segment'
   },
+  
+  // NUEVO: Lista objetivo
+  list: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'List'
+  },
+  // ============================================================
   
   // Estado
   status: {
@@ -88,6 +101,19 @@ const campaignSchema = new mongoose.Schema({
 // Índices
 campaignSchema.index({ status: 1, scheduledAt: 1 });
 campaignSchema.index({ createdAt: -1 });
+campaignSchema.index({ list: 1 }); // NUEVO
+campaignSchema.index({ targetType: 1 }); // NUEVO
+
+// Validación: debe tener o segment o list según targetType
+campaignSchema.pre('save', function(next) {
+  if (this.targetType === 'list' && !this.list) {
+    next(new Error('Debe especificar una lista cuando targetType es "list"'));
+  } else if (this.targetType === 'segment' && !this.segment) {
+    next(new Error('Debe especificar un segmento cuando targetType es "segment"'));
+  } else {
+    next();
+  }
+});
 
 // ==================== MÉTODOS DE INSTANCIA ====================
 
@@ -108,15 +134,11 @@ campaignSchema.methods.updateRates = function() {
 // Actualizar estadísticas desde eventos (llamado desde tracking)
 campaignSchema.statics.updateStats = async function(campaignId, eventType) {
   try {
-    // Mapear tipo de evento a campo de stats
     const statField = `stats.${eventType}`;
-    
-    // Incrementar el contador
     await this.findByIdAndUpdate(campaignId, {
       $inc: { [statField]: 1 }
     });
     
-    // Recalcular rates
     const campaign = await this.findById(campaignId);
     if (campaign) {
       campaign.updateRates();
