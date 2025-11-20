@@ -10,7 +10,6 @@ const connectDB = require('./src/config/database');
 const errorHandler = require('./src/middleware/errorHandler');
 const { apiLimiter } = require('./src/middleware/rateLimiter');
 const { closeQueue } = require('./src/jobs/emailQueue');
-const { rawBodySaver } = require('./src/middleware/rawBody'); // 🆕 NUEVO
 
 const app = express();
 
@@ -64,11 +63,18 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
-// 🆕 RAW BODY SAVER - DEBE IR ANTES DE express.json()
-app.use(rawBodySaver);
+// 🆕 EXPRESS.JSON CON VERIFY PARA CAPTURAR RAW BODY (WEBHOOKS)
+// Esta es la forma correcta de capturar el raw body sin romper el stream
+app.use(express.json({ 
+  limit: '10mb',
+  verify: (req, res, buf, encoding) => {
+    // Solo guardar raw body para webhooks de Shopify
+    if (req.originalUrl.includes('/webhooks')) {
+      req.rawBody = buf.toString(encoding || 'utf8');
+    }
+  }
+}));
 
-// ✅ AUMENTAR LÍMITE A 10MB PARA SOPORTAR CSV E IMÁGENES
-app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // COOKIE PARSER (para attribution tracking)
@@ -149,7 +155,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔗 MongoDB: ${mongoose.connection.readyState === 1 ? '✅ Connected' : '⏳ Connecting...'}`);
   console.log(`🍪 Cookie Parser: Enabled`);
-  console.log(`🔒 Webhook Validation: ${process.env.SHOPIFY_WEBHOOK_SECRET ? 'Enabled' : '⚠️  Disabled'}`); // 🆕
+  console.log(`🔒 Webhook Validation: ${process.env.SHOPIFY_WEBHOOK_SECRET ? 'Enabled' : '⚠️  Disabled'}`);
   console.log(`✅ Server ready - Payload limit: 10MB`);
 });
 
