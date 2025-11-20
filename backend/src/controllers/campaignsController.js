@@ -549,148 +549,228 @@ class CampaignsController {
   }
 
   // ESTADÍSTICAS DETALLADAS DE UNA CAMPAÑA - ✅ CORREGIDO
-  async getStats(req, res) {
-    try {
-      const campaign = await Campaign.findById(req.params.id)
-        .populate('segment', 'name')
-        .populate('list', 'name');
+// ESTADÍSTICAS DETALLADAS DE UNA CAMPAÑA CON REVENUE
+async getStats(req, res) {
+  try {
+    const campaign = await Campaign.findById(req.params.id)
+      .populate('segment', 'name')
+      .populate('list', 'name');
+    
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaña no encontrada' });
+    }
+    
+    // Obtener todos los eventos de esta campaña
+    const events = await EmailEvent.find({ campaign: req.params.id })
+      .populate('customer', 'email firstName lastName')
+      .sort({ eventDate: -1 });
+    
+    // Calcular estadísticas por tipo de evento
+    const stats = {
+      sent: events.filter(e => e.eventType === 'sent').length,
+      delivered: events.filter(e => e.eventType === 'delivered').length,
+      opened: events.filter(e => e.eventType === 'opened').length,
+      clicked: events.filter(e => e.eventType === 'clicked').length,
+      bounced: events.filter(e => e.eventType === 'bounced').length,
+      complained: events.filter(e => e.eventType === 'complained').length,
+      purchased: campaign.stats.purchased || 0, // 🆕
+    };
+    
+    // Calcular tasas
+    const totalDelivered = stats.delivered || stats.sent || 1;
+    const rates = {
+      deliveryRate: stats.sent > 0 ? ((stats.delivered / stats.sent) * 100).toFixed(1) : '0.0',
+      openRate: totalDelivered > 0 ? ((stats.opened / totalDelivered) * 100).toFixed(1) : '0.0',
+      clickRate: stats.opened > 0 ? ((stats.clicked / stats.opened) * 100).toFixed(1) : '0.0',
+      bounceRate: stats.sent > 0 ? ((stats.bounced / stats.sent) * 100).toFixed(1) : '0.0',
+      clickToOpenRate: stats.opened > 0 ? ((stats.clicked / stats.opened) * 100).toFixed(1) : '0.0',
+      conversionRate: campaign.stats.conversionRate || 0, // 🆕
+    };
+    
+    // Stats por fuente
+    const statsBySource = {
+      custom: events.filter(e => e.source === 'custom').length,
+      resend: events.filter(e => e.source === 'resend').length,
+      shopify: events.filter(e => e.source === 'shopify').length, // 🆕
+    };
+    
+    // Top links clickeados
+    const clickEvents = events.filter(e => e.eventType === 'clicked' && e.metadata?.url);
+    const linkCounts = {};
+    clickEvents.forEach(event => {
+      const url = event.metadata.url;
+      linkCounts[url] = (linkCounts[url] || 0) + 1;
+    });
+    const topLinks = Object.entries(linkCounts)
+      .map(([url, clicks]) => ({ url, clicks }))
+      .sort((a, b) => b.clicks - a.clicks)
+      .slice(0, 10);
+    
+    // 🆕 OBTENER ÓRDENES CON REVENUE ATTRIBUTION
+    const Order = require('../models/Order');
+    const orders = await Order.find({
+      'attribution.campaign': req.params.id
+    }).populate('customer', 'email firstName lastName');
+    
+    // 🆕 CALCULAR TOP PRODUCTOS VENDIDOS
+    const productCounts = {};
+    const productRevenue = {};
+    
+    orders.forEach(order => {
+      if (order.lineItems && Array.isArray(order.lineItems)) {
+        order.lineItems.forEach(item => {
+          const key = item.title || item.name;
+          if (key) {
+            productCounts[key] = (productCounts[key] || 0) + (item.quantity || 1);
+            productRevenue[key] = (productRevenue[key] || 0) + (item.price * (item.quantity || 1));
+          }
+        });
+      }
+    });
+    
+    const topProducts = Object.entries(productCounts)
+      .map(([title, quantity]) => ({
+        title,
+        quantity,
+        revenue: productRevenue[title] || 0
+      }))
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 10);
+    
+    // Eventos recientes (últimos 50)
+    const recentEvents = events.slice(0, 50);
+    
+    // 🆕 Timeline por día (últimos 30 días) CON REVENUE
+    const last30Days = Array.from({ length: 30 }, (_, i) => {
+      const date = new Date();
+      date.setDate(date.getDate() - (29 - i));
+      date.setHours(0, 0, 0, 0);
+      return date;
+    });
+    
+    const timeline = last30Days.map(date => {
+      const nextDay = new Date(date);
+      nextDay.setDate(nextDay.getDate() + 1);
       
-      if (!campaign) {
-        return res.status(404).json({ error: 'Campaña no encontrada' });
+      const dayEvents = events.filter(e => {
+        const eventDate = new Date(e.eventDate);
+        return eventDate >= date && eventDate < nextDay;
+      });
+      
+      // 🆕 REVENUE POR DÍA
+      const dayOrders = orders.filter(order => {
+        const orderDate = new Date(order.createdAt);
+        return orderDate >= date && orderDate < nextDay;
+      });
+      
+      const dayRevenue = dayOrders.reduce((sum, order) => 
+        sum + (order.totalPrice || 0), 0
+      );
+      
+      return {
+        date: date.toISOString().split('T')[0],
+        dateLabel: date.toLocaleDateString('es-ES', { month: 'short', day: 'numeric' }),
+        sent: dayEvents.filter(e => e.eventType === 'sent').length,
+        opened: dayEvents.filter(e => e.eventType === 'opened').length,
+        clicked: dayEvents.filter(e => e.eventType === 'clicked').length,
+        bounced: dayEvents.filter(e => e.eventType === 'bounced').length,
+        purchased: dayOrders.length, // 🆕
+        revenue: dayRevenue, // 🆕
+      };
+    });
+    
+    // 🆕 CLIENTES MÁS ACTIVOS CON REVENUE
+    const customerActivity = {};
+    
+    const validEvents = events.filter(event => 
+      event.customer && 
+      event.customer._id && 
+      (event.eventType === 'opened' || event.eventType === 'clicked')
+    );
+    
+    validEvents.forEach(event => {
+      const customerId = event.customer._id.toString();
+      
+      if (!customerActivity[customerId]) {
+        customerActivity[customerId] = {
+          customer: event.customer,
+          opens: 0,
+          clicks: 0,
+          purchases: 0,
+          revenue: 0,
+          total: 0
+        };
       }
       
-      // Obtener todos los eventos de esta campaña
-      const events = await EmailEvent.find({ campaign: req.params.id })
-        .populate('customer', 'email firstName lastName')
-        .sort({ eventDate: -1 });
-      
-      // Calcular estadísticas por tipo de evento
-      const stats = {
-        sent: events.filter(e => e.eventType === 'sent').length,
-        delivered: events.filter(e => e.eventType === 'delivered').length,
-        opened: events.filter(e => e.eventType === 'opened').length,
-        clicked: events.filter(e => e.eventType === 'clicked').length,
-        bounced: events.filter(e => e.eventType === 'bounced').length,
-        complained: events.filter(e => e.eventType === 'complained').length,
-      };
-      
-      // Calcular tasas
-      const totalDelivered = stats.delivered || stats.sent || 1;
-      const rates = {
-        deliveryRate: stats.sent > 0 ? ((stats.delivered / stats.sent) * 100).toFixed(1) : '0.0',
-        openRate: totalDelivered > 0 ? ((stats.opened / totalDelivered) * 100).toFixed(1) : '0.0',
-        clickRate: stats.opened > 0 ? ((stats.clicked / stats.opened) * 100).toFixed(1) : '0.0',
-        bounceRate: stats.sent > 0 ? ((stats.bounced / stats.sent) * 100).toFixed(1) : '0.0',
-        clickToOpenRate: stats.opened > 0 ? ((stats.clicked / stats.opened) * 100).toFixed(1) : '0.0',
-      };
-      
-      // Stats por fuente (custom vs resend)
-      const statsBySource = {
-        custom: events.filter(e => e.source === 'custom').length,
-        resend: events.filter(e => e.source === 'resend').length,
-      };
-      
-      // Top links clickeados
-      const clickEvents = events.filter(e => e.eventType === 'clicked' && e.clickedUrl);
-      const linkCounts = {};
-      clickEvents.forEach(event => {
-        linkCounts[event.clickedUrl] = (linkCounts[event.clickedUrl] || 0) + 1;
-      });
-      const topLinks = Object.entries(linkCounts)
-        .map(([url, clicks]) => ({ url, clicks }))
-        .sort((a, b) => b.clicks - a.clicks)
-        .slice(0, 10);
-      
-      // Eventos recientes (últimos 50)
-      const recentEvents = events.slice(0, 50);
-      
-      // Timeline por día (últimos 7 días)
-      const last7Days = Array.from({ length: 7 }, (_, i) => {
-        const date = new Date();
-        date.setDate(date.getDate() - (6 - i));
-        date.setHours(0, 0, 0, 0);
-        return date;
-      });
-      
-      const timeline = last7Days.map(date => {
-        const nextDay = new Date(date);
-        nextDay.setDate(nextDay.getDate() + 1);
-        
-        const dayEvents = events.filter(e => {
-          const eventDate = new Date(e.eventDate);
-          return eventDate >= date && eventDate < nextDay;
-        });
-        
-        return {
-          date: date.toISOString().split('T')[0],
-          dateLabel: date.toLocaleDateString('es-ES', { month: 'short', day: 'numeric' }),
-          sent: dayEvents.filter(e => e.eventType === 'sent').length,
-          opened: dayEvents.filter(e => e.eventType === 'opened').length,
-          clicked: dayEvents.filter(e => e.eventType === 'clicked').length,
-          bounced: dayEvents.filter(e => e.eventType === 'bounced').length,
-        };
-      });
-      
-      // Clientes más activos (más opens + clicks) - ✅ CORREGIDO
-      // Clientes más activos (más opens + clicks) - ✅ SOLUCIÓN MÁS SEGURA
-      const customerActivity = {};
-
-      // Primero filtrar solo eventos válidos
-      const validEvents = events.filter(event => 
-        event.customer && 
-        event.customer._id && 
-        (event.eventType === 'opened' || event.eventType === 'clicked')
-      );
-
-      // Luego procesar solo los eventos válidos
-      validEvents.forEach(event => {
-        const customerId = event.customer._id.toString();
+      if (event.eventType === 'opened') customerActivity[customerId].opens++;
+      if (event.eventType === 'clicked') customerActivity[customerId].clicks++;
+      customerActivity[customerId].total++;
+    });
+    
+    // 🆕 AGREGAR COMPRAS Y REVENUE POR CLIENTE
+    orders.forEach(order => {
+      if (order.customer && order.customer._id) {
+        const customerId = order.customer._id.toString();
         
         if (!customerActivity[customerId]) {
           customerActivity[customerId] = {
-            customer: event.customer,
+            customer: order.customer,
             opens: 0,
             clicks: 0,
+            purchases: 0,
+            revenue: 0,
             total: 0
           };
         }
         
-        if (event.eventType === 'opened') customerActivity[customerId].opens++;
-        if (event.eventType === 'clicked') customerActivity[customerId].clicks++;
+        customerActivity[customerId].purchases++;
+        customerActivity[customerId].revenue += order.totalPrice || 0;
         customerActivity[customerId].total++;
-      });
-
-      const topCustomers = Object.values(customerActivity)
-        .sort((a, b) => b.total - a.total)
-        .slice(0, 10);
-      
-      res.json({
-        campaign: {
-          id: campaign._id,
-          name: campaign.name,
-          subject: campaign.subject,
-          status: campaign.status,
-          sentAt: campaign.sentAt,
-          targetType: campaign.targetType,
-          list: campaign.list,
-          segment: campaign.segment,
-          stats: campaign.stats,
-        },
-        stats,
-        rates,
-        statsBySource,
-        topLinks,
-        topCustomers,
-        recentEvents,
-        timeline,
-        totalEvents: events.length,
-      });
-      
-    } catch (error) {
-      console.error('Error obteniendo stats de campaña:', error);
-      res.status(500).json({ error: error.message });
-    }
+      }
+    });
+    
+    const topCustomers = Object.values(customerActivity)
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 10);
+    
+    // 🆕 OBJETO DE REVENUE CONSOLIDADO
+    const revenue = {
+      total: campaign.stats.totalRevenue || 0,
+      purchases: campaign.stats.purchased || 0,
+      averageOrderValue: campaign.stats.averageOrderValue || 0,
+      revenuePerEmail: campaign.stats.revenuePerEmail || 0,
+      conversionRate: campaign.stats.conversionRate || 0,
+    };
+    
+    res.json({
+      campaign: {
+        id: campaign._id,
+        name: campaign.name,
+        subject: campaign.subject,
+        status: campaign.status,
+        sentAt: campaign.sentAt,
+        targetType: campaign.targetType,
+        list: campaign.list,
+        segment: campaign.segment,
+        stats: campaign.stats,
+      },
+      stats,
+      rates,
+      statsBySource,
+      topLinks,
+      topCustomers,
+      topProducts, // 🆕
+      recentEvents,
+      timeline,
+      totalEvents: events.length,
+      revenue, // 🆕
+    });
+    
+  } catch (error) {
+    console.error('Error obteniendo stats de campaña:', error);
+    res.status(500).json({ error: error.message });
   }
+}
 
   // OBTENER EVENTOS CON PAGINACIÓN Y FILTROS
   async getEvents(req, res) {
