@@ -320,7 +320,8 @@ class CampaignsController {
         html = emailService.injectTracking(
           html, 
           campaign._id.toString(), 
-          testCustomer._id ? testCustomer._id.toString() : 'test'
+          testCustomer._id ? testCustomer._id.toString() : 'test',
+          testEmail  // ← AGREGAR
         );
         
         const result = await emailService.sendEmail({
@@ -378,7 +379,8 @@ class CampaignsController {
           html = emailService.injectTracking(
             html, 
             campaign._id.toString(), 
-            customer._id.toString()
+            customer._id.toString(),
+            customer.email  // ← AGREGAR
           );
           
           return {
@@ -455,7 +457,8 @@ class CampaignsController {
         html = emailService.injectTracking(
           html, 
           campaign._id.toString(), 
-          customer._id.toString()
+          customer._id.toString(),
+          customer.email  // ← AGREGAR
         );
         
         return {
