@@ -136,7 +136,7 @@ async function initializeQueue() {
             
             // Verificar si es el último job
             try {
-              const counts = await emailQueue.getJobCounts();
+              const counts = await emailQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed');
               if ((counts.waiting || 0) === 0 && (counts.active || 0) <= 1) {
                 await Campaign.findByIdAndUpdate(campaignId, {
                   status: 'sent',
@@ -394,7 +394,28 @@ async function closeQueue() {
   console.log('✅ Queue cerrada');
 }
 
-// ✅ Exportar también la configuración de rate limit
+// 🆕 NUEVOS MÉTODOS para obtener jobs activos
+async function getActiveJobs() {
+  if (!emailQueue || !isQueueReady) return [];
+  try {
+    return await emailQueue.getActive();
+  } catch (error) {
+    console.error('Error getting active jobs:', error);
+    return [];
+  }
+}
+
+async function getWaitingJobs() {
+  if (!emailQueue || !isQueueReady) return [];
+  try {
+    return await emailQueue.getWaiting();
+  } catch (error) {
+    console.error('Error getting waiting jobs:', error);
+    return [];
+  }
+}
+
+// ✅ Exportar también la configuración de rate limit y nuevos métodos
 module.exports = {
   emailQueue,
   addEmailsToQueue,
@@ -404,5 +425,7 @@ module.exports = {
   cleanQueue,
   closeQueue,
   isAvailable: () => emailQueue && isQueueReady,
-  getRateLimitConfig: () => RATE_LIMIT
+  getRateLimitConfig: () => RATE_LIMIT,
+  getActiveJobs,      // 🆕 NUEVO
+  getWaitingJobs      // 🆕 NUEVO
 };

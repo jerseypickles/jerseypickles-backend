@@ -910,12 +910,67 @@ class CampaignsController {
   // ==================== QUEUE MANAGEMENT ====================
 
   // Obtener estado de la cola
+// Obtener estado de la cola
   async getQueueStatus(req, res) {
     try {
-      const { getQueueStatus } = require('../jobs/emailQueue');
+      const { getQueueStatus, getActiveJobs, getWaitingJobs } = require('../jobs/emailQueue');
       const status = await getQueueStatus();
       
-      res.json(status);
+      // Si no hay queue disponible, devolver estado básico
+      if (!status.available) {
+        return res.json(status);
+      }
+      
+      // 🆕 Obtener información de campaña actual si hay trabajos activos
+      let currentCampaign = null;
+      
+      try {
+        // Intentar obtener jobs activos o en espera
+        const activeJobs = await getActiveJobs();
+        const waitingJobs = await getWaitingJobs();
+        
+        // Buscar el primer job con datos de campaña
+        const job = activeJobs[0] || waitingJobs[0];
+        
+        if (job && job.data && job.data.campaignId) {
+          const campaign = await Campaign.findById(job.data.campaignId);
+          
+          if (campaign) {
+            // Calcular totales reales
+            const totalInQueue = (status.waiting || 0) + (status.active || 0) + (status.delayed || 0);
+            const totalCompleted = status.completed || 0;
+            const totalFailed = status.failed || 0;
+            const totalRecipients = campaign.stats?.totalRecipients || 0;
+            
+            currentCampaign = {
+              id: campaign._id,
+              name: campaign.name,
+              subject: campaign.subject,
+              status: campaign.status,
+              totalRecipients: totalRecipients,
+              sent: campaign.stats?.sent || 0,
+              delivered: campaign.stats?.delivered || 0,
+              failed: campaign.stats?.failed || 0,
+              inQueue: totalInQueue,
+              completed: totalCompleted,
+              createdAt: campaign.createdAt,
+              sentAt: campaign.sentAt
+            };
+            
+            console.log(`📊 Campaña activa: ${campaign.name} - ${currentCampaign.sent}/${totalRecipients}`);
+          }
+        }
+      } catch (error) {
+        console.error('Error obteniendo campaña activa:', error.message);
+        // No fallar si hay error obteniendo campaña, solo log
+      }
+      
+      res.json({
+        ...status,
+        currentCampaign,
+        timestamp: new Date().toISOString()
+      });
+      
     } catch (error) {
       console.error('Error obteniendo estado de cola:', error);
       
@@ -928,7 +983,9 @@ class CampaignsController {
         delayed: 0,
         paused: false,
         total: 0,
-        error: error.message || 'Error obteniendo estado de la cola'
+        currentCampaign: null,
+        error: error.message || 'Error obteniendo estado de la cola',
+        timestamp: new Date().toISOString()
       });
     }
   }
