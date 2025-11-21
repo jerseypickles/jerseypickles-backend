@@ -1,4 +1,4 @@
-// backend/src/services/emailService.js
+// backend/src/services/emailService.js (ACTUALIZADO - INCLUYE EMAIL EN TRACKING)
 const { Resend } = require('resend');
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -19,7 +19,7 @@ class EmailService {
       
       // Inyectar tracking custom si aplica
       if (campaignId && customerId) {
-        html = this.injectTracking(html, campaignId, customerId);
+        html = this.injectTracking(html, campaignId, customerId, to); // ✅ Pasar email también
       }
       
       const data = await resend.emails.send({
@@ -28,7 +28,7 @@ class EmailService {
         subject,
         html,
         reply_to: replyTo,
-        tags: tags.length > 0 ? tags : undefined // Solo agregar tags si existen
+        tags: tags.length > 0 ? tags : undefined
       });
       
       console.log(`✅ Email enviado a ${to}: ${data.id}`);
@@ -64,10 +64,7 @@ class EmailService {
       
       console.log(`📦 Enviando batch de ${emailsArray.length} emails a Resend API...`);
       
-      // Formato esperado por Resend batch.send:
-      // Array de objetos con: from, to, subject, html, reply_to, tags
       const formattedEmails = emailsArray.map(email => {
-        // Asegurar que 'to' sea array
         const toArray = Array.isArray(email.to) ? email.to : [email.to];
         
         return {
@@ -80,14 +77,13 @@ class EmailService {
         };
       });
       
-      // ✅ Enviar batch usando Resend SDK
       const response = await resend.batch.send(formattedEmails);
       
       console.log(`✅ Batch enviado exitosamente: ${emailsArray.length} emails`);
       
       return { 
         success: true, 
-        data: response.data // Array de objetos con {id: "..."}
+        data: response.data
       };
       
     } catch (error) {
@@ -101,7 +97,7 @@ class EmailService {
     }
   }
 
-  // ==================== ENVÍO MASIVO (LEGACY - mantener para compatibilidad) ====================
+  // ==================== ENVÍO MASIVO (LEGACY) ====================
   
   async sendBulkEmails(emails, options = {}) {
     const {
@@ -116,7 +112,6 @@ class EmailService {
       details: []
     };
     
-    // Procesar en chunks
     for (let i = 0; i < emails.length; i += chunkSize) {
       const chunk = emails.slice(i, i + chunkSize);
       
@@ -143,7 +138,6 @@ class EmailService {
         }
       });
       
-      // Delay entre chunks
       if (i + chunkSize < emails.length) {
         await this.delay(delayBetweenChunks);
       }
@@ -156,12 +150,12 @@ class EmailService {
 
   // ==================== TRACKING ====================
   
-  generateTrackingPixel(campaignId, customerId) {
-    const trackingUrl = `${this.appUrl}/api/track/open/${campaignId}/${customerId}`;
+  generateTrackingPixel(campaignId, customerId, email) {
+    const trackingUrl = `${this.appUrl}/api/track/open/${campaignId}/${customerId}?email=${encodeURIComponent(email)}`;
     return `<img src="${trackingUrl}" width="1" height="1" alt="" style="display:block" />`;
   }
 
-  wrapLinksWithTracking(html, campaignId, customerId) {
+  wrapLinksWithTracking(html, campaignId, customerId, email) {
     const trackingBaseUrl = `${this.appUrl}/api/track/click/${campaignId}/${customerId}`;
     
     // Reemplazar todos los href
@@ -172,14 +166,15 @@ class EmailService {
         if (url.includes('/api/track/')) return match;
         
         const encodedUrl = encodeURIComponent(url);
-        return `href="${trackingBaseUrl}?url=${encodedUrl}"`;
+        const emailParam = `&email=${encodeURIComponent(email)}`; // ✅ Agregar email
+        return `href="${trackingBaseUrl}?url=${encodedUrl}${emailParam}"`;
       }
     );
   }
 
-  injectTracking(html, campaignId, customerId) {
+  injectTracking(html, campaignId, customerId, email) {
     // Agregar pixel al final del body
-    const pixel = this.generateTrackingPixel(campaignId, customerId);
+    const pixel = this.generateTrackingPixel(campaignId, customerId, email);
     
     if (html.includes('</body>')) {
       html = html.replace('</body>', `${pixel}</body>`);
@@ -188,7 +183,7 @@ class EmailService {
     }
     
     // Wrap links con tracking
-    html = this.wrapLinksWithTracking(html, campaignId, customerId);
+    html = this.wrapLinksWithTracking(html, campaignId, customerId, email);
     
     return html;
   }
@@ -217,7 +212,6 @@ class EmailService {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  // Validar email
   isValidEmail(email) {
     const regex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     return regex.test(email);

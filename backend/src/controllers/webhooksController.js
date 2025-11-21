@@ -192,7 +192,7 @@ async customerCreate(req, res) {
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
         
         // ✅ FIX: Buscar por AMBOS tipos (String y ObjectId) para compatibilidad
-        const lastClickEvent = await EmailEvent.findOne({
+        let lastClickEvent = await EmailEvent.findOne({
           $or: [
             { customer: customer._id },              // ObjectId
             { customer: customer._id.toString() }    // String
@@ -201,15 +201,33 @@ async customerCreate(req, res) {
           eventDate: { $gte: sevenDaysAgo }
         }).sort({ eventDate: -1 });
         
+        // 🆕 MÉTODO 3B: Si no encontramos por customer ID, buscar por EMAIL
+        // Esto maneja el caso de customers duplicados con mismo email
+        if (!lastClickEvent && customer.email) {
+          console.log(`🔍 No click found by customer ID, trying by email: ${customer.email}`);
+          
+          lastClickEvent = await EmailEvent.findOne({
+            email: customer.email,
+            eventType: 'clicked',
+            eventDate: { $gte: sevenDaysAgo }
+          }).sort({ eventDate: -1 });
+          
+          if (lastClickEvent) {
+            console.log(`📧 Found click by email match!`);
+          }
+        }
+        
         if (lastClickEvent) {
           campaignId = lastClickEvent.campaign;
           attributionMethod = 'last_click';
           console.log(`🔙 Attribution found via last click: Campaign ${campaignId}`);
           console.log(`   Click event customer ID: ${lastClickEvent.customer} (${typeof lastClickEvent.customer})`);
           console.log(`   Current customer ID: ${customer._id} (ObjectId)`);
+          console.log(`   Match method: ${lastClickEvent.email === customer.email ? 'email' : 'customer_id'}`);
         } else {
           console.log(`🔍 No click events found for customer ${customer._id}`);
           console.log(`   Checked both ObjectId and String formats`);
+          console.log(`   Also checked by email: ${customer.email}`);
         }
       }
       
