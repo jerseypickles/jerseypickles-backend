@@ -1,5 +1,6 @@
 // backend/src/controllers/popupController.js
 const Customer = require('../models/Customer');
+const Order = require('../models/Order');
 const List = require('../models/List');
 const shopifyService = require('../services/shopifyService');
 
@@ -19,12 +20,11 @@ function generateUniqueCode(email) {
 
 class PopupController {
   
-  // ✅ AGREGAR CONSTRUCTOR
   constructor() {
-    // Hacer bind de todos los métodos para mantener el contexto 'this'
     this.subscribe = this.subscribe.bind(this);
     this.createShopifyDiscount = this.createShopifyDiscount.bind(this);
     this.getStats = this.getStats.bind(this);
+    this.getRevenue = this.getRevenue.bind(this);
   }
   
   // Suscribir email desde popup
@@ -209,7 +209,7 @@ class PopupController {
     }
   }
   
-  // Obtener estadísticas del popup
+  // Obtener estadísticas básicas del popup
   async getStats(req, res) {
     try {
       const list = await List.findById(POPUP_LIST_CONFIG.id);
@@ -234,11 +234,43 @@ class PopupController {
         }
       });
       
-      // Contar cuántos códigos únicos se han generado
+      // Contar códigos únicos generados
       const uniqueCodes = await Customer.countDocuments({
         _id: { $in: list.members },
         popupDiscountCode: { $exists: true, $ne: null, $ne: 'WELCOME15' }
       });
+      
+      // Calcular códigos usados y revenue
+      const customersWithCodes = await Customer.find({
+        _id: { $in: list.members },
+        popupDiscountCode: { $exists: true, $ne: null }
+      }).select('popupDiscountCode');
+      
+      const discountCodes = customersWithCodes.map(c => c.popupDiscountCode);
+      
+      // ✅ ACTUALIZADO: Buscar órdenes usando discountCodes (array de strings)
+      const ordersWithCodes = await Order.find({
+        discountCodes: { $in: discountCodes }
+      });
+      
+      // Contar códigos únicos que fueron usados
+      const usedCodesSet = new Set();
+      ordersWithCodes.forEach(order => {
+        if (order.discountCodes && Array.isArray(order.discountCodes)) {
+          order.discountCodes.forEach(code => {
+            if (discountCodes.includes(code)) {
+              usedCodesSet.add(code);
+            }
+          });
+        }
+      });
+      
+      const codesUsed = usedCodesSet.size;
+      
+      // Calcular revenue total
+      const totalRevenue = ordersWithCodes.reduce((sum, order) => {
+        return sum + parseFloat(order.totalPrice || 0);
+      }, 0);
       
       res.json({
         listId: list._id,
@@ -247,11 +279,110 @@ class PopupController {
         thisMonth,
         today,
         uniqueCodes,
-        genericCodes: total - uniqueCodes
+        genericCodes: total - uniqueCodes,
+        codesUsed,
+        totalRevenue: parseFloat(totalRevenue.toFixed(2))
       });
       
     } catch (error) {
       console.error('Error obteniendo stats del popup:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+  
+  // ✅ NUEVO: Obtener revenue detallado del popup
+  async getRevenue(req, res) {
+    try {
+      const { timeRange = 'all' } = req.query;
+      
+      const list = await List.findById(POPUP_LIST_CONFIG.id);
+      
+      if (!list) {
+        return res.status(404).json({ error: 'Lista no encontrada' });
+      }
+      
+      // Construir filtro de fecha
+      let dateFilter = {};
+      const now = new Date();
+      
+      if (timeRange === '7days') {
+        dateFilter = {
+          createdAt: { $gte: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000) }
+        };
+      } else if (timeRange === '30days') {
+        dateFilter = {
+          createdAt: { $gte: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) }
+        };
+      }
+      
+      // Obtener clientes del popup
+      const customers = await Customer.find({
+        _id: { $in: list.members },
+        popupDiscountCode: { $exists: true, $ne: null },
+        ...dateFilter
+      }).sort({ createdAt: -1 });
+      
+      const total = customers.length;
+      
+      // Contar códigos únicos
+      const uniqueCodes = customers.filter(
+        c => c.popupDiscountCode && c.popupDiscountCode !== 'WELCOME15'
+      ).length;
+      
+      // Obtener todos los códigos
+      const allCodes = customers.map(c => c.popupDiscountCode).filter(Boolean);
+      
+      // ✅ ACTUALIZADO: Buscar órdenes usando discountCodes (array de strings)
+      const orders = await Order.find({
+        discountCodes: { $in: allCodes }
+      });
+      
+      // Crear mapa de código -> revenue
+      const codeRevenueMap = new Map();
+      const codesUsedSet = new Set();
+      
+      orders.forEach(order => {
+        if (order.discountCodes && Array.isArray(order.discountCodes)) {
+          order.discountCodes.forEach(code => {
+            if (allCodes.includes(code)) {
+              codesUsedSet.add(code);
+              const currentRevenue = codeRevenueMap.get(code) || 0;
+              codeRevenueMap.set(code, currentRevenue + parseFloat(order.totalPrice || 0));
+            }
+          });
+        }
+      });
+      
+      // Calcular revenue total
+      const totalRevenue = Array.from(codeRevenueMap.values()).reduce((sum, val) => sum + val, 0);
+      
+      // Agregar info de revenue a cada customer
+      const customersWithRevenue = customers.map(customer => ({
+        _id: customer._id,
+        email: customer.email,
+        firstName: customer.firstName,
+        lastName: customer.lastName,
+        popupDiscountCode: customer.popupDiscountCode,
+        createdAt: customer.createdAt,
+        codeUsed: codesUsedSet.has(customer.popupDiscountCode),
+        revenue: codeRevenueMap.get(customer.popupDiscountCode) || 0
+      }));
+      
+      // Ordenar por revenue descendente
+      customersWithRevenue.sort((a, b) => b.revenue - a.revenue);
+      
+      res.json({
+        stats: {
+          total,
+          uniqueCodes,
+          codesUsed: codesUsedSet.size,
+          totalRevenue: parseFloat(totalRevenue.toFixed(2))
+        },
+        customers: customersWithRevenue
+      });
+      
+    } catch (error) {
+      console.error('Error obteniendo revenue del popup:', error);
       res.status(500).json({ error: error.message });
     }
   }

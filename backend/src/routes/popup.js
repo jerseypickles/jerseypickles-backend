@@ -9,7 +9,10 @@ const { auth } = require('../middleware/auth');
 router.post('/subscribe', popupController.subscribe);
 
 // ==================== RUTAS PROTEGIDAS ====================
-// Stats del popup (requiere autenticación)
+// Stats básicas del popup (requiere autenticación)
 router.get('/stats', auth, popupController.getStats);
+
+// ✅ NUEVO: Revenue detallado del popup
+router.get('/revenue', auth, popupController.getRevenue);
 
 module.exports = router;

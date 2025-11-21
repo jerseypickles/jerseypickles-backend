@@ -66,5 +66,6 @@ const orderSchema = new mongoose.Schema({
 orderSchema.index({ orderDate: -1 });
 orderSchema.index({ customer: 1, orderDate: -1 });
 orderSchema.index({ totalPrice: -1 });
+orderSchema.index({ discountCodes: 1 }); // ✅ NUEVO: Para búsquedas por código
 
 module.exports = mongoose.model('Order', orderSchema);
