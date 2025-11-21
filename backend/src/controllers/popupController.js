@@ -53,22 +53,18 @@ class PopupController {
       if (customer) {
         // Cliente existe - verificar si ya tiene código
         if (customer.popupDiscountCode) {
-          // Ya tiene código, retornarlo
           discountCode = customer.popupDiscountCode;
           console.log(`⏭️  Cliente ya tiene código: ${discountCode}`);
         } else {
-          // Actualizar acceptsMarketing y crear código
+          // Actualizar y crear código
           if (!customer.acceptsMarketing) {
             customer.acceptsMarketing = true;
-            
-            // Agregar tag si no lo tiene
             if (!customer.tags) customer.tags = [];
             if (!customer.tags.includes('popup-subscriber')) {
               customer.tags.push('popup-subscriber');
             }
           }
           
-          // Intentar generar y guardar código
           discountCode = await this.createShopifyDiscount(emailLower);
           customer.popupDiscountCode = discountCode;
           await customer.save();
@@ -76,10 +72,9 @@ class PopupController {
           console.log(`✅ Cliente existente actualizado con código: ${discountCode}`);
         }
       } else {
-        // Crear código primero
+        // Cliente nuevo
         discountCode = await this.createShopifyDiscount(emailLower);
         
-        // Crear nuevo cliente
         customer = await Customer.create({
           email: emailLower,
           firstName: firstName?.trim() || '',
@@ -93,7 +88,7 @@ class PopupController {
         console.log(`✨ Nuevo cliente creado con código: ${discountCode}`);
       }
       
-      // Buscar la lista del popup
+      // Agregar a lista del popup
       let list = await List.findById(POPUP_LIST_CONFIG.id);
       
       if (!list) {
@@ -128,7 +123,7 @@ class PopupController {
       console.error('Stack:', error.stack);
       
       // Manejar error de email duplicado
-      if (error.code === 11000) {
+      if (error.code === 11000 && error.keyPattern?.email) {
         return res.status(200).json({
           success: true,
           message: 'You\'re already subscribed!',
@@ -144,24 +139,21 @@ class PopupController {
     }
   }
   
-  // Crear código de descuento en Shopify (con fallback robusto)
+  // Crear código de descuento en Shopify
   async createShopifyDiscount(email) {
     const generatedCode = generateUniqueCode(email);
     
     try {
       console.log(`💰 Intentando crear código de descuento: ${generatedCode}`);
       
-      // Verificar que tenemos credenciales de Shopify
       if (!process.env.SHOPIFY_STORE_URL || !process.env.SHOPIFY_ACCESS_TOKEN) {
         console.warn('⚠️  Credenciales de Shopify no configuradas, usando código genérico');
         return 'WELCOME15';
       }
       
-      // Calcular fechas
       const now = new Date();
-      const expiryDate = new Date(now.getTime() + (90 * 24 * 60 * 60 * 1000)); // 90 días
+      const expiryDate = new Date(now.getTime() + (90 * 24 * 60 * 60 * 1000));
       
-      // Crear precio rule en Shopify
       const priceRuleData = {
         title: `Newsletter Popup - ${generatedCode}`,
         target_type: 'line_item',
@@ -179,10 +171,9 @@ class PopupController {
       const priceRule = await shopifyService.createPriceRule(priceRuleData);
       
       if (!priceRule || !priceRule.id) {
-        throw new Error('Price rule creation failed - no ID returned');
+        throw new Error('Price rule creation failed');
       }
       
-      // Crear discount code
       await shopifyService.createDiscountCode(priceRule.id, generatedCode);
       
       console.log(`✅ Código de descuento creado exitosamente: ${generatedCode}`);
@@ -190,20 +181,16 @@ class PopupController {
       return generatedCode;
       
     } catch (error) {
-      console.error('❌ Error creando código de descuento en Shopify:', error.message);
+      console.error('❌ Error creando código de descuento:', error.message);
       
-      // Si hay error específico de permisos
       if (error.response?.status === 403 || error.response?.status === 401) {
         console.error('⚠️  Error de permisos en Shopify API');
-        console.error('   Verifica que el Access Token tenga permisos: write_price_rules');
       }
       
-      // Si hay error de API
       if (error.response?.data) {
-        console.error('   Respuesta de Shopify:', JSON.stringify(error.response.data, null, 2));
+        console.error('   Respuesta:', JSON.stringify(error.response.data, null, 2));
       }
       
-      // Fallback: usar código genérico
       console.log('⚠️  Usando código genérico como fallback: WELCOME15');
       return 'WELCOME15';
     }
@@ -234,13 +221,11 @@ class PopupController {
         }
       });
       
-      // Contar códigos únicos generados
       const uniqueCodes = await Customer.countDocuments({
         _id: { $in: list.members },
         popupDiscountCode: { $exists: true, $ne: null, $ne: 'WELCOME15' }
       });
       
-      // Calcular códigos usados y revenue
       const customersWithCodes = await Customer.find({
         _id: { $in: list.members },
         popupDiscountCode: { $exists: true, $ne: null }
@@ -248,12 +233,10 @@ class PopupController {
       
       const discountCodes = customersWithCodes.map(c => c.popupDiscountCode);
       
-      // ✅ ACTUALIZADO: Buscar órdenes usando discountCodes (array de strings)
       const ordersWithCodes = await Order.find({
         discountCodes: { $in: discountCodes }
       });
       
-      // Contar códigos únicos que fueron usados
       const usedCodesSet = new Set();
       ordersWithCodes.forEach(order => {
         if (order.discountCodes && Array.isArray(order.discountCodes)) {
@@ -265,9 +248,6 @@ class PopupController {
         }
       });
       
-      const codesUsed = usedCodesSet.size;
-      
-      // Calcular revenue total
       const totalRevenue = ordersWithCodes.reduce((sum, order) => {
         return sum + parseFloat(order.totalPrice || 0);
       }, 0);
@@ -280,7 +260,7 @@ class PopupController {
         today,
         uniqueCodes,
         genericCodes: total - uniqueCodes,
-        codesUsed,
+        codesUsed: usedCodesSet.size,
         totalRevenue: parseFloat(totalRevenue.toFixed(2))
       });
       
@@ -290,7 +270,7 @@ class PopupController {
     }
   }
   
-  // ✅ NUEVO: Obtener revenue detallado del popup
+  // Obtener revenue detallado del popup
   async getRevenue(req, res) {
     try {
       const { timeRange = 'all' } = req.query;
@@ -301,7 +281,6 @@ class PopupController {
         return res.status(404).json({ error: 'Lista no encontrada' });
       }
       
-      // Construir filtro de fecha
       let dateFilter = {};
       const now = new Date();
       
@@ -315,7 +294,6 @@ class PopupController {
         };
       }
       
-      // Obtener clientes del popup
       const customers = await Customer.find({
         _id: { $in: list.members },
         popupDiscountCode: { $exists: true, $ne: null },
@@ -324,20 +302,16 @@ class PopupController {
       
       const total = customers.length;
       
-      // Contar códigos únicos
       const uniqueCodes = customers.filter(
         c => c.popupDiscountCode && c.popupDiscountCode !== 'WELCOME15'
       ).length;
       
-      // Obtener todos los códigos
       const allCodes = customers.map(c => c.popupDiscountCode).filter(Boolean);
       
-      // ✅ ACTUALIZADO: Buscar órdenes usando discountCodes (array de strings)
       const orders = await Order.find({
         discountCodes: { $in: allCodes }
       });
       
-      // Crear mapa de código -> revenue
       const codeRevenueMap = new Map();
       const codesUsedSet = new Set();
       
@@ -353,10 +327,8 @@ class PopupController {
         }
       });
       
-      // Calcular revenue total
       const totalRevenue = Array.from(codeRevenueMap.values()).reduce((sum, val) => sum + val, 0);
       
-      // Agregar info de revenue a cada customer
       const customersWithRevenue = customers.map(customer => ({
         _id: customer._id,
         email: customer.email,
@@ -368,7 +340,6 @@ class PopupController {
         revenue: codeRevenueMap.get(customer.popupDiscountCode) || 0
       }));
       
-      // Ordenar por revenue descendente
       customersWithRevenue.sort((a, b) => b.revenue - a.revenue);
       
       res.json({
