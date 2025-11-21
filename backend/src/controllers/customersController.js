@@ -275,36 +275,37 @@ class CustomersController {
   }
 
   // Estadísticas
-  async stats(req, res) {
-    try {
-      const total = await Customer.countDocuments();
-      const acceptsMarketing = await Customer.countDocuments({ acceptsMarketing: true });
-      const highValue = await Customer.countDocuments({ totalSpent: { $gte: 500 } });
-      
-      const avgOrderValue = await Customer.aggregate([
-        { $match: { ordersCount: { $gt: 0 } } },
-        { $group: { _id: null, avg: { $avg: '$totalSpent' } } }
-      ]);
-      
-      const topSpenders = await Customer.find()
-        .sort({ totalSpent: -1 })
-        .limit(5)
-        .select('email firstName lastName totalSpent ordersCount');
-      
-      res.json({
-        total,
-        acceptsMarketing,
-        acceptanceRate: total > 0 ? ((acceptsMarketing / total) * 100).toFixed(2) + '%' : '0%',
-        highValue,
-        averageOrderValue: avgOrderValue[0]?.avg?.toFixed(2) || 0,
-        topSpenders
-      });
-      
-    } catch (error) {
-      console.error('Error obteniendo stats:', error);
-      res.status(500).json({ error: error.message });
-    }
+async stats(req, res) {
+  try {
+    const total = await Customer.countDocuments();
+    const acceptsMarketing = await Customer.countDocuments({ acceptsMarketing: true });
+    const highValue = await Customer.countDocuments({ totalSpent: { $gte: 500 } });
+    
+    const avgOrderValue = await Customer.aggregate([
+      { $match: { ordersCount: { $gt: 0 } } },
+      { $group: { _id: null, avg: { $avg: '$totalSpent' } } }
+    ]);
+    
+    const topSpenders = await Customer.find()
+      .sort({ totalSpent: -1 })
+      .limit(5)
+      .select('email firstName lastName totalSpent ordersCount');
+    
+    res.json({
+      total,
+      acceptsMarketing,
+      acceptanceRate: total > 0 ? ((acceptsMarketing / total) * 100).toFixed(2) + '%' : '0%',
+      highValue,
+      // ✅ CAMBIA ESTA LÍNEA - devuelve número, no string
+      averageOrderValue: avgOrderValue[0]?.avg || 0,  // ← SIN .toFixed()
+      topSpenders
+    });
+    
+  } catch (error) {
+    console.error('Error obteniendo stats:', error);
+    res.status(500).json({ error: error.message });
   }
+}
 
   // Setup webhooks de Shopify
   async setupWebhooks(req, res) {
