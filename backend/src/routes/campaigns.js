@@ -22,6 +22,7 @@ router.get('/queue/status', authorize('admin', 'manager'), campaignsController.g
 router.post('/queue/pause', authorize('admin'), campaignsController.pauseQueue);
 router.post('/queue/resume', authorize('admin'), campaignsController.resumeQueue);
 router.post('/queue/clean', authorize('admin'), campaignsController.cleanQueue);
+router.post('/queue/check-campaigns', authorize('admin'), campaignsController.forceCheckCampaigns);
 
 // Crear desde template
 router.post('/from-template', authorize('admin', 'manager'), campaignsController.createFromTemplate);

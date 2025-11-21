@@ -1,4 +1,4 @@
-// backend/src/jobs/emailQueue.js
+// backend/src/jobs/emailQueue.js (MEJORADO)
 const { Queue, Worker } = require('bullmq');
 const emailService = require('../services/emailService');
 const Campaign = require('../models/Campaign');
@@ -39,6 +39,70 @@ console.log(`⚡ Rate: ${RATE_LIMIT.max} batches/s × ${RATE_LIMIT.batchSize} em
 console.log(`🚀 Velocidad: ${RATE_LIMIT.emailsPerSecond} emails/segundo`);
 if (RATE_LIMIT.monthlyLimit) {
   console.log(`📆 Límite mensual: ${RATE_LIMIT.monthlyLimit.toLocaleString()} emails`);
+}
+
+// 🆕 FUNCIÓN HELPER: Verificar si la campaña terminó
+async function checkAndFinalizeCampaign(campaignId) {
+  try {
+    const campaign = await Campaign.findById(campaignId);
+    
+    if (!campaign) {
+      console.warn(`⚠️  Campaña ${campaignId} no encontrada`);
+      return false;
+    }
+    
+    // Solo procesar si está en "sending"
+    if (campaign.status !== 'sending') {
+      return false;
+    }
+    
+    console.log(`🔍 Verificando campaña ${campaign.name}: ${campaign.stats.sent}/${campaign.stats.totalRecipients}`);
+    
+    // Si ya se enviaron todos
+    if (campaign.stats.sent >= campaign.stats.totalRecipients && campaign.stats.totalRecipients > 0) {
+      
+      // 🆕 Doble verificación: Chequear si quedan batches pendientes
+      if (emailQueue && isQueueReady) {
+        try {
+          const counts = await emailQueue.getJobCounts('waiting', 'active', 'delayed');
+          const pending = (counts.waiting || 0) + (counts.active || 0) + (counts.delayed || 0);
+          
+          if (pending > 1) { // Más de 1 porque el actual puede seguir procesándose
+            console.log(`⏳ Aún hay ${pending} batches pendientes, esperando...`);
+            return false;
+          }
+        } catch (error) {
+          console.warn('⚠️  No se pudo verificar la cola, finalizando de todos modos:', error.message);
+        }
+      }
+      
+      // Marcar como enviada
+      campaign.status = 'sent';
+      
+      if (!campaign.sentAt) {
+        campaign.sentAt = new Date();
+      }
+      
+      campaign.updateRates();
+      await campaign.save();
+      
+      console.log(`\n╔════════════════════════════════════════╗`);
+      console.log(`║  🎉 CAMPAÑA COMPLETADA                ║`);
+      console.log(`╚════════════════════════════════════════╝`);
+      console.log(`📧 Campaña: ${campaign.name}`);
+      console.log(`📊 Enviados: ${campaign.stats.sent}/${campaign.stats.totalRecipients}`);
+      console.log(`✅ Status: sent`);
+      console.log(`📅 Completada: ${campaign.sentAt}\n`);
+      
+      return true;
+    }
+    
+    return false;
+    
+  } catch (error) {
+    console.error('❌ Error verificando finalización de campaña:', error.message);
+    return false;
+  }
 }
 
 async function initializeQueue() {
@@ -120,21 +184,7 @@ async function initializeQueue() {
             
             console.log(`✅ [${job.id}] Batch enviado: ${emailBatch.length} emails`);
             
-            // Verificar si es el último batch
-            try {
-              const counts = await emailQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed');
-              if ((counts.waiting || 0) === 0 && (counts.active || 0) <= 1) {
-                await Campaign.findByIdAndUpdate(campaignId, {
-                  status: 'sent',
-                  sentAt: new Date()
-                });
-                console.log(`\n🎉 Campaña ${campaignId} completada!\n`);
-              }
-            } catch (err) {
-              // Ignorar
-            }
-            
-            return { success: true, count: emailBatch.length };
+            return { success: true, count: emailBatch.length, campaignId };
             
           } else {
             throw new Error(result.error);
@@ -184,13 +234,32 @@ async function initializeQueue() {
       }
     );
     
-    // ✅ Event listeners
-    emailWorker.on('completed', (job) => {
+    // 🆕 MEJORADO: Event listener para verificar finalización
+    emailWorker.on('completed', async (job, result) => {
       console.log(`✅ Batch job ${job.id} completado`);
+      
+      // Verificar si la campaña terminó
+      if (result && result.campaignId) {
+        // Pequeño delay para asegurar que todos los updates se procesaron
+        setTimeout(() => {
+          checkAndFinalizeCampaign(result.campaignId).catch(err => {
+            console.error('Error finalizando campaña:', err.message);
+          });
+        }, 1000);
+      }
     });
     
     emailWorker.on('failed', (job, err) => {
       console.error(`❌ Batch job ${job.id} falló: ${err.message}`);
+      
+      // También verificar finalización en caso de fallos
+      if (job && job.data && job.data.campaignId) {
+        setTimeout(() => {
+          checkAndFinalizeCampaign(job.data.campaignId).catch(e => {
+            console.error('Error verificando campaña tras fallo:', e.message);
+          });
+        }, 2000);
+      }
     });
     
     emailWorker.on('error', (err) => {
@@ -417,6 +486,36 @@ async function getWaitingJobs() {
   }
 }
 
+// 🆕 Función para verificar y finalizar TODAS las campañas en "sending"
+async function checkAllSendingCampaigns() {
+  try {
+    console.log('🔍 Verificando todas las campañas en "sending"...');
+    
+    const sendingCampaigns = await Campaign.find({ status: 'sending' });
+    
+    console.log(`📊 Encontradas ${sendingCampaigns.length} campañas en "sending"`);
+    
+    const results = [];
+    
+    for (const campaign of sendingCampaigns) {
+      const wasFinalized = await checkAndFinalizeCampaign(campaign._id);
+      results.push({
+        id: campaign._id,
+        name: campaign.name,
+        finalized: wasFinalized,
+        sent: campaign.stats.sent,
+        total: campaign.stats.totalRecipients
+      });
+    }
+    
+    return results;
+    
+  } catch (error) {
+    console.error('Error verificando campañas:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   emailQueue,
   addEmailsToQueue,
@@ -428,5 +527,7 @@ module.exports = {
   isAvailable: () => emailQueue && isQueueReady,
   getRateLimitConfig: () => RATE_LIMIT,
   getActiveJobs,
-  getWaitingJobs
+  getWaitingJobs,
+  checkAndFinalizeCampaign, // 🆕 Exportar para uso manual
+  checkAllSendingCampaigns  // 🆕 Verificar todas las campañas
 };

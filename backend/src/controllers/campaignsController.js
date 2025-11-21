@@ -1031,6 +1031,47 @@ class CampaignsController {
       res.status(500).json({ error: error.message });
     }
   }
+
+  // Forzar verificación de campañas
+  async forceCheckCampaigns(req, res) {
+    try {
+      const { checkAllSendingCampaigns } = require('../jobs/emailQueue');
+      
+      console.log('🔄 Verificación manual de campañas iniciada...');
+      
+      const results = await checkAllSendingCampaigns();
+      
+      const finalized = results.filter(r => r.finalized);
+      const stillSending = results.filter(r => !r.finalized);
+      
+      res.json({
+        success: true,
+        message: `Verificación completada: ${finalized.length} finalizadas, ${stillSending.length} aún enviando`,
+        results: {
+          finalized: finalized.map(r => ({
+            id: r.id,
+            name: r.name,
+            sent: r.sent,
+            total: r.total
+          })),
+          stillSending: stillSending.map(r => ({
+            id: r.id,
+            name: r.name,
+            sent: r.sent,
+            total: r.total,
+            pending: r.total - r.sent
+          }))
+        }
+      });
+      
+    } catch (error) {
+      console.error('Error forzando verificación:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: error.message 
+      });
+    }
+  }
 }
 
 module.exports = new CampaignsController();
