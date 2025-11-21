@@ -9,6 +9,11 @@ class AuthController {
     try {
       const { email, password, firstName, lastName } = req.body;
       
+      // Validar datos requeridos
+      if (!email || !password) {
+        return res.status(400).json({ error: 'Email y password son requeridos' });
+      }
+      
       // Verificar si ya existe
       const existingUser = await User.findOne({ email });
       if (existingUser) {
@@ -53,23 +58,41 @@ class AuthController {
     try {
       const { email, password } = req.body;
       
+      // VALIDACIÓN: Verificar que vengan los datos
+      if (!email || !password) {
+        return res.status(400).json({ error: 'Email y password son requeridos' });
+      }
+      
+      console.log('Login attempt for:', email);
+      
       // Buscar usuario con password
       const user = await User.findOne({ email }).select('+password');
       
       if (!user) {
+        console.log('User not found:', email);
         return res.status(401).json({ error: 'Credenciales inválidas' });
       }
+      
+      // VALIDACIÓN CRÍTICA: Verificar que el password hasheado existe
+      if (!user.password) {
+        console.error('Password hash missing for user:', email);
+        return res.status(500).json({ error: 'Error en la configuración del usuario. Contacte al administrador.' });
+      }
+      
+      console.log('User found, comparing passwords...');
       
       // Verificar password
       const isMatch = await user.comparePassword(password);
       
       if (!isMatch) {
+        console.log('Password mismatch for:', email);
         return res.status(401).json({ error: 'Credenciales inválidas' });
       }
       
-      // Actualizar último login
-      user.lastLogin = new Date();
-      await user.save();
+      console.log('Login successful for:', email);
+      
+      // Actualizar último login (sin select para evitar problemas)
+      await User.findByIdAndUpdate(user._id, { lastLogin: new Date() });
       
       // Generar token
       const token = jwt.sign(
@@ -99,6 +122,10 @@ class AuthController {
   async me(req, res) {
     try {
       const user = await User.findById(req.userId);
+      
+      if (!user) {
+        return res.status(404).json({ error: 'Usuario no encontrado' });
+      }
       
       res.json({
         id: user._id,
