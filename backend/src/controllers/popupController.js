@@ -19,6 +19,14 @@ function generateUniqueCode(email) {
 
 class PopupController {
   
+  // ✅ AGREGAR CONSTRUCTOR
+  constructor() {
+    // Hacer bind de todos los métodos para mantener el contexto 'this'
+    this.subscribe = this.subscribe.bind(this);
+    this.createShopifyDiscount = this.createShopifyDiscount.bind(this);
+    this.getStats = this.getStats.bind(this);
+  }
+  
   // Suscribir email desde popup
   async subscribe(req, res) {
     try {
@@ -125,7 +133,7 @@ class PopupController {
           success: true,
           message: 'You\'re already subscribed!',
           isNew: false,
-          discountCode: 'WELCOME15' // Código genérico
+          discountCode: 'WELCOME15'
         });
       }
       
