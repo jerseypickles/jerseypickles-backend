@@ -8,26 +8,31 @@ const { webhookLimiter } = require('../middleware/rateLimiter');
 // Aplicar rate limiter a todos los webhooks
 router.use(webhookLimiter);
 
-// ⚠️ IMPORTANTE: NO aplicar validateShopifyWebhook a todas las rutas
-// Aplicarlo solo a rutas específicas de Shopify
-
 // ==================== WEBHOOKS DE SHOPIFY ====================
-// Aplicar validación de Shopify solo a estas rutas
+// Ya tienen express.raw() aplicado en server.js
 router.post('/customers/create', validateShopifyWebhook, webhooksController.customerCreate);
 router.post('/customers/update', validateShopifyWebhook, webhooksController.customerUpdate);
 router.post('/orders/create', validateShopifyWebhook, webhooksController.orderCreate);
 router.post('/orders/update', validateShopifyWebhook, webhooksController.orderUpdate);
 
 // ==================== WEBHOOKS DE RESEND ====================
-// Esta ruta NO tiene validación de Shopify
-router.post('/resend', express.json(), async (req, res) => {
+// ✅ QUITAR express.json() de aquí - ya está parseado por el middleware global
+router.post('/resend', async (req, res) => {
   try {
     const event = req.body;
     
-    console.log('📨 Resend webhook recibido:', event.type);
-    console.log('📦 Body completo:', JSON.stringify(event, null, 2));
+    console.log('📨 Resend webhook recibido:', event?.type || 'sin type');
+    
+    // ✅ Validación defensiva
+    if (!event || !event.data) {
+      console.error('❌ Payload inválido:', req.body);
+      return res.status(400).json({ error: 'Invalid payload' });
+    }
     
     const { type, data } = event;
+    
+    console.log('📦 Event type:', type);
+    console.log('📦 Data tags:', data.tags);
     
     // Extraer tags (vienen como objeto según los logs)
     let campaignId, customerId;
@@ -82,7 +87,7 @@ router.post('/resend', express.json(), async (req, res) => {
       }
     }
     
-    // 🆕 ARREGLAR: Extraer email correctamente (viene como array)
+    // Extraer email correctamente (viene como array)
     const emailAddress = Array.isArray(data.to) ? data.to[0] : (data.to || data.email || 'unknown');
     
     // Registrar evento
@@ -116,6 +121,7 @@ router.post('/resend', express.json(), async (req, res) => {
     
   } catch (error) {
     console.error('❌ Error procesando webhook de Resend:', error);
+    console.error('Stack:', error.stack);
     res.status(200).json({ received: true, error: error.message });
   }
 });

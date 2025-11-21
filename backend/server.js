@@ -63,14 +63,18 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
-// 🆕 SOLUCIÓN DEFINITIVA: express.raw() SOLO para webhooks de Shopify
-// Esto captura el body como Buffer ANTES de parsearlo
-app.use('/api/webhooks', express.raw({ 
+// ✅ express.raw() SOLO para webhooks de Shopify (necesitan Buffer para HMAC)
+app.use('/api/webhooks/customers', express.raw({ 
   type: 'application/json',
   limit: '10mb'
 }));
 
-// express.json() para todas las demás rutas
+app.use('/api/webhooks/orders', express.raw({ 
+  type: 'application/json',
+  limit: '10mb'
+}));
+
+// express.json() para todas las demás rutas (incluyendo /api/webhooks/resend)
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
@@ -129,7 +133,7 @@ app.use('/api/lists', require('./src/routes/lists'));
 app.use('/api/track', require('./src/routes/tracking'));
 app.use('/api/analytics', require('./src/routes/analytics'));
 app.use('/api/upload', require('./src/routes/upload'));
-app.use('/api/popup', require('./src/routes/popup')); // ✅ AGREGAR ESTA LÍNEA
+app.use('/api/popup', require('./src/routes/popup'));
 
 app.use('*', (req, res) => {
   res.status(404).json({ 
