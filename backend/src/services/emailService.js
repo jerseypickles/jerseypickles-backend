@@ -1,4 +1,4 @@
-// backend/src/services/emailService.js (ACTUALIZADO - INCLUYE EMAIL EN TRACKING)
+// backend/src/services/emailService.js (FIXED - SIN DOBLE TRACKING)
 const { Resend } = require('resend');
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -17,10 +17,8 @@ class EmailService {
       if (campaignId) tags.push({ name: 'campaign_id', value: String(campaignId) });
       if (customerId) tags.push({ name: 'customer_id', value: String(customerId) });
       
-      // Inyectar tracking custom si aplica
-      if (campaignId && customerId) {
-        html = this.injectTracking(html, campaignId, customerId, to); // ✅ Pasar email también
-      }
+      // ✅ NO inyectar tracking aquí - ya viene inyectado desde campaignsController
+      // El HTML recibido ya tiene el tracking correcto con el email
       
       const data = await resend.emails.send({
         from: from || this.fromEmail,
