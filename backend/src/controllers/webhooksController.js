@@ -1,4 +1,4 @@
-// backend/src/controllers/webhooksController.js (ACTUALIZADO CON REVENUE)
+// backend/src/controllers/webhooksController.js (ACTUALIZADO CON REVENUE - FIX CUSTOMER MATCHING)
 const Customer = require('../models/Customer');
 const Order = require('../models/Order');
 const EmailEvent = require('../models/EmailEvent');
@@ -191,8 +191,12 @@ async customerCreate(req, res) {
         const sevenDaysAgo = new Date();
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
         
+        // ✅ FIX: Buscar por AMBOS tipos (String y ObjectId) para compatibilidad
         const lastClickEvent = await EmailEvent.findOne({
-          customer: customer._id,
+          $or: [
+            { customer: customer._id },              // ObjectId
+            { customer: customer._id.toString() }    // String
+          ],
           eventType: 'clicked',
           eventDate: { $gte: sevenDaysAgo }
         }).sort({ eventDate: -1 });
@@ -201,6 +205,11 @@ async customerCreate(req, res) {
           campaignId = lastClickEvent.campaign;
           attributionMethod = 'last_click';
           console.log(`🔙 Attribution found via last click: Campaign ${campaignId}`);
+          console.log(`   Click event customer ID: ${lastClickEvent.customer} (${typeof lastClickEvent.customer})`);
+          console.log(`   Current customer ID: ${customer._id} (ObjectId)`);
+        } else {
+          console.log(`🔍 No click events found for customer ${customer._id}`);
+          console.log(`   Checked both ObjectId and String formats`);
         }
       }
       
@@ -244,6 +253,7 @@ async customerCreate(req, res) {
         console.log(`====================================================\n`);
       } else {
         console.log(`ℹ️  No attribution found for this order`);
+        console.log(`   Tried: cookie, UTM params, and last click (7 days)`);
         console.log(`====================================================\n`);
       }
       
