@@ -10,47 +10,98 @@ class EmailService {
 
   // ==================== ENVÍO SIMPLE ====================
   
-async sendEmail({ to, subject, html, from = null, replyTo = null, campaignId = null, customerId = null }) {
-  try {
-    // Preparar tags si existen campaignId y customerId
-    const tags = [];
-    if (campaignId) tags.push({ name: 'campaign_id', value: String(campaignId) });
-    if (customerId) tags.push({ name: 'customer_id', value: String(customerId) });
-    
-    // Inyectar tracking custom si aplica
-    if (campaignId && customerId) {
-      html = this.injectTracking(html, campaignId, customerId);
+  async sendEmail({ to, subject, html, from = null, replyTo = null, campaignId = null, customerId = null }) {
+    try {
+      // Preparar tags si existen campaignId y customerId
+      const tags = [];
+      if (campaignId) tags.push({ name: 'campaign_id', value: String(campaignId) });
+      if (customerId) tags.push({ name: 'customer_id', value: String(customerId) });
+      
+      // Inyectar tracking custom si aplica
+      if (campaignId && customerId) {
+        html = this.injectTracking(html, campaignId, customerId);
+      }
+      
+      const data = await resend.emails.send({
+        from: from || this.fromEmail,
+        to: Array.isArray(to) ? to : [to],
+        subject,
+        html,
+        reply_to: replyTo,
+        tags: tags.length > 0 ? tags : undefined // Solo agregar tags si existen
+      });
+      
+      console.log(`✅ Email enviado a ${to}: ${data.id}`);
+      
+      return {
+        success: true,
+        id: data.id,
+        email: to
+      };
+      
+    } catch (error) {
+      console.error('❌ Error enviando email:', error);
+      
+      return {
+        success: false,
+        error: error.message,
+        email: to
+      };
     }
-    
-    const data = await resend.emails.send({
-      from: from || this.fromEmail,
-      to: Array.isArray(to) ? to : [to],
-      subject,
-      html,
-      reply_to: replyTo,
-      tags: tags.length > 0 ? tags : undefined // Solo agregar tags si existen
-    });
-    
-    console.log(`✅ Email enviado a ${to}: ${data.id}`);
-    
-    return {
-      success: true,
-      id: data.id,
-      email: to
-    };
-    
-  } catch (error) {
-    console.error('❌ Error enviando email:', error);
-    
-    return {
-      success: false,
-      error: error.message,
-      email: to
-    };
   }
-}
 
-  // ==================== ENVÍO MASIVO ====================
+  // 🆕 ==================== BATCH SENDING (hasta 100 emails) ====================
+  
+  async sendBatch(emailsArray) {
+    try {
+      if (!Array.isArray(emailsArray) || emailsArray.length === 0) {
+        throw new Error('emailsArray debe ser un array no vacío');
+      }
+      
+      if (emailsArray.length > 100) {
+        throw new Error('Batch máximo es 100 emails. Recibido: ' + emailsArray.length);
+      }
+      
+      console.log(`📦 Enviando batch de ${emailsArray.length} emails a Resend API...`);
+      
+      // Formato esperado por Resend batch.send:
+      // Array de objetos con: from, to, subject, html, reply_to, tags
+      const formattedEmails = emailsArray.map(email => {
+        // Asegurar que 'to' sea array
+        const toArray = Array.isArray(email.to) ? email.to : [email.to];
+        
+        return {
+          from: email.from || this.fromEmail,
+          to: toArray,
+          subject: email.subject,
+          html: email.html,
+          reply_to: email.reply_to || undefined,
+          tags: email.tags || undefined
+        };
+      });
+      
+      // ✅ Enviar batch usando Resend SDK
+      const response = await resend.batch.send(formattedEmails);
+      
+      console.log(`✅ Batch enviado exitosamente: ${emailsArray.length} emails`);
+      
+      return { 
+        success: true, 
+        data: response.data // Array de objetos con {id: "..."}
+      };
+      
+    } catch (error) {
+      console.error('❌ Error en batch send:', error);
+      
+      return { 
+        success: false, 
+        error: error.message,
+        statusCode: error.statusCode 
+      };
+    }
+  }
+
+  // ==================== ENVÍO MASIVO (LEGACY - mantener para compatibilidad) ====================
   
   async sendBulkEmails(emails, options = {}) {
     const {

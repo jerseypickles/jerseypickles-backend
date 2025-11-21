@@ -347,7 +347,7 @@ class CampaignsController {
       }
       
       // ==================== MODO PRODUCCIÓN CON COLA ====================
-      console.log('🚀 Preparando envío con cola de Redis...\n');
+      console.log('🚀 Preparando envío con cola de Redis + Batch Sending...\n');
       
       const { emailQueue, addEmailsToQueue, isAvailable } = require('../jobs/emailQueue');
       
@@ -372,7 +372,6 @@ class CampaignsController {
         campaign.status = 'sending';
         await campaign.save();
         
-        // ✅ FIX: Convertir IDs a strings
         const emails = customers.map(customer => {
           let html = campaign.htmlContent;
           html = emailService.personalize(html, customer);
@@ -444,12 +443,12 @@ class CampaignsController {
         });
       }
       
-      // ==================== ENVÍO CON COLA (Método preferido) ====================
-      console.log('📥 Agregando emails a la cola de Redis...\n');
+      // ==================== ENVÍO CON COLA + BATCH SENDING ====================
+      console.log('📥 Preparando emails para batch sending...\n');
       
       const startTime = Date.now();
       
-      // ✅ FIX: Convertir IDs a strings
+      // ✅ OPTIMIZADO: Objeto más ligero para Redis
       const emails = customers.map(customer => {
         let html = campaign.htmlContent;
         html = emailService.personalize(html, customer);
@@ -460,12 +459,6 @@ class CampaignsController {
         );
         
         return {
-          customer: {
-            _id: customer._id.toString(),
-            email: customer.email,
-            firstName: customer.firstName,
-            lastName: customer.lastName
-          },
           to: customer.email,
           subject: campaign.subject,
           html,
@@ -476,7 +469,7 @@ class CampaignsController {
         };
       });
       
-      // Agregar a la cola
+      // Agregar a la cola (ahora con batch processing)
       const queueResult = await addEmailsToQueue(emails, campaign._id.toString());
       
       // Actualizar campaña a "sending"
@@ -487,22 +480,25 @@ class CampaignsController {
       const duration = ((Date.now() - startTime) / 1000).toFixed(2);
       
       console.log('\n╔═══════════════════════════════════════════════╗');
-      console.log('║  ✅ EMAILS AGREGADOS A LA COLA                ║');
+      console.log('║  ✅ EMAILS AGREGADOS A LA COLA CON BATCH     ║');
       console.log('╚═══════════════════════════════════════════════╝');
-      console.log(`📊 Total emails en cola: ${queueResult.total}`);
-      console.log(`⏱️  Tiempo de encolado: ${duration}s`);
-      console.log(`🔄 Los emails se enviarán en segundo plano`);
-      console.log(`📈 Rate: 100 emails/minuto (configurable)`);
-      console.log(`🔄 Retry: 3 intentos automáticos por email`);
+      console.log(`📊 Total emails: ${queueResult.total}`);
+      console.log(`📦 Total batches: ${queueResult.batches} (100 emails/batch)`);
+      console.log(`⏱️  Tiempo de preparación: ${duration}s`);
+      console.log(`⚡ Velocidad estimada: ~1,000 emails/segundo`);
+      console.log(`⏱️  Tiempo estimado de envío: ~${queueResult.estimatedSeconds} segundos`);
+      console.log(`🔄 Retry: 3 intentos automáticos por batch`);
       console.log('═══════════════════════════════════════════════\n');
       
       res.json({
         success: true,
         campaign: campaign.toObject(),
         queue: {
-          totalQueued: queueResult.total,
-          estimatedTime: `${Math.ceil(queueResult.total / 100)} minutos`,
-          message: 'Emails agregados a la cola. Se están enviando en segundo plano.',
+          totalEmails: queueResult.total,
+          totalBatches: queueResult.batches,
+          estimatedTime: `${queueResult.estimatedSeconds} segundos`,
+          emailsPerSecond: 1000,
+          message: 'Emails agregados con batch sending. Enviando a ~1,000 emails/segundo.',
           checkStatusAt: `/api/campaigns/${campaign._id}/stats`
         }
       });
@@ -910,7 +906,6 @@ class CampaignsController {
   // ==================== QUEUE MANAGEMENT ====================
 
   // Obtener estado de la cola
-// Obtener estado de la cola
   async getQueueStatus(req, res) {
     try {
       const { getQueueStatus, getActiveJobs, getWaitingJobs } = require('../jobs/emailQueue');
@@ -921,22 +916,19 @@ class CampaignsController {
         return res.json(status);
       }
       
-      // 🆕 Obtener información de campaña actual si hay trabajos activos
+      // Obtener información de campaña actual si hay trabajos activos
       let currentCampaign = null;
       
       try {
-        // Intentar obtener jobs activos o en espera
         const activeJobs = await getActiveJobs();
         const waitingJobs = await getWaitingJobs();
         
-        // Buscar el primer job con datos de campaña
         const job = activeJobs[0] || waitingJobs[0];
         
         if (job && job.data && job.data.campaignId) {
           const campaign = await Campaign.findById(job.data.campaignId);
           
           if (campaign) {
-            // Calcular totales reales
             const totalInQueue = (status.waiting || 0) + (status.active || 0) + (status.delayed || 0);
             const totalCompleted = status.completed || 0;
             const totalFailed = status.failed || 0;
@@ -962,7 +954,6 @@ class CampaignsController {
         }
       } catch (error) {
         console.error('Error obteniendo campaña activa:', error.message);
-        // No fallar si hay error obteniendo campaña, solo log
       }
       
       res.json({
@@ -1037,7 +1028,7 @@ class CampaignsController {
       }
     } catch (error) {
       console.error('Error limpiando cola:', error);
-      res.status(500).json({ success: false, error: error.message });
+      res.status(500).json({ error: error.message });
     }
   }
 }
