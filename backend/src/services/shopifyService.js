@@ -171,10 +171,12 @@ class ShopifyService {
     }
   }
 
-  // ✅ NUEVO: Crear Price Rule para descuentos
+  // ✅ Crear Price Rule para descuentos (con mejor logging)
   async createPriceRule(data) {
     try {
       console.log(`💰 Creando price rule: ${data.title}`);
+      console.log(`   Descuento: ${data.value}%`);
+      console.log(`   Expira: ${new Date(data.ends_at).toLocaleDateString()}`);
       
       const response = await axios.post(
         `${this.baseUrl}/price_rules.json`,
@@ -186,15 +188,26 @@ class ShopifyService {
       return response.data.price_rule;
       
     } catch (error) {
-      console.error('❌ Error creando price rule:', error.response?.data || error.message);
+      console.error('❌ Error creando price rule:');
+      console.error('   Status:', error.response?.status);
+      console.error('   Data:', JSON.stringify(error.response?.data, null, 2));
+      
+      // Verificar si es error de permisos
+      if (error.response?.status === 403) {
+        console.error('\n⚠️  ERROR DE PERMISOS:');
+        console.error('   El Access Token necesita: write_price_rules');
+        console.error('   Ve a: Shopify Admin > Apps > Tu App > Configuration');
+      }
+      
       throw error;
     }
   }
 
-  // ✅ NUEVO: Crear Discount Code
+  // ✅ Crear Discount Code (con mejor logging)
   async createDiscountCode(priceRuleId, code) {
     try {
       console.log(`🎟️  Creando discount code: ${code}`);
+      console.log(`   Para price rule ID: ${priceRuleId}`);
       
       const response = await axios.post(
         `${this.baseUrl}/price_rules/${priceRuleId}/discount_codes.json`,
@@ -206,11 +219,19 @@ class ShopifyService {
         { headers: this.getHeaders() }
       );
       
-      console.log(`✅ Discount code creado: ${code}`);
+      console.log(`✅ Discount code creado exitosamente: ${code}`);
       return response.data.discount_code;
       
     } catch (error) {
-      console.error('❌ Error creando discount code:', error.response?.data || error.message);
+      console.error('❌ Error creando discount code:');
+      console.error('   Status:', error.response?.status);
+      console.error('   Data:', JSON.stringify(error.response?.data, null, 2));
+      
+      // Verificar si el código ya existe
+      if (error.response?.data?.errors?.code) {
+        console.error('   El código ya existe en Shopify');
+      }
+      
       throw error;
     }
   }

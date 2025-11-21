@@ -46,20 +46,27 @@ const customerSchema = new mongoose.Schema({
   },
   tags: [String],
   
+  // ✅ NUEVO: Código de descuento del popup
+  popupDiscountCode: {
+    type: String,
+    sparse: true,
+    index: true
+  },
+  
   // Segmentación
   segments: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Segment'
   }],
   
-  // 🆕 TRACKING CON REVENUE
+  // Tracking con revenue
   emailStats: {
     sent: { type: Number, default: 0 },
     opened: { type: Number, default: 0 },
     clicked: { type: Number, default: 0 },
     bounced: { type: Number, default: 0 },
-    purchased: { type: Number, default: 0 }, // 🆕
-    totalRevenue: { type: Number, default: 0 }, // 🆕
+    purchased: { type: Number, default: 0 },
+    totalRevenue: { type: Number, default: 0 },
     lastOpenedAt: Date,
     lastClickedAt: Date
   },
@@ -70,6 +77,13 @@ const customerSchema = new mongoose.Schema({
     province: String,
     country: String,
     zip: String
+  },
+  
+  // Source de donde vino el cliente
+  source: {
+    type: String,
+    enum: ['shopify', 'csv-import', 'website-popup', 'website-popup-v2', 'manual'],
+    default: 'shopify'
   },
   
   // Metadata de Shopify
@@ -84,6 +98,8 @@ const customerSchema = new mongoose.Schema({
 customerSchema.index({ totalSpent: -1, ordersCount: -1 });
 customerSchema.index({ createdAt: -1 });
 customerSchema.index({ acceptsMarketing: 1, 'emailStats.sent': 1 });
+customerSchema.index({ popupDiscountCode: 1 });
+customerSchema.index({ source: 1 });
 
 // Virtual para nombre completo
 customerSchema.virtual('fullName').get(function() {
@@ -116,7 +132,7 @@ customerSchema.methods.matchesSegment = function(segment) {
 
 // ==================== MÉTODOS ESTÁTICOS ====================
 
-// 🆕 ACTUALIZAR ESTADÍSTICAS DE EMAIL CON REVENUE
+// Actualizar estadísticas de email con revenue
 customerSchema.statics.updateEmailStats = async function(customerId, eventType, revenueAmount = 0) {
   try {
     const updates = {
@@ -135,7 +151,6 @@ customerSchema.statics.updateEmailStats = async function(customerId, eventType, 
     } else if (eventType === 'bounced') {
       updates.$inc['emailStats.bounced'] = 1;
     } else if (eventType === 'purchased') {
-      // 🆕 REVENUE TRACKING
       updates.$inc['emailStats.purchased'] = 1;
       if (revenueAmount > 0) {
         updates.$inc['emailStats.totalRevenue'] = revenueAmount;

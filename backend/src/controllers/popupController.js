@@ -11,10 +11,10 @@ const POPUP_LIST_CONFIG = {
 
 // Función para generar código único
 function generateUniqueCode(email) {
-  const timestamp = Date.now().toString(36);
-  const randomStr = Math.random().toString(36).substring(2, 8).toUpperCase();
-  const emailPrefix = email.split('@')[0].substring(0, 3).toUpperCase();
-  return `JP${emailPrefix}${randomStr}${timestamp}`.substring(0, 16);
+  const timestamp = Date.now().toString(36).toUpperCase();
+  const randomStr = Math.random().toString(36).substring(2, 6).toUpperCase();
+  const emailPrefix = email.split('@')[0].substring(0, 3).toUpperCase().replace(/[^A-Z]/g, 'X');
+  return `JP${emailPrefix}${randomStr}${timestamp}`.substring(0, 15);
 }
 
 class PopupController {
@@ -28,7 +28,7 @@ class PopupController {
       if (!email || !email.includes('@')) {
         return res.status(400).json({ 
           success: false,
-          error: 'Email inválido' 
+          error: 'Invalid email address' 
         });
       }
       
@@ -60,7 +60,7 @@ class PopupController {
             }
           }
           
-          // Generar y guardar código
+          // Intentar generar y guardar código
           discountCode = await this.createShopifyDiscount(emailLower);
           customer.popupDiscountCode = discountCode;
           await customer.save();
@@ -68,9 +68,10 @@ class PopupController {
           console.log(`✅ Cliente existente actualizado con código: ${discountCode}`);
         }
       } else {
-        // Crear nuevo cliente
+        // Crear código primero
         discountCode = await this.createShopifyDiscount(emailLower);
         
+        // Crear nuevo cliente
         customer = await Customer.create({
           email: emailLower,
           firstName: firstName?.trim() || '',
@@ -109,38 +110,52 @@ class PopupController {
       
       res.json({
         success: true,
-        message: isNew ? '¡Gracias por suscribirte!' : '¡Ya estás suscrito!',
+        message: isNew ? 'Thanks for subscribing!' : 'You\'re already subscribed!',
         isNew,
         discountCode: discountCode
       });
       
     } catch (error) {
       console.error('❌ Error en suscripción desde popup:', error);
+      console.error('Stack:', error.stack);
       
       // Manejar error de email duplicado
       if (error.code === 11000) {
         return res.status(200).json({
           success: true,
-          message: '¡Ya estás suscrito!',
-          isNew: false
+          message: 'You\'re already subscribed!',
+          isNew: false,
+          discountCode: 'WELCOME15' // Código genérico
         });
       }
       
       res.status(500).json({ 
         success: false,
-        error: 'Error al procesar suscripción' 
+        error: 'Error processing subscription. Please try again.'
       });
     }
   }
   
-  // Crear código de descuento en Shopify
+  // Crear código de descuento en Shopify (con fallback robusto)
   async createShopifyDiscount(email) {
+    const generatedCode = generateUniqueCode(email);
+    
     try {
-      const code = generateUniqueCode(email);
+      console.log(`💰 Intentando crear código de descuento: ${generatedCode}`);
+      
+      // Verificar que tenemos credenciales de Shopify
+      if (!process.env.SHOPIFY_STORE_URL || !process.env.SHOPIFY_ACCESS_TOKEN) {
+        console.warn('⚠️  Credenciales de Shopify no configuradas, usando código genérico');
+        return 'WELCOME15';
+      }
+      
+      // Calcular fechas
+      const now = new Date();
+      const expiryDate = new Date(now.getTime() + (90 * 24 * 60 * 60 * 1000)); // 90 días
       
       // Crear precio rule en Shopify
-      const priceRule = await shopifyService.createPriceRule({
-        title: `Popup Newsletter - ${code}`,
+      const priceRuleData = {
+        title: `Newsletter Popup - ${generatedCode}`,
         target_type: 'line_item',
         target_selection: 'all',
         allocation_method: 'across',
@@ -149,20 +164,39 @@ class PopupController {
         customer_selection: 'all',
         once_per_customer: true,
         usage_limit: 1,
-        starts_at: new Date().toISOString(),
-        ends_at: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString() // 90 días
-      });
+        starts_at: now.toISOString(),
+        ends_at: expiryDate.toISOString()
+      };
+      
+      const priceRule = await shopifyService.createPriceRule(priceRuleData);
+      
+      if (!priceRule || !priceRule.id) {
+        throw new Error('Price rule creation failed - no ID returned');
+      }
       
       // Crear discount code
-      await shopifyService.createDiscountCode(priceRule.id, code);
+      await shopifyService.createDiscountCode(priceRule.id, generatedCode);
       
-      console.log(`💰 Código de descuento creado en Shopify: ${code}`);
+      console.log(`✅ Código de descuento creado exitosamente: ${generatedCode}`);
       
-      return code;
+      return generatedCode;
       
     } catch (error) {
-      console.error('❌ Error creando código de descuento:', error);
-      // Si falla, generar código genérico
+      console.error('❌ Error creando código de descuento en Shopify:', error.message);
+      
+      // Si hay error específico de permisos
+      if (error.response?.status === 403 || error.response?.status === 401) {
+        console.error('⚠️  Error de permisos en Shopify API');
+        console.error('   Verifica que el Access Token tenga permisos: write_price_rules');
+      }
+      
+      // Si hay error de API
+      if (error.response?.data) {
+        console.error('   Respuesta de Shopify:', JSON.stringify(error.response.data, null, 2));
+      }
+      
+      // Fallback: usar código genérico
+      console.log('⚠️  Usando código genérico como fallback: WELCOME15');
       return 'WELCOME15';
     }
   }
@@ -192,12 +226,20 @@ class PopupController {
         }
       });
       
+      // Contar cuántos códigos únicos se han generado
+      const uniqueCodes = await Customer.countDocuments({
+        _id: { $in: list.members },
+        popupDiscountCode: { $exists: true, $ne: null, $ne: 'WELCOME15' }
+      });
+      
       res.json({
         listId: list._id,
         listName: list.name,
         total,
         thisMonth,
-        today
+        today,
+        uniqueCodes,
+        genericCodes: total - uniqueCodes
       });
       
     } catch (error) {
