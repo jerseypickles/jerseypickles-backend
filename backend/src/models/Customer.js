@@ -82,7 +82,14 @@ const customerSchema = new mongoose.Schema({
   // Source de donde vino el cliente
   source: {
     type: String,
-    enum: ['shopify', 'csv-import', 'website-popup', 'website-popup-v2', 'manual'],
+    enum: [
+      'shopify', 
+      'csv-import', 
+      'website-popup', 
+      'website-popup-v2', 
+      'website-popup-v3',  // ✅ AGREGADO
+      'manual'
+    ],
     default: 'shopify'
   },
   
