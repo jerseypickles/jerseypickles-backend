@@ -129,6 +129,7 @@ app.use('/api/lists', require('./src/routes/lists'));
 app.use('/api/track', require('./src/routes/tracking'));
 app.use('/api/analytics', require('./src/routes/analytics'));
 app.use('/api/upload', require('./src/routes/upload'));
+app.use('/api/popup', require('./src/routes/popup')); // ✅ AGREGAR ESTA LÍNEA
 
 app.use('*', (req, res) => {
   res.status(404).json({ 
