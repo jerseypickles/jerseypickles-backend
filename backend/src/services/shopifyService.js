@@ -105,12 +105,10 @@ class ShopifyService {
     }
   }
 
-  // 🔧 MODIFICADO: Ahora acepta maxPages para limitar las páginas
   async getAllOrders(params = {}, maxPages = null) {
     try {
       console.log('🔗 Conectando con Shopify para obtener órdenes...');
       
-      // 🔍 NUEVO: Mostrar si hay límite de páginas
       if (maxPages) {
         console.log(`⚠️  MODO DEBUG: Solo procesando ${maxPages} página(s)\n`);
       }
@@ -128,7 +126,6 @@ class ShopifyService {
       while (nextPageUrl) {
         pageCount++;
         
-        // 🔍 NUEVO: Detener si alcanzamos el límite de páginas
         if (maxPages && pageCount > maxPages) {
           console.log(`\n⚠️  Límite de ${maxPages} página(s) alcanzado. Deteniendo...\n`);
           break;
@@ -170,6 +167,50 @@ class ShopifyService {
       return response.data.product;
     } catch (error) {
       console.error('Error obteniendo producto:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  // ✅ NUEVO: Crear Price Rule para descuentos
+  async createPriceRule(data) {
+    try {
+      console.log(`💰 Creando price rule: ${data.title}`);
+      
+      const response = await axios.post(
+        `${this.baseUrl}/price_rules.json`,
+        { price_rule: data },
+        { headers: this.getHeaders() }
+      );
+      
+      console.log(`✅ Price rule creado con ID: ${response.data.price_rule.id}`);
+      return response.data.price_rule;
+      
+    } catch (error) {
+      console.error('❌ Error creando price rule:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  // ✅ NUEVO: Crear Discount Code
+  async createDiscountCode(priceRuleId, code) {
+    try {
+      console.log(`🎟️  Creando discount code: ${code}`);
+      
+      const response = await axios.post(
+        `${this.baseUrl}/price_rules/${priceRuleId}/discount_codes.json`,
+        { 
+          discount_code: { 
+            code: code 
+          } 
+        },
+        { headers: this.getHeaders() }
+      );
+      
+      console.log(`✅ Discount code creado: ${code}`);
+      return response.data.discount_code;
+      
+    } catch (error) {
+      console.error('❌ Error creando discount code:', error.response?.data || error.message);
       throw error;
     }
   }
@@ -274,7 +315,6 @@ class ShopifyService {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
   
-  // Método para testear conexión
   async testConnection() {
     try {
       console.log('🧪 Testeando conexión con Shopify...');

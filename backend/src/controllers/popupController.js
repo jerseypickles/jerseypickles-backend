@@ -1,12 +1,21 @@
 // backend/src/controllers/popupController.js
 const Customer = require('../models/Customer');
 const List = require('../models/List');
+const shopifyService = require('../services/shopifyService');
 
 // Configuración de la lista del popup
 const POPUP_LIST_CONFIG = {
   id: process.env.POPUP_LIST_ID || '691ea301906f6e3d4cfc95b7',
-  name: 'Clientes nuevos Jersey Pickles' // Fallback si no existe
+  name: 'Clientes nuevos Jersey Pickles'
 };
+
+// Función para generar código único
+function generateUniqueCode(email) {
+  const timestamp = Date.now().toString(36);
+  const randomStr = Math.random().toString(36).substring(2, 8).toUpperCase();
+  const emailPrefix = email.split('@')[0].substring(0, 3).toUpperCase();
+  return `JP${emailPrefix}${randomStr}${timestamp}`.substring(0, 16);
+}
 
 class PopupController {
   
@@ -31,41 +40,53 @@ class PopupController {
       let customer = await Customer.findOne({ email: emailLower });
       
       let isNew = false;
+      let discountCode = null;
       
       if (customer) {
-        // Cliente existe - actualizar acceptsMarketing
-        if (!customer.acceptsMarketing) {
-          customer.acceptsMarketing = true;
-          
-          // Agregar tag si no lo tiene
-          if (!customer.tags) customer.tags = [];
-          if (!customer.tags.includes('popup-subscriber')) {
-            customer.tags.push('popup-subscriber');
+        // Cliente existe - verificar si ya tiene código
+        if (customer.popupDiscountCode) {
+          // Ya tiene código, retornarlo
+          discountCode = customer.popupDiscountCode;
+          console.log(`⏭️  Cliente ya tiene código: ${discountCode}`);
+        } else {
+          // Actualizar acceptsMarketing y crear código
+          if (!customer.acceptsMarketing) {
+            customer.acceptsMarketing = true;
+            
+            // Agregar tag si no lo tiene
+            if (!customer.tags) customer.tags = [];
+            if (!customer.tags.includes('popup-subscriber')) {
+              customer.tags.push('popup-subscriber');
+            }
           }
           
+          // Generar y guardar código
+          discountCode = await this.createShopifyDiscount(emailLower);
+          customer.popupDiscountCode = discountCode;
           await customer.save();
-          console.log(`✅ Cliente existente actualizado: ${email}`);
-        } else {
-          console.log(`⏭️  Cliente ya estaba suscrito: ${email}`);
+          
+          console.log(`✅ Cliente existente actualizado con código: ${discountCode}`);
         }
       } else {
         // Crear nuevo cliente
+        discountCode = await this.createShopifyDiscount(emailLower);
+        
         customer = await Customer.create({
           email: emailLower,
           firstName: firstName?.trim() || '',
           acceptsMarketing: true,
           source: source,
-          tags: ['popup-subscriber', 'newsletter']
+          tags: ['popup-subscriber', 'newsletter'],
+          popupDiscountCode: discountCode
         });
         
         isNew = true;
-        console.log(`✨ Nuevo cliente creado: ${email}`);
+        console.log(`✨ Nuevo cliente creado con código: ${discountCode}`);
       }
       
-      // ✅ BUSCAR LA LISTA DEL POPUP
+      // Buscar la lista del popup
       let list = await List.findById(POPUP_LIST_CONFIG.id);
       
-      // Si no existe la lista, crearla
       if (!list) {
         console.log('⚠️  Lista de popup no encontrada, creando nueva...');
         list = await List.create({
@@ -84,14 +105,13 @@ class PopupController {
       if (!alreadyInList) {
         await list.addMember(customer._id);
         console.log(`📋 Cliente agregado a lista "${list.name}" (${list.memberCount} miembros)`);
-      } else {
-        console.log(`⏭️  Cliente ya estaba en la lista`);
       }
       
       res.json({
         success: true,
         message: isNew ? '¡Gracias por suscribirte!' : '¡Ya estás suscrito!',
-        isNew
+        isNew,
+        discountCode: discountCode
       });
       
     } catch (error) {
@@ -113,6 +133,40 @@ class PopupController {
     }
   }
   
+  // Crear código de descuento en Shopify
+  async createShopifyDiscount(email) {
+    try {
+      const code = generateUniqueCode(email);
+      
+      // Crear precio rule en Shopify
+      const priceRule = await shopifyService.createPriceRule({
+        title: `Popup Newsletter - ${code}`,
+        target_type: 'line_item',
+        target_selection: 'all',
+        allocation_method: 'across',
+        value_type: 'percentage',
+        value: '-15.0',
+        customer_selection: 'all',
+        once_per_customer: true,
+        usage_limit: 1,
+        starts_at: new Date().toISOString(),
+        ends_at: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString() // 90 días
+      });
+      
+      // Crear discount code
+      await shopifyService.createDiscountCode(priceRule.id, code);
+      
+      console.log(`💰 Código de descuento creado en Shopify: ${code}`);
+      
+      return code;
+      
+    } catch (error) {
+      console.error('❌ Error creando código de descuento:', error);
+      // Si falla, generar código genérico
+      return 'WELCOME15';
+    }
+  }
+  
   // Obtener estadísticas del popup
   async getStats(req, res) {
     try {
@@ -122,10 +176,8 @@ class PopupController {
         return res.status(404).json({ error: 'Lista no encontrada' });
       }
       
-      // Stats generales
       const total = list.memberCount;
       
-      // Subscribers de este mes
       const thisMonth = await Customer.countDocuments({
         _id: { $in: list.members },
         createdAt: { 
@@ -133,7 +185,6 @@ class PopupController {
         }
       });
       
-      // Subscribers de hoy
       const today = await Customer.countDocuments({
         _id: { $in: list.members },
         createdAt: { 
