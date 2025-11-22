@@ -64,6 +64,8 @@ router.post('/resend', async (req, res) => {
       executionId = data.tags.execution_id;
     }
     
+    console.log(`🏷️  Tags extraídos: campaign=${campaignId}, flow=${flowId}, customer=${customerId}`);
+    
     // Si no es de campaign ni de flow, ignorar
     if (!campaignId && !flowId) {
       console.log('⚠️  Evento sin tags de campaign/flow');
@@ -78,6 +80,7 @@ router.post('/resend', async (req, res) => {
     const EmailEvent = require('../models/EmailEvent');
     const Campaign = require('../models/Campaign');
     const Customer = require('../models/Customer');
+    const Flow = require('../models/Flow');
     
     const eventTypeMap = {
       'email.sent': 'sent',
@@ -145,27 +148,46 @@ router.post('/resend', async (req, res) => {
     }
     
     await EmailEvent.create(eventData);
+    console.log(`✅ EmailEvent creado: ${eventType}`);
     
     // Actualizar stats
     try {
+      // ✅ Campaign stats
       if (campaignId) {
         await Campaign.updateStats(campaignId, eventType);
+        console.log(`✅ Campaign stats updated: ${campaignId}`);
       }
       
+      // ✅ Customer stats
       await Customer.updateEmailStats(customerId, eventType);
+      console.log(`✅ Customer stats updated: ${customerId}`);
       
-      // 🆕 Actualizar stats del flow si aplica
+      // 🆕 Flow stats - CORREGIDO
       if (flowId) {
-        const Flow = require('../models/Flow');
-        await Flow.findByIdAndUpdate(flowId, {
-          $inc: { [`metrics.email_${eventType}`]: 1 }
-        });
+        // Mapear tipo de evento a nombre de métrica
+        const metricMap = {
+          'sent': 'emailsSent',
+          'delivered': 'delivered',
+          'opened': 'opens',
+          'clicked': 'clicks',
+          'bounced': 'bounced',
+          'complained': 'complained'
+        };
+        
+        const metricName = metricMap[eventType];
+        
+        if (metricName) {
+          await Flow.findByIdAndUpdate(flowId, {
+            $inc: { [`metrics.${metricName}`]: 1 }
+          });
+          console.log(`✅ Flow metric updated: ${flowId} - metrics.${metricName} +1`);
+        }
       }
     } catch (error) {
       console.log('⚠️  No se pudieron actualizar stats:', error.message);
     }
     
-    console.log(`✅ Evento ${eventType} registrado desde Resend`);
+    console.log(`✅ Evento ${eventType} registrado desde Resend\n`);
     
     res.status(200).json({ received: true });
     
