@@ -1,7 +1,8 @@
-// backend/src/controllers/trackingController.js
+// backend/src/controllers/trackingController.js (ACTUALIZADO PARA FLOWS)
 const EmailEvent = require('../models/EmailEvent');
 const Campaign = require('../models/Campaign');
 const Customer = require('../models/Customer');
+const Flow = require('../models/Flow');
 
 class TrackingController {
   
@@ -9,37 +10,63 @@ class TrackingController {
   async trackOpen(req, res) {
     try {
       const { campaignId, customerId } = req.params;
+      const { email } = req.query;
+      
+      console.log(`📧 Email opened - Campaign: ${campaignId}, Customer: ${customerId}`);
+      
+      // Detectar si es un Flow ID o Campaign ID
+      const isObjectId = /^[0-9a-fA-F]{24}$/.test(campaignId);
+      let isFlow = false;
+      
+      if (isObjectId) {
+        // Verificar si existe como Flow
+        const flowExists = await Flow.exists({ _id: campaignId });
+        isFlow = flowExists;
+      }
       
       // Verificar si ya se registró este open
-      const existingEvent = await EmailEvent.findOne({
-        campaign: campaignId,
-        customer: customerId,
-        eventType: 'opened'
-      });
+      const query = isFlow 
+        ? { flow: campaignId, customer: customerId, eventType: 'opened' }
+        : { campaign: campaignId, customer: customerId, eventType: 'opened' };
+      
+      const existingEvent = await EmailEvent.findOne(query);
       
       if (!existingEvent) {
-        // Registrar evento
-        await EmailEvent.create({
-          campaign: campaignId,
+        // Crear evento según el tipo
+        const eventData = {
           customer: customerId,
-          email: req.query.email || 'unknown',
+          email: email || 'unknown',
           eventType: 'opened',
+          source: isFlow ? 'flow' : 'campaign',
           userAgent: req.headers['user-agent'],
           ipAddress: req.ip
-        });
+        };
         
-        // Actualizar stats de campaña
-        await Campaign.findByIdAndUpdate(campaignId, {
-          $inc: { 'stats.opened': 1 }
-        });
+        if (isFlow) {
+          eventData.flow = campaignId;
+        } else {
+          eventData.campaign = campaignId;
+        }
+        
+        await EmailEvent.create(eventData);
+        
+        // Actualizar stats
+        if (isFlow) {
+          await Flow.findByIdAndUpdate(campaignId, {
+            $inc: { 'metrics.opens': 1 }
+          });
+          console.log(`✅ Flow open tracked: ${campaignId}`);
+        } else {
+          try {
+            await Campaign.updateStats(campaignId, 'opened');
+            console.log(`✅ Campaign open tracked: ${campaignId}`);
+          } catch (error) {
+            console.error('Error actualizando stats de campaña:', error);
+          }
+        }
         
         // Actualizar stats de cliente
-        await Customer.findByIdAndUpdate(customerId, {
-          $inc: { 'emailStats.opened': 1 },
-          'emailStats.lastOpenedAt': new Date()
-        });
-        
-        console.log(`📧 Open tracked - Campaign: ${campaignId}, Customer: ${customerId}`);
+        await Customer.updateEmailStats(customerId, 'opened');
       }
       
       // Devolver pixel transparente 1x1
@@ -58,7 +85,7 @@ class TrackingController {
       res.end(pixel);
       
     } catch (error) {
-      console.error('Error tracking open:', error);
+      console.error('❌ Error tracking open:', error);
       
       // Devolver pixel aunque haya error
       const pixel = Buffer.from(
@@ -77,41 +104,59 @@ class TrackingController {
   async trackClick(req, res) {
     try {
       const { campaignId, customerId } = req.params;
-      const { url } = req.query;
+      const { url, email } = req.query;
       
       if (!url) {
         return res.status(400).json({ error: 'Missing URL parameter' });
       }
       
-      // Registrar evento
-      await EmailEvent.create({
-        campaign: campaignId,
+      console.log(`🖱️ Click tracked - Campaign: ${campaignId}, URL: ${url}`);
+      
+      // Detectar si es Flow o Campaign
+      const isObjectId = /^[0-9a-fA-F]{24}$/.test(campaignId);
+      let isFlow = false;
+      
+      if (isObjectId) {
+        const flowExists = await Flow.exists({ _id: campaignId });
+        isFlow = flowExists;
+      }
+      
+      // Crear evento
+      const eventData = {
         customer: customerId,
-        email: req.query.email || 'unknown',
+        email: email || 'unknown',
         eventType: 'clicked',
         clickedUrl: decodeURIComponent(url),
+        source: isFlow ? 'flow' : 'campaign',
         userAgent: req.headers['user-agent'],
         ipAddress: req.ip
-      });
+      };
       
-      // Actualizar stats de campaña
-      await Campaign.findByIdAndUpdate(campaignId, {
-        $inc: { 'stats.clicked': 1 }
-      });
+      if (isFlow) {
+        eventData.flow = campaignId;
+      } else {
+        eventData.campaign = campaignId;
+      }
+      
+      await EmailEvent.create(eventData);
+      
+      // Actualizar stats
+      if (isFlow) {
+        await Flow.findByIdAndUpdate(campaignId, {
+          $inc: { 'metrics.clicks': 1 }
+        });
+      } else {
+        await Campaign.updateStats(campaignId, 'clicked');
+      }
       
       // Actualizar stats de cliente
-      await Customer.findByIdAndUpdate(customerId, {
-        $inc: { 'emailStats.clicked': 1 },
-        'emailStats.lastClickedAt': new Date()
-      });
-      
-      console.log(`🖱️  Click tracked - Campaign: ${campaignId}, URL: ${url}`);
+      await Customer.updateEmailStats(customerId, 'clicked');
       
       // Redirigir a la URL original
       res.redirect(decodeURIComponent(url));
       
     } catch (error) {
-      console.error('Error tracking click:', error);
+      console.error('❌ Error tracking click:', error);
       
       // Redirigir aunque haya error
       if (req.query.url) {

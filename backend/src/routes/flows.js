@@ -1,65 +1,28 @@
 // backend/src/routes/flows.js
 const express = require('express');
 const router = express.Router();
-const Flow = require('../models/Flow');
-const FlowExecution = require('../models/FlowExecution');
+const flowsController = require('../controllers/flowsController');
+const authMiddleware = require('../middleware/auth');
 
-// Listar flows
-router.get('/', async (req, res) => {
-  const flows = await Flow.find().sort({ createdAt: -1 });
-  res.json(flows);
-});
+// Aplicar autenticación a todas las rutas
+router.use(authMiddleware);
 
-// Crear flow
-router.post('/', async (req, res) => {
-  const flow = await Flow.create(req.body);
-  res.json(flow);
-});
+// ==================== FLOWS CRUD ====================
+router.get('/', flowsController.getAll);
+router.get('/templates', flowsController.getTemplates);
+router.get('/:id', flowsController.getOne);
+router.get('/:id/stats', flowsController.getStats);
+router.get('/:id/executions', flowsController.getExecutions);
 
-// Activar/desactivar
-router.patch('/:id/status', async (req, res) => {
-  const { status } = req.body;
-  const flow = await Flow.findByIdAndUpdate(
-    req.params.id,
-    { status },
-    { new: true }
-  );
-  res.json(flow);
-});
+router.post('/', flowsController.create);
+router.post('/templates/:templateId', flowsController.createFromTemplate);
+router.post('/:id/test', flowsController.testFlow);
+router.post('/:id/pause', flowsController.pauseFlow);
+router.post('/:id/resume', flowsController.resumeFlow);
 
-// Ver ejecuciones
-router.get('/:id/executions', async (req, res) => {
-  const executions = await FlowExecution.find({ 
-    flow: req.params.id 
-  })
-  .populate('customer', 'email firstName lastName')
-  .sort({ createdAt: -1 })
-  .limit(100);
-  
-  res.json(executions);
-});
+router.put('/:id', flowsController.update);
+router.patch('/:id/toggle', flowsController.toggleStatus);
 
-// Métricas
-router.get('/:id/metrics', async (req, res) => {
-  const flow = await Flow.findById(req.params.id);
-  
-  // Calcular revenue attribution
-  const executions = await FlowExecution.find({ 
-    flow: req.params.id,
-    'attributedOrders.0': { $exists: true }
-  });
-  
-  const totalRevenue = executions.reduce((sum, exec) => {
-    return sum + exec.attributedOrders.reduce((s, o) => s + o.amount, 0);
-  }, 0);
-  
-  res.json({
-    ...flow.metrics.toObject(),
-    totalRevenue,
-    conversionRate: flow.metrics.completed > 0 
-      ? ((totalRevenue > 0 ? executions.length : 0) / flow.metrics.completed * 100).toFixed(2)
-      : 0
-  });
-});
+router.delete('/:id', flowsController.delete);
 
 module.exports = router;
