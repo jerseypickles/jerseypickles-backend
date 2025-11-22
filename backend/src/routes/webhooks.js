@@ -1,4 +1,4 @@
-// backend/src/routes/webhooks.js (ACTUALIZADO CON FLOWS)
+// backend/src/routes/webhooks.js (ACTUALIZADO CON IDEMPOTENCIA)
 const express = require('express');
 const router = express.Router();
 const webhooksController = require('../controllers/webhooksController');
@@ -55,8 +55,8 @@ router.post('/resend', async (req, res) => {
     if (data.tags && Array.isArray(data.tags)) {
       campaignId = data.tags.find(t => t.name === 'campaign_id')?.value;
       customerId = data.tags.find(t => t.name === 'customer_id')?.value;
-      flowId = data.tags.find(t => t.name === 'flow_id')?.value; // 🆕 Para flows
-      executionId = data.tags.find(t => t.name === 'execution_id')?.value; // 🆕 Para flows
+      flowId = data.tags.find(t => t.name === 'flow_id')?.value;
+      executionId = data.tags.find(t => t.name === 'execution_id')?.value;
     } else if (data.tags && typeof data.tags === 'object') {
       campaignId = data.tags.campaign_id;
       customerId = data.tags.customer_id;
@@ -99,22 +99,18 @@ router.post('/resend', async (req, res) => {
       return res.status(200).json({ received: true });
     }
     
-    // Para opens, verificar duplicados
-    if (eventType === 'opened') {
-      const query = {
-        customer: customerId,
-        eventType: 'opened',
-        source: 'resend'
-      };
-      
-      if (campaignId) query.campaign = campaignId;
-      if (flowId) query.flow = flowId;
-      
-      const existingEvent = await EmailEvent.findOne(query).catch(() => null);
+    // ✅ IDEMPOTENCIA: Verificar duplicados PARA TODOS LOS EVENTOS
+    const resendEventId = data.email_id || data.id;
+    
+    if (resendEventId) {
+      const existingEvent = await EmailEvent.findOne({
+        'metadata.resendEventId': resendEventId,
+        eventType: eventType
+      });
       
       if (existingEvent) {
-        console.log('⏭️  Open de Resend ya registrado');
-        return res.status(200).json({ received: true });
+        console.log(`⏭️  Evento duplicado detectado: ${resendEventId} (${eventType})`);
+        return res.status(200).json({ received: true, duplicate: true });
       }
     }
     
@@ -131,7 +127,7 @@ router.post('/resend', async (req, res) => {
       bounceReason: data.bounce?.message || null,
       userAgent: data.click?.user_agent || null,
       metadata: {
-        resendEventId: data.email_id,
+        resendEventId: resendEventId, // ← Importante: guardamos el ID único
         timestamp: data.created_at,
         rawTags: data.tags
       }
@@ -162,9 +158,8 @@ router.post('/resend', async (req, res) => {
       await Customer.updateEmailStats(customerId, eventType);
       console.log(`✅ Customer stats updated: ${customerId}`);
       
-      // 🆕 Flow stats - CORREGIDO
+      // 🆕 Flow stats
       if (flowId) {
-        // Mapear tipo de evento a nombre de métrica
         const metricMap = {
           'sent': 'emailsSent',
           'delivered': 'delivered',
