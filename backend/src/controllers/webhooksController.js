@@ -4,7 +4,6 @@ const Order = require('../models/Order');
 const EmailEvent = require('../models/EmailEvent');
 const Campaign = require('../models/Campaign');
 const AttributionService = require('../middleware/attributionTracking');
-const flowService = require('../services/flowService'); // 🆕 AGREGADO
 
 class WebhooksController {
   
@@ -16,9 +15,8 @@ class WebhooksController {
       
       console.log('📥 Webhook: Customer Create', shopifyCustomer.id);
       
-      // ✅ CAMBIAR A findOneAndUpdate con upsert
       const customer = await Customer.findOneAndUpdate(
-        { shopifyId: shopifyCustomer.id.toString() }, // Buscar por shopifyId
+        { shopifyId: shopifyCustomer.id.toString() },
         {
           $set: {
             email: shopifyCustomer.email,
@@ -39,35 +37,36 @@ class WebhooksController {
           }
         },
         { 
-          upsert: true,              // Crea si no existe
-          new: true,                 // Retorna el documento nuevo/actualizado
-          setDefaultsOnInsert: true  // Aplica defaults del schema si es nuevo
+          upsert: true,
+          new: true,
+          setDefaultsOnInsert: true
         }
       );
       
       console.log('✅ Cliente creado/actualizado:', customer.email);
       
-      // 🆕 ==================== FLOW TRIGGER: CUSTOMER_CREATED ====================
-      // Solo trigger si es un cliente NUEVO (no una actualización)
+      // FLOW TRIGGER: CUSTOMER_CREATED (solo si es nuevo)
       const isNewCustomer = !shopifyCustomer.created_at || 
-        new Date(shopifyCustomer.created_at) > new Date(Date.now() - 60000); // Creado hace menos de 1 minuto
+        new Date(shopifyCustomer.created_at) > new Date(Date.now() - 60000);
       
       if (isNewCustomer) {
         console.log('🎯 Triggering CUSTOMER_CREATED flow...');
         
-        await flowService.processTrigger('customer_created', {
-          customerId: customer._id,
-          email: customer.email,
-          firstName: customer.firstName,
-          lastName: customer.lastName,
-          acceptsMarketing: customer.acceptsMarketing,
-          source: 'shopify',
-          tags: customer.tags,
-          address: customer.address
-        }).catch(err => {
-          console.error('❌ Flow trigger error:', err.message);
-          // No fallar el webhook por error en flows
-        });
+        try {
+          const flowService = require('../services/flowService');
+          await flowService.processTrigger('customer_created', {
+            customerId: customer._id,
+            email: customer.email,
+            firstName: customer.firstName,
+            lastName: customer.lastName,
+            acceptsMarketing: customer.acceptsMarketing,
+            source: 'shopify',
+            tags: customer.tags,
+            address: customer.address
+          });
+        } catch (err) {
+          console.log('Flow service not available:', err.message);
+        }
       }
       
       res.status(200).json({ success: true });
@@ -84,7 +83,6 @@ class WebhooksController {
       
       console.log('📥 Webhook: Customer Update', shopifyCustomer.id);
       
-      // Obtener cliente anterior para comparar tags
       const previousCustomer = await Customer.findOne({ 
         shopifyId: shopifyCustomer.id.toString() 
       });
@@ -115,26 +113,28 @@ class WebhooksController {
       
       console.log('✅ Cliente actualizado:', customer.email);
       
-      // 🆕 ==================== FLOW TRIGGER: CUSTOMER_TAG_ADDED ====================
+      // FLOW TRIGGER: CUSTOMER_TAG_ADDED
       const currentTags = customer.tags || [];
       const addedTags = currentTags.filter(tag => !previousTags.includes(tag));
       
       if (addedTags.length > 0) {
         console.log(`🏷️  New tags detected: ${addedTags.join(', ')}`);
         
-        // Trigger flow para cada tag nuevo
         for (const tag of addedTags) {
           console.log(`🎯 Triggering CUSTOMER_TAG_ADDED flow for tag: ${tag}`);
           
-          await flowService.processTrigger('customer_tag_added', {
-            customerId: customer._id,
-            email: customer.email,
-            tag: tag,
-            allTags: currentTags,
-            previousTags: previousTags
-          }).catch(err => {
-            console.error(`❌ Flow trigger error for tag ${tag}:`, err.message);
-          });
+          try {
+            const flowService = require('../services/flowService');
+            await flowService.processTrigger('customer_tag_added', {
+              customerId: customer._id,
+              email: customer.email,
+              tag: tag,
+              allTags: currentTags,
+              previousTags: previousTags
+            });
+          } catch (err) {
+            console.log('Flow service not available:', err.message);
+          }
         }
       }
       
@@ -146,7 +146,7 @@ class WebhooksController {
     }
   }
 
-  // ==================== ORDERS CON REVENUE TRACKING Y FLOWS ====================
+  // ==================== ORDERS ====================
   
   async orderCreate(req, res) {
     try {
@@ -199,7 +199,6 @@ class WebhooksController {
         shopifyData: shopifyOrder
       });
       
-      // Obtener conteo anterior de órdenes para detectar primera compra
       const previousOrdersCount = customer.ordersCount || 0;
       
       // Actualizar métricas del cliente
@@ -213,12 +212,12 @@ class WebhooksController {
       
       console.log('✅ Orden creada en DB:', order.orderNumber);
       
-      // ==================== REVENUE ATTRIBUTION (tu código existente) ====================
+      // ==================== REVENUE ATTRIBUTION ====================
       
       const attribution = AttributionService.getAttribution(req);
       
       let campaignId = null;
-      let flowId = null; // 🆕 Para attribution de flows
+      let flowId = null;
       let customerId = customer._id;
       let attributionMethod = 'none';
       
@@ -236,7 +235,6 @@ class WebhooksController {
           attributionMethod = 'utm';
           console.log(`🔗 Attribution found via UTM: Campaign ${campaignId}`);
         } else if (utmCampaign && utmCampaign.startsWith('flow_')) {
-          // 🆕 Attribution para flows
           flowId = utmCampaign.replace('flow_', '');
           attributionMethod = 'utm_flow';
           console.log(`🔗 Attribution found via UTM for Flow: ${flowId}`);
@@ -277,7 +275,7 @@ class WebhooksController {
         }
       }
       
-      // Si encontramos atribución de campaña, registrar revenue
+      // Revenue tracking para campaigns
       if (campaignId) {
         console.log(`\n💰 ATTRIBUTING REVENUE TO CAMPAIGN`);
         console.log(`   Method: ${attributionMethod}`);
@@ -314,61 +312,66 @@ class WebhooksController {
         console.log(`✅ Revenue tracked successfully!`);
       }
       
-      // 🆕 Si encontramos atribución de flow, actualizar FlowExecution
+      // Revenue tracking para flows
       if (flowId) {
         console.log(`\n💰 ATTRIBUTING REVENUE TO FLOW`);
         console.log(`   Flow: ${flowId}`);
         console.log(`   Revenue: $${shopifyOrder.total_price}`);
         
-        const FlowExecution = require('../models/FlowExecution');
-        await FlowExecution.findOneAndUpdate(
-          {
-            flow: flowId,
-            customer: customer._id,
-            status: { $in: ['active', 'waiting', 'completed'] }
-          },
-          {
-            $push: {
-              attributedOrders: {
-                orderId: order._id,
-                amount: parseFloat(shopifyOrder.total_price),
-                date: new Date()
+        try {
+          const FlowExecution = require('../models/FlowExecution');
+          await FlowExecution.findOneAndUpdate(
+            {
+              flow: flowId,
+              customer: customer._id,
+              status: { $in: ['active', 'waiting', 'completed'] }
+            },
+            {
+              $push: {
+                attributedOrders: {
+                  orderId: order._id,
+                  amount: parseFloat(shopifyOrder.total_price),
+                  date: new Date()
+                }
               }
             }
-          }
-        );
-        
-        const Flow = require('../models/Flow');
-        await Flow.findByIdAndUpdate(flowId, {
-          $inc: {
-            'metrics.totalRevenue': parseFloat(shopifyOrder.total_price),
-            'metrics.totalOrders': 1
-          }
-        });
-        
-        console.log(`✅ Flow revenue tracked successfully!`);
+          );
+          
+          const Flow = require('../models/Flow');
+          await Flow.findByIdAndUpdate(flowId, {
+            $inc: {
+              'metrics.totalRevenue': parseFloat(shopifyOrder.total_price),
+              'metrics.totalOrders': 1
+            }
+          });
+          
+          console.log(`✅ Flow revenue tracked successfully!`);
+        } catch (err) {
+          console.log('Flow models not available:', err.message);
+        }
       }
       
-      // 🆕 ==================== FLOW TRIGGERS ====================
-      
-      // TRIGGER: order_placed
+      // FLOW TRIGGER: order_placed
       console.log('🎯 Triggering ORDER_PLACED flow...');
       
-      await flowService.processTrigger('order_placed', {
-        customerId: customer._id,
-        orderId: order._id,
-        orderNumber: order.orderNumber,
-        orderValue: order.totalPrice,
-        currency: order.currency,
-        firstOrder: previousOrdersCount === 0,
-        ordersCount: previousOrdersCount + 1,
-        products: order.lineItems,
-        discountCodes: order.discountCodes,
-        email: customer.email,
-        customerName: `${customer.firstName} ${customer.lastName}`.trim()
-      }).catch(err => {
-        console.error('❌ Flow trigger error:', err.message);
-      });
+      try {
+        const flowService = require('../services/flowService');
+        await flowService.processTrigger('order_placed', {
+          customerId: customer._id,
+          orderId: order._id,
+          orderNumber: order.orderNumber,
+          orderValue: order.totalPrice,
+          currency: order.currency,
+          firstOrder: previousOrdersCount === 0,
+          ordersCount: previousOrdersCount + 1,
+          products: order.lineItems,
+          discountCodes: order.discountCodes,
+          email: customer.email,
+          customerName: `${customer.firstName} ${customer.lastName}`.trim()
+        });
+      } catch (err) {
+        console.log('Flow service not available:', err.message);
+      }
       
       console.log(`====================================================\n`);
       
@@ -386,68 +389,17 @@ class WebhooksController {
       
       console.log('📥 Webhook: Order Update', shopifyOrder.id);
       
-      const previousOrder = await Order.findOne({ 
-        shopifyId: shopifyOrder.id.toString() 
-      });
-      
-      const updatedOrder = await Order.findOneAndUpdate(
+      await Order.findOneAndUpdate(
         { shopifyId: shopifyOrder.id.toString() },
         {
           financialStatus: shopifyOrder.financial_status,
           fulfillmentStatus: shopifyOrder.fulfillment_status,
           totalPrice: parseFloat(shopifyOrder.total_price),
           shopifyData: shopifyOrder
-        },
-        { new: true }
+        }
       );
       
       console.log('✅ Orden actualizada');
-      
-      // 🆕 ==================== FLOW TRIGGERS PARA CAMBIOS DE ESTADO ====================
-      
-      // Si cambió el fulfillment status
-      if (previousOrder && previousOrder.fulfillmentStatus !== updatedOrder.fulfillmentStatus) {
-        
-        // TRIGGER: order_fulfilled
-        if (updatedOrder.fulfillmentStatus === 'fulfilled') {
-          console.log('🎯 Triggering ORDER_FULFILLED flow...');
-          
-          const customer = await Customer.findById(updatedOrder.customer);
-          
-          await flowService.processTrigger('order_fulfilled', {
-            customerId: customer._id,
-            orderId: updatedOrder._id,
-            orderNumber: updatedOrder.orderNumber,
-            email: customer.email,
-            fulfillmentStatus: updatedOrder.fulfillmentStatus
-          }).catch(err => {
-            console.error('❌ Flow trigger error:', err.message);
-          });
-        }
-      }
-      
-      // Si cambió el financial status
-      if (previousOrder && previousOrder.financialStatus !== updatedOrder.financialStatus) {
-        
-        // TRIGGER: order_refunded
-        if (updatedOrder.financialStatus === 'refunded' || 
-            updatedOrder.financialStatus === 'partially_refunded') {
-          console.log('🎯 Triggering ORDER_REFUNDED flow...');
-          
-          const customer = await Customer.findById(updatedOrder.customer);
-          
-          await flowService.processTrigger('order_refunded', {
-            customerId: customer._id,
-            orderId: updatedOrder._id,
-            orderNumber: updatedOrder.orderNumber,
-            email: customer.email,
-            financialStatus: updatedOrder.financialStatus,
-            refundAmount: shopifyOrder.total_refunded_set?.shop_money?.amount || 0
-          }).catch(err => {
-            console.error('❌ Flow trigger error:', err.message);
-          });
-        }
-      }
       
       res.status(200).json({ success: true });
       
@@ -457,79 +409,216 @@ class WebhooksController {
     }
   }
   
-  // 🆕 ==================== NUEVOS WEBHOOKS PARA FLOWS ====================
+  // 🆕 ==================== NUEVOS MÉTODOS PARA FLOWS ====================
   
-  /**
-   * Webhook para carritos actualizados (necesitas configurarlo en Shopify)
-   */
-  async cartUpdate(req, res) {
+  async orderFulfilled(req, res) {
     try {
-      const cartData = req.body;
+      const order = req.body;
+      console.log('📦 Webhook: Order Fulfilled', order.id);
       
-      console.log('🛒 Webhook: Cart Update', cartData.id);
+      const customer = await Customer.findOne({ 
+        shopifyId: order.customer?.id?.toString() 
+      });
       
-      // Actualizar información del carrito en el cliente
-      if (cartData.customer) {
+      if (customer) {
+        try {
+          const flowService = require('../services/flowService');
+          await flowService.processTrigger('order_fulfilled', {
+            customerId: customer._id,
+            orderId: order.id,
+            orderNumber: order.order_number,
+            trackingNumber: order.fulfillments?.[0]?.tracking_number,
+            trackingUrl: order.fulfillments?.[0]?.tracking_url,
+            email: customer.email
+          });
+        } catch (err) {
+          console.log('Flow service not available:', err.message);
+        }
+      }
+      
+      res.status(200).json({ success: true });
+    } catch (error) {
+      console.error('❌ Error en orderFulfilled:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async orderCancelled(req, res) {
+    try {
+      const order = req.body;
+      console.log('❌ Webhook: Order Cancelled', order.id);
+      
+      const customer = await Customer.findOne({ 
+        shopifyId: order.customer?.id?.toString() 
+      });
+      
+      if (customer) {
+        try {
+          const flowService = require('../services/flowService');
+          await flowService.processTrigger('order_cancelled', {
+            customerId: customer._id,
+            orderId: order.id,
+            orderNumber: order.order_number,
+            cancelReason: order.cancel_reason,
+            refundAmount: order.total_price,
+            email: customer.email
+          });
+        } catch (err) {
+          console.log('Flow service not available:', err.message);
+        }
+      }
+      
+      res.status(200).json({ success: true });
+    } catch (error) {
+      console.error('❌ Error en orderCancelled:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async orderPaid(req, res) {
+    try {
+      const order = req.body;
+      console.log('💰 Webhook: Order Paid', order.id);
+      
+      res.status(200).json({ success: true });
+    } catch (error) {
+      console.error('❌ Error en orderPaid:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async checkoutCreate(req, res) {
+    try {
+      const checkout = req.body;
+      console.log('🛒 Webhook: Checkout Created', checkout.id);
+      
+      if (checkout.customer) {
         await Customer.findOneAndUpdate(
-          { shopifyId: cartData.customer.id.toString() },
+          { shopifyId: checkout.customer.id.toString() },
           {
             $set: {
               lastCartActivity: new Date(),
-              cartItems: cartData.line_items?.map(item => ({
-                productId: item.product_id,
-                variantId: item.variant_id,
+              abandonedCheckoutId: checkout.id,
+              cartValue: parseFloat(checkout.total_price || 0),
+              cartItems: checkout.line_items?.map(item => ({
                 title: item.title,
                 quantity: item.quantity,
                 price: item.price
-              })) || [],
-              cartValue: parseFloat(cartData.total_price) || 0,
-              cartToken: cartData.token
+              })) || []
             }
           }
         );
       }
       
       res.status(200).json({ success: true });
-      
     } catch (error) {
-      console.error('❌ Error en cartUpdate:', error);
+      console.error('❌ Error en checkoutCreate:', error);
       res.status(500).json({ error: error.message });
     }
   }
-  
-  /**
-   * Webhook para productos back in stock
-   */
-  async productUpdate(req, res) {
+
+  async checkoutUpdate(req, res) {
     try {
-      const product = req.body;
+      const checkout = req.body;
+      console.log('🛒 Webhook: Checkout Updated', checkout.id);
       
-      console.log('📦 Webhook: Product Update', product.id);
+      if (!checkout.customer) {
+        return res.status(200).json({ success: true });
+      }
       
-      // Verificar si volvió a estar en stock
-      const wasOutOfStock = product.variants?.some(v => 
-        v.inventory_quantity === 0 && v.old_inventory_quantity > 0
-      );
-      
-      if (wasOutOfStock) {
-        console.log('🎯 Product back in stock detected');
-        
-        // Buscar clientes que esperan este producto
-        // (necesitarías trackear esto de alguna forma)
-        
-        await flowService.processTrigger('product_back_in_stock', {
-          productId: product.id,
-          productTitle: product.title,
-          variants: product.variants
-        }).catch(err => {
-          console.error('❌ Flow trigger error:', err.message);
-        });
+      if (checkout.completed_at) {
+        await Customer.findOneAndUpdate(
+          { shopifyId: checkout.customer.id.toString() },
+          {
+            $unset: { 
+              abandonedCheckoutId: 1,
+              cartItems: 1,
+              cartValue: 1
+            }
+          }
+        );
+      } else {
+        await Customer.findOneAndUpdate(
+          { shopifyId: checkout.customer.id.toString() },
+          {
+            $set: {
+              lastCartActivity: new Date(),
+              cartValue: parseFloat(checkout.total_price || 0)
+            }
+          }
+        );
       }
       
       res.status(200).json({ success: true });
+    } catch (error) {
+      console.error('❌ Error en checkoutUpdate:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async productUpdate(req, res) {
+    try {
+      const product = req.body;
+      console.log('📦 Webhook: Product Update', product.id);
       
+      const variants = product.variants || [];
+      const nowInStock = variants.filter(v => 
+        v.inventory_quantity > 0 && 
+        v.old_inventory_quantity === 0
+      );
+      
+      if (nowInStock.length > 0) {
+        try {
+          const flowService = require('../services/flowService');
+          await flowService.processTrigger('product_back_in_stock', {
+            productId: product.id,
+            productTitle: product.title,
+            productHandle: product.handle,
+            variants: nowInStock
+          });
+        } catch (err) {
+          console.log('Flow service not available:', err.message);
+        }
+      }
+      
+      res.status(200).json({ success: true });
     } catch (error) {
       console.error('❌ Error en productUpdate:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async refundCreate(req, res) {
+    try {
+      const refund = req.body;
+      console.log('💸 Webhook: Refund Created', refund.id);
+      
+      const order = await Order.findOne({ 
+        shopifyId: refund.order_id?.toString() 
+      });
+      
+      if (order) {
+        const customer = await Customer.findById(order.customer);
+        
+        if (customer) {
+          try {
+            const flowService = require('../services/flowService');
+            await flowService.processTrigger('order_refunded', {
+              customerId: customer._id,
+              orderId: order._id,
+              refundAmount: parseFloat(refund.transactions?.[0]?.amount || 0),
+              refundReason: refund.note,
+              email: customer.email
+            });
+          } catch (err) {
+            console.log('Flow service not available:', err.message);
+          }
+        }
+      }
+      
+      res.status(200).json({ success: true });
+    } catch (error) {
+      console.error('❌ Error en refundCreate:', error);
       res.status(500).json({ error: error.message });
     }
   }
