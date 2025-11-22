@@ -1,21 +1,23 @@
-// backend/src/routes/flows.js
+// backend/src/routes/flows.js (CORREGIDO)
 const express = require('express');
 const router = express.Router();
 const flowsController = require('../controllers/flowsController');
-const authMiddleware = require('../middleware/auth');
+const { auth } = require('../middleware/auth'); // ✅ Destructuring
 
 // Aplicar autenticación a todas las rutas
-router.use(authMiddleware);
+router.use(auth); // ✅ Ahora sí es una función
 
-// ==================== FLOWS CRUD ====================
-router.get('/', flowsController.getAll);
+// Templates ANTES que las rutas con :id para evitar conflictos
 router.get('/templates', flowsController.getTemplates);
+router.post('/templates/:templateId', flowsController.createFromTemplate);
+
+// CRUD de flows
+router.get('/', flowsController.getAll);
 router.get('/:id', flowsController.getOne);
 router.get('/:id/stats', flowsController.getStats);
 router.get('/:id/executions', flowsController.getExecutions);
 
 router.post('/', flowsController.create);
-router.post('/templates/:templateId', flowsController.createFromTemplate);
 router.post('/:id/test', flowsController.testFlow);
 router.post('/:id/pause', flowsController.pauseFlow);
 router.post('/:id/resume', flowsController.resumeFlow);
