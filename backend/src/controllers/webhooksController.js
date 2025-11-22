@@ -1,64 +1,95 @@
-// backend/src/controllers/webhooksController.js (ACTUALIZADO CON REVENUE - FIX CUSTOMER MATCHING)
+// backend/src/controllers/webhooksController.js (COMPLETO CON FLOWS & TRIGGERS)
 const Customer = require('../models/Customer');
 const Order = require('../models/Order');
 const EmailEvent = require('../models/EmailEvent');
 const Campaign = require('../models/Campaign');
 const AttributionService = require('../middleware/attributionTracking');
+const flowService = require('../services/flowService'); // 🆕 AGREGADO
 
 class WebhooksController {
   
   // ==================== CUSTOMERS ====================
   
-async customerCreate(req, res) {
-  try {
-    const shopifyCustomer = req.body;
-    
-    console.log('📥 Webhook: Customer Create', shopifyCustomer.id);
-    
-    // ✅ CAMBIAR A findOneAndUpdate con upsert
-    const customer = await Customer.findOneAndUpdate(
-      { shopifyId: shopifyCustomer.id.toString() }, // Buscar por shopifyId
-      {
-        $set: {
-          email: shopifyCustomer.email,
-          firstName: shopifyCustomer.first_name,
-          lastName: shopifyCustomer.last_name,
-          phone: shopifyCustomer.phone,
-          ordersCount: shopifyCustomer.orders_count || 0,
-          totalSpent: parseFloat(shopifyCustomer.total_spent) || 0,
-          acceptsMarketing: shopifyCustomer.accepts_marketing || false,
-          tags: shopifyCustomer.tags?.split(', ') || [],
-          address: {
-            city: shopifyCustomer.default_address?.city,
-            province: shopifyCustomer.default_address?.province,
-            country: shopifyCustomer.default_address?.country,
-            zip: shopifyCustomer.default_address?.zip
-          },
-          shopifyData: shopifyCustomer
+  async customerCreate(req, res) {
+    try {
+      const shopifyCustomer = req.body;
+      
+      console.log('📥 Webhook: Customer Create', shopifyCustomer.id);
+      
+      // ✅ CAMBIAR A findOneAndUpdate con upsert
+      const customer = await Customer.findOneAndUpdate(
+        { shopifyId: shopifyCustomer.id.toString() }, // Buscar por shopifyId
+        {
+          $set: {
+            email: shopifyCustomer.email,
+            firstName: shopifyCustomer.first_name,
+            lastName: shopifyCustomer.last_name,
+            phone: shopifyCustomer.phone,
+            ordersCount: shopifyCustomer.orders_count || 0,
+            totalSpent: parseFloat(shopifyCustomer.total_spent) || 0,
+            acceptsMarketing: shopifyCustomer.accepts_marketing || false,
+            tags: shopifyCustomer.tags?.split(', ') || [],
+            address: {
+              city: shopifyCustomer.default_address?.city,
+              province: shopifyCustomer.default_address?.province,
+              country: shopifyCustomer.default_address?.country,
+              zip: shopifyCustomer.default_address?.zip
+            },
+            shopifyData: shopifyCustomer
+          }
+        },
+        { 
+          upsert: true,              // Crea si no existe
+          new: true,                 // Retorna el documento nuevo/actualizado
+          setDefaultsOnInsert: true  // Aplica defaults del schema si es nuevo
         }
-      },
-      { 
-        upsert: true,              // Crea si no existe
-        new: true,                 // Retorna el documento nuevo/actualizado
-        setDefaultsOnInsert: true  // Aplica defaults del schema si es nuevo
+      );
+      
+      console.log('✅ Cliente creado/actualizado:', customer.email);
+      
+      // 🆕 ==================== FLOW TRIGGER: CUSTOMER_CREATED ====================
+      // Solo trigger si es un cliente NUEVO (no una actualización)
+      const isNewCustomer = !shopifyCustomer.created_at || 
+        new Date(shopifyCustomer.created_at) > new Date(Date.now() - 60000); // Creado hace menos de 1 minuto
+      
+      if (isNewCustomer) {
+        console.log('🎯 Triggering CUSTOMER_CREATED flow...');
+        
+        await flowService.processTrigger('customer_created', {
+          customerId: customer._id,
+          email: customer.email,
+          firstName: customer.firstName,
+          lastName: customer.lastName,
+          acceptsMarketing: customer.acceptsMarketing,
+          source: 'shopify',
+          tags: customer.tags,
+          address: customer.address
+        }).catch(err => {
+          console.error('❌ Flow trigger error:', err.message);
+          // No fallar el webhook por error en flows
+        });
       }
-    );
-    
-    console.log('✅ Cliente creado/actualizado:', customer.email);
-    
-    res.status(200).json({ success: true });
-    
-  } catch (error) {
-    console.error('❌ Error en customerCreate:', error);
-    res.status(500).json({ error: error.message });
+      
+      res.status(200).json({ success: true });
+      
+    } catch (error) {
+      console.error('❌ Error en customerCreate:', error);
+      res.status(500).json({ error: error.message });
+    }
   }
-}
 
   async customerUpdate(req, res) {
     try {
       const shopifyCustomer = req.body;
       
       console.log('📥 Webhook: Customer Update', shopifyCustomer.id);
+      
+      // Obtener cliente anterior para comparar tags
+      const previousCustomer = await Customer.findOne({ 
+        shopifyId: shopifyCustomer.id.toString() 
+      });
+      
+      const previousTags = previousCustomer?.tags || [];
       
       const customer = await Customer.findOneAndUpdate(
         { shopifyId: shopifyCustomer.id.toString() },
@@ -84,6 +115,29 @@ async customerCreate(req, res) {
       
       console.log('✅ Cliente actualizado:', customer.email);
       
+      // 🆕 ==================== FLOW TRIGGER: CUSTOMER_TAG_ADDED ====================
+      const currentTags = customer.tags || [];
+      const addedTags = currentTags.filter(tag => !previousTags.includes(tag));
+      
+      if (addedTags.length > 0) {
+        console.log(`🏷️  New tags detected: ${addedTags.join(', ')}`);
+        
+        // Trigger flow para cada tag nuevo
+        for (const tag of addedTags) {
+          console.log(`🎯 Triggering CUSTOMER_TAG_ADDED flow for tag: ${tag}`);
+          
+          await flowService.processTrigger('customer_tag_added', {
+            customerId: customer._id,
+            email: customer.email,
+            tag: tag,
+            allTags: currentTags,
+            previousTags: previousTags
+          }).catch(err => {
+            console.error(`❌ Flow trigger error for tag ${tag}:`, err.message);
+          });
+        }
+      }
+      
       res.status(200).json({ success: true });
       
     } catch (error) {
@@ -92,7 +146,7 @@ async customerCreate(req, res) {
     }
   }
 
-  // ==================== ORDERS CON REVENUE TRACKING ====================
+  // ==================== ORDERS CON REVENUE TRACKING Y FLOWS ====================
   
   async orderCreate(req, res) {
     try {
@@ -145,6 +199,9 @@ async customerCreate(req, res) {
         shopifyData: shopifyOrder
       });
       
+      // Obtener conteo anterior de órdenes para detectar primera compra
+      const previousOrdersCount = customer.ordersCount || 0;
+      
       // Actualizar métricas del cliente
       await Customer.findByIdAndUpdate(customer._id, {
         $inc: { ordersCount: 1 },
@@ -156,16 +213,12 @@ async customerCreate(req, res) {
       
       console.log('✅ Orden creada en DB:', order.orderNumber);
       
-      // 🆕 ==================== REVENUE ATTRIBUTION ====================
+      // ==================== REVENUE ATTRIBUTION (tu código existente) ====================
       
-      // 🍪 MÉTODO 1: Buscar attribution cookie (si viene en el request)
-      // NOTA: Los webhooks de Shopify NO incluyen cookies del usuario
-      // Esta parte es para cuando implementes un endpoint de confirmation
       const attribution = AttributionService.getAttribution(req);
       
-      // 🔍 MÉTODO 2: Buscar por UTM params guardados en la orden
-      // Shopify guarda landing_site con UTM parameters
       let campaignId = null;
+      let flowId = null; // 🆕 Para attribution de flows
       let customerId = customer._id;
       let attributionMethod = 'none';
       
@@ -175,7 +228,6 @@ async customerCreate(req, res) {
         attributionMethod = 'cookie';
         console.log(`🍪 Attribution found via cookie: Campaign ${campaignId}`);
       } else if (shopifyOrder.landing_site) {
-        // Extraer campaign_id de UTM params
         const urlParams = new URLSearchParams(shopifyOrder.landing_site);
         const utmCampaign = urlParams.get('utm_campaign');
         
@@ -183,26 +235,27 @@ async customerCreate(req, res) {
           campaignId = utmCampaign.replace('email_', '');
           attributionMethod = 'utm';
           console.log(`🔗 Attribution found via UTM: Campaign ${campaignId}`);
+        } else if (utmCampaign && utmCampaign.startsWith('flow_')) {
+          // 🆕 Attribution para flows
+          flowId = utmCampaign.replace('flow_', '');
+          attributionMethod = 'utm_flow';
+          console.log(`🔗 Attribution found via UTM for Flow: ${flowId}`);
         }
       }
       
-      // 🔍 MÉTODO 3: Buscar último click en los últimos 7 días
-      if (!campaignId) {
+      if (!campaignId && !flowId) {
         const sevenDaysAgo = new Date();
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
         
-        // ✅ FIX: Buscar por AMBOS tipos (String y ObjectId) para compatibilidad
         let lastClickEvent = await EmailEvent.findOne({
           $or: [
-            { customer: customer._id },              // ObjectId
-            { customer: customer._id.toString() }    // String
+            { customer: customer._id },
+            { customer: customer._id.toString() }
           ],
           eventType: 'clicked',
           eventDate: { $gte: sevenDaysAgo }
         }).sort({ eventDate: -1 });
         
-        // 🆕 MÉTODO 3B: Si no encontramos por customer ID, buscar por EMAIL
-        // Esto maneja el caso de customers duplicados con mismo email
         if (!lastClickEvent && customer.email) {
           console.log(`🔍 No click found by customer ID, trying by email: ${customer.email}`);
           
@@ -221,24 +274,16 @@ async customerCreate(req, res) {
           campaignId = lastClickEvent.campaign;
           attributionMethod = 'last_click';
           console.log(`🔙 Attribution found via last click: Campaign ${campaignId}`);
-          console.log(`   Click event customer ID: ${lastClickEvent.customer} (${typeof lastClickEvent.customer})`);
-          console.log(`   Current customer ID: ${customer._id} (ObjectId)`);
-          console.log(`   Match method: ${lastClickEvent.email === customer.email ? 'email' : 'customer_id'}`);
-        } else {
-          console.log(`🔍 No click events found for customer ${customer._id}`);
-          console.log(`   Checked both ObjectId and String formats`);
-          console.log(`   Also checked by email: ${customer.email}`);
         }
       }
       
-      // Si encontramos atribución, registrar revenue event
+      // Si encontramos atribución de campaña, registrar revenue
       if (campaignId) {
         console.log(`\n💰 ATTRIBUTING REVENUE TO CAMPAIGN`);
         console.log(`   Method: ${attributionMethod}`);
         console.log(`   Campaign: ${campaignId}`);
         console.log(`   Revenue: $${shopifyOrder.total_price}`);
         
-        // Registrar evento de purchase
         await EmailEvent.create({
           campaign: campaignId,
           customer: customerId,
@@ -264,16 +309,68 @@ async customerCreate(req, res) {
           }
         });
         
-        // Actualizar stats de campaña
         await Campaign.updateStats(campaignId, 'purchased', parseFloat(shopifyOrder.total_price));
         
         console.log(`✅ Revenue tracked successfully!`);
-        console.log(`====================================================\n`);
-      } else {
-        console.log(`ℹ️  No attribution found for this order`);
-        console.log(`   Tried: cookie, UTM params, and last click (7 days)`);
-        console.log(`====================================================\n`);
       }
+      
+      // 🆕 Si encontramos atribución de flow, actualizar FlowExecution
+      if (flowId) {
+        console.log(`\n💰 ATTRIBUTING REVENUE TO FLOW`);
+        console.log(`   Flow: ${flowId}`);
+        console.log(`   Revenue: $${shopifyOrder.total_price}`);
+        
+        const FlowExecution = require('../models/FlowExecution');
+        await FlowExecution.findOneAndUpdate(
+          {
+            flow: flowId,
+            customer: customer._id,
+            status: { $in: ['active', 'waiting', 'completed'] }
+          },
+          {
+            $push: {
+              attributedOrders: {
+                orderId: order._id,
+                amount: parseFloat(shopifyOrder.total_price),
+                date: new Date()
+              }
+            }
+          }
+        );
+        
+        const Flow = require('../models/Flow');
+        await Flow.findByIdAndUpdate(flowId, {
+          $inc: {
+            'metrics.totalRevenue': parseFloat(shopifyOrder.total_price),
+            'metrics.totalOrders': 1
+          }
+        });
+        
+        console.log(`✅ Flow revenue tracked successfully!`);
+      }
+      
+      // 🆕 ==================== FLOW TRIGGERS ====================
+      
+      // TRIGGER: order_placed
+      console.log('🎯 Triggering ORDER_PLACED flow...');
+      
+      await flowService.processTrigger('order_placed', {
+        customerId: customer._id,
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+        orderValue: order.totalPrice,
+        currency: order.currency,
+        firstOrder: previousOrdersCount === 0,
+        ordersCount: previousOrdersCount + 1,
+        products: order.lineItems,
+        discountCodes: order.discountCodes,
+        email: customer.email,
+        customerName: `${customer.firstName} ${customer.lastName}`.trim()
+      }).catch(err => {
+        console.error('❌ Flow trigger error:', err.message);
+      });
+      
+      console.log(`====================================================\n`);
       
       res.status(200).json({ success: true });
       
@@ -289,22 +386,150 @@ async customerCreate(req, res) {
       
       console.log('📥 Webhook: Order Update', shopifyOrder.id);
       
-      await Order.findOneAndUpdate(
+      const previousOrder = await Order.findOne({ 
+        shopifyId: shopifyOrder.id.toString() 
+      });
+      
+      const updatedOrder = await Order.findOneAndUpdate(
         { shopifyId: shopifyOrder.id.toString() },
         {
           financialStatus: shopifyOrder.financial_status,
           fulfillmentStatus: shopifyOrder.fulfillment_status,
           totalPrice: parseFloat(shopifyOrder.total_price),
           shopifyData: shopifyOrder
-        }
+        },
+        { new: true }
       );
       
       console.log('✅ Orden actualizada');
+      
+      // 🆕 ==================== FLOW TRIGGERS PARA CAMBIOS DE ESTADO ====================
+      
+      // Si cambió el fulfillment status
+      if (previousOrder && previousOrder.fulfillmentStatus !== updatedOrder.fulfillmentStatus) {
+        
+        // TRIGGER: order_fulfilled
+        if (updatedOrder.fulfillmentStatus === 'fulfilled') {
+          console.log('🎯 Triggering ORDER_FULFILLED flow...');
+          
+          const customer = await Customer.findById(updatedOrder.customer);
+          
+          await flowService.processTrigger('order_fulfilled', {
+            customerId: customer._id,
+            orderId: updatedOrder._id,
+            orderNumber: updatedOrder.orderNumber,
+            email: customer.email,
+            fulfillmentStatus: updatedOrder.fulfillmentStatus
+          }).catch(err => {
+            console.error('❌ Flow trigger error:', err.message);
+          });
+        }
+      }
+      
+      // Si cambió el financial status
+      if (previousOrder && previousOrder.financialStatus !== updatedOrder.financialStatus) {
+        
+        // TRIGGER: order_refunded
+        if (updatedOrder.financialStatus === 'refunded' || 
+            updatedOrder.financialStatus === 'partially_refunded') {
+          console.log('🎯 Triggering ORDER_REFUNDED flow...');
+          
+          const customer = await Customer.findById(updatedOrder.customer);
+          
+          await flowService.processTrigger('order_refunded', {
+            customerId: customer._id,
+            orderId: updatedOrder._id,
+            orderNumber: updatedOrder.orderNumber,
+            email: customer.email,
+            financialStatus: updatedOrder.financialStatus,
+            refundAmount: shopifyOrder.total_refunded_set?.shop_money?.amount || 0
+          }).catch(err => {
+            console.error('❌ Flow trigger error:', err.message);
+          });
+        }
+      }
       
       res.status(200).json({ success: true });
       
     } catch (error) {
       console.error('❌ Error en orderUpdate:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+  
+  // 🆕 ==================== NUEVOS WEBHOOKS PARA FLOWS ====================
+  
+  /**
+   * Webhook para carritos actualizados (necesitas configurarlo en Shopify)
+   */
+  async cartUpdate(req, res) {
+    try {
+      const cartData = req.body;
+      
+      console.log('🛒 Webhook: Cart Update', cartData.id);
+      
+      // Actualizar información del carrito en el cliente
+      if (cartData.customer) {
+        await Customer.findOneAndUpdate(
+          { shopifyId: cartData.customer.id.toString() },
+          {
+            $set: {
+              lastCartActivity: new Date(),
+              cartItems: cartData.line_items?.map(item => ({
+                productId: item.product_id,
+                variantId: item.variant_id,
+                title: item.title,
+                quantity: item.quantity,
+                price: item.price
+              })) || [],
+              cartValue: parseFloat(cartData.total_price) || 0,
+              cartToken: cartData.token
+            }
+          }
+        );
+      }
+      
+      res.status(200).json({ success: true });
+      
+    } catch (error) {
+      console.error('❌ Error en cartUpdate:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+  
+  /**
+   * Webhook para productos back in stock
+   */
+  async productUpdate(req, res) {
+    try {
+      const product = req.body;
+      
+      console.log('📦 Webhook: Product Update', product.id);
+      
+      // Verificar si volvió a estar en stock
+      const wasOutOfStock = product.variants?.some(v => 
+        v.inventory_quantity === 0 && v.old_inventory_quantity > 0
+      );
+      
+      if (wasOutOfStock) {
+        console.log('🎯 Product back in stock detected');
+        
+        // Buscar clientes que esperan este producto
+        // (necesitarías trackear esto de alguna forma)
+        
+        await flowService.processTrigger('product_back_in_stock', {
+          productId: product.id,
+          productTitle: product.title,
+          variants: product.variants
+        }).catch(err => {
+          console.error('❌ Flow trigger error:', err.message);
+        });
+      }
+      
+      res.status(200).json({ success: true });
+      
+    } catch (error) {
+      console.error('❌ Error en productUpdate:', error);
       res.status(500).json({ error: error.message });
     }
   }

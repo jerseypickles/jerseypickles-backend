@@ -1,4 +1,4 @@
-// backend/src/services/shopifyService.js
+// backend/src/services/shopifyService.js (ACTUALIZADO CON FLOWS)
 const axios = require('axios');
 
 class ShopifyService {
@@ -171,7 +171,7 @@ class ShopifyService {
     }
   }
 
-  // ✅ Crear Price Rule para descuentos (con mejor logging)
+  // ✅ Crear Price Rule para descuentos
   async createPriceRule(data) {
     try {
       console.log(`💰 Creando price rule: ${data.title}`);
@@ -192,7 +192,6 @@ class ShopifyService {
       console.error('   Status:', error.response?.status);
       console.error('   Data:', JSON.stringify(error.response?.data, null, 2));
       
-      // Verificar si es error de permisos
       if (error.response?.status === 403) {
         console.error('\n⚠️  ERROR DE PERMISOS:');
         console.error('   El Access Token necesita: write_price_rules');
@@ -203,7 +202,7 @@ class ShopifyService {
     }
   }
 
-  // ✅ Crear Discount Code (con mejor logging)
+  // ✅ Crear Discount Code
   async createDiscountCode(priceRuleId, code) {
     try {
       console.log(`🎟️  Creando discount code: ${code}`);
@@ -227,7 +226,6 @@ class ShopifyService {
       console.error('   Status:', error.response?.status);
       console.error('   Data:', JSON.stringify(error.response?.data, null, 2));
       
-      // Verificar si el código ya existe
       if (error.response?.data?.errors?.code) {
         console.error('   El código ya existe en Shopify');
       }
@@ -236,8 +234,10 @@ class ShopifyService {
     }
   }
 
+  // 🆕 ACTUALIZADO: Crear webhooks incluyendo los nuevos para flows
   async createWebhooks() {
     const webhooks = [
+      // Webhooks existentes
       {
         topic: 'customers/create',
         address: `${process.env.APP_URL}/api/webhooks/customers/create`,
@@ -256,6 +256,43 @@ class ShopifyService {
       {
         topic: 'orders/updated',
         address: `${process.env.APP_URL}/api/webhooks/orders/update`,
+        format: 'json'
+      },
+      
+      // 🆕 NUEVOS WEBHOOKS PARA FLOWS
+      {
+        topic: 'orders/fulfilled',
+        address: `${process.env.APP_URL}/api/webhooks/orders/fulfilled`,
+        format: 'json'
+      },
+      {
+        topic: 'orders/cancelled',
+        address: `${process.env.APP_URL}/api/webhooks/orders/cancelled`,
+        format: 'json'
+      },
+      {
+        topic: 'orders/paid',
+        address: `${process.env.APP_URL}/api/webhooks/orders/paid`,
+        format: 'json'
+      },
+      {
+        topic: 'checkouts/create',
+        address: `${process.env.APP_URL}/api/webhooks/checkouts/create`,
+        format: 'json'
+      },
+      {
+        topic: 'checkouts/update',
+        address: `${process.env.APP_URL}/api/webhooks/checkouts/update`,
+        format: 'json'
+      },
+      {
+        topic: 'products/update',
+        address: `${process.env.APP_URL}/api/webhooks/products/update`,
+        format: 'json'
+      },
+      {
+        topic: 'refunds/create',
+        address: `${process.env.APP_URL}/api/webhooks/refunds/create`,
         format: 'json'
       }
     ];
@@ -280,12 +317,23 @@ class ShopifyService {
         await this.delay(500);
         
       } catch (error) {
-        results.push({
-          success: false,
-          topic: webhook.topic,
-          error: error.response?.data || error.message
-        });
-        console.error(`❌ Error creando webhook ${webhook.topic}:`, error.response?.data);
+        // Si ya existe (422), no es error
+        if (error.response?.status === 422 && 
+            error.response?.data?.errors?.address?.[0]?.includes('for this topic has already been taken')) {
+          console.log(`⏭️  Webhook ya existe: ${webhook.topic}`);
+          results.push({
+            success: true,
+            topic: webhook.topic,
+            exists: true
+          });
+        } else {
+          results.push({
+            success: false,
+            topic: webhook.topic,
+            error: error.response?.data || error.message
+          });
+          console.error(`❌ Error creando webhook ${webhook.topic}:`, error.response?.data);
+        }
       }
     }
     
@@ -314,6 +362,64 @@ class ShopifyService {
       console.log(`✅ Webhook eliminado: ${webhookId}`);
     } catch (error) {
       console.error('Error eliminando webhook:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  // 🆕 NUEVO: Agregar tag a cliente
+  async addCustomerTag(customerId, tag) {
+    try {
+      const customer = await this.getCustomerById(customerId);
+      
+      const currentTags = customer.tags ? customer.tags.split(', ') : [];
+      if (!currentTags.includes(tag)) {
+        currentTags.push(tag);
+      }
+      
+      const response = await axios.put(
+        `${this.baseUrl}/customers/${customerId}.json`,
+        {
+          customer: {
+            id: customerId,
+            tags: currentTags.join(', ')
+          }
+        },
+        { headers: this.getHeaders() }
+      );
+      
+      console.log(`✅ Tag "${tag}" agregado al cliente ${customerId}`);
+      return response.data.customer;
+      
+    } catch (error) {
+      console.error(`Error agregando tag:`, error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  // 🆕 NUEVO: Remover tag de cliente
+  async removeCustomerTag(customerId, tag) {
+    try {
+      const customer = await this.getCustomerById(customerId);
+      
+      const currentTags = customer.tags ? customer.tags.split(', ') : [];
+      const newTags = currentTags.filter(t => t !== tag);
+      
+      const response = await axios.put(
+        `${this.baseUrl}/customers/${customerId}.json`,
+        {
+          customer: {
+            id: customerId,
+            tags: newTags.join(', ')
+          }
+        },
+        { headers: this.getHeaders() }
+      );
+      
+      console.log(`✅ Tag "${tag}" removido del cliente ${customerId}`);
+      return response.data.customer;
+      
+    } catch (error) {
+      console.error(`Error removiendo tag:`, error.response?.data || error.message);
       throw error;
     }
   }
