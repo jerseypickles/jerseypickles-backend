@@ -10,43 +10,58 @@ class EmailService {
 
   // ==================== ENVÍO SIMPLE ====================
   
-  async sendEmail({ to, subject, html, from = null, replyTo = null, campaignId = null, customerId = null }) {
-    try {
-      // Preparar tags si existen campaignId y customerId
-      const tags = [];
-      if (campaignId) tags.push({ name: 'campaign_id', value: String(campaignId) });
-      if (customerId) tags.push({ name: 'customer_id', value: String(customerId) });
-      
-      // ✅ NO inyectar tracking aquí - ya viene inyectado desde campaignsController
-      // El HTML recibido ya tiene el tracking correcto con el email
-      
-      const data = await resend.emails.send({
-        from: from || this.fromEmail,
-        to: Array.isArray(to) ? to : [to],
-        subject,
-        html,
-        reply_to: replyTo,
-        tags: tags.length > 0 ? tags : undefined
-      });
-      
-      console.log(`✅ Email enviado a ${to}: ${data.id}`);
-      
-      return {
-        success: true,
-        id: data.id,
-        email: to
-      };
-      
-    } catch (error) {
-      console.error('❌ Error enviando email:', error);
-      
-      return {
-        success: false,
-        error: error.message,
-        email: to
-      };
+// backend/src/services/emailService.js (ACTUALIZADO)
+async sendEmail({ 
+  to, 
+  subject, 
+  html, 
+  from = null, 
+  replyTo = null, 
+  campaignId = null, 
+  customerId = null,
+  tags = null  // 🆕 Agregar tags opcionales
+}) {
+  try {
+    // Preparar tags
+    let emailTags = [];
+    
+    // Si se pasan tags directamente, usarlos
+    if (tags && Array.isArray(tags)) {
+      emailTags = tags;
+    } 
+    // Si no, construir desde campaignId/customerId (para campaigns)
+    else {
+      if (campaignId) emailTags.push({ name: 'campaign_id', value: String(campaignId) });
+      if (customerId) emailTags.push({ name: 'customer_id', value: String(customerId) });
     }
+    
+    const data = await resend.emails.send({
+      from: from || this.fromEmail,
+      to: Array.isArray(to) ? to : [to],
+      subject,
+      html,
+      reply_to: replyTo,
+      tags: emailTags.length > 0 ? emailTags : undefined
+    });
+    
+    console.log(`✅ Email enviado a ${to}: ${data.id}`);
+    
+    return {
+      success: true,
+      id: data.id,
+      email: to
+    };
+    
+  } catch (error) {
+    console.error('❌ Error enviando email:', error);
+    
+    return {
+      success: false,
+      error: error.message,
+      email: to
+    };
   }
+}
 
   // 🆕 ==================== BATCH SENDING (hasta 100 emails) ====================
   

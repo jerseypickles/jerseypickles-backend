@@ -1,4 +1,4 @@
-// backend/src/services/flowService.js (COMPLETO Y ACTUALIZADO)
+// backend/src/services/flowService.js (COMPLETO Y ACTUALIZADO CON TAGS)
 const Flow = require('../models/Flow');
 const FlowExecution = require('../models/FlowExecution');
 const Customer = require('../models/Customer');
@@ -209,11 +209,14 @@ class FlowService {
     
     // IMPORTANTE: Obtener el ID del flow correctamente
     const flowId = execution.flow._id ? execution.flow._id.toString() : execution.flow.toString();
+    const executionId = execution._id.toString();
+    const customerId = customer._id.toString();
     
     console.log(`📧 Sending email to ${customer.email}`);
     console.log(`   Subject: ${subject}`);
     console.log(`   Template: ${templateId || 'custom'}`);
     console.log(`   Flow ID: ${flowId}`);
+    console.log(`   Execution ID: ${executionId}`);
     
     let html;
     
@@ -259,27 +262,40 @@ class FlowService {
     html = emailService.personalize(html, customer);
     const personalizedSubject = emailService.personalize(subject, customer);
     
-    // Agregar tracking - USAR SOLO EL ID
+    // Agregar tracking
     html = emailService.injectTracking(
       html,
-      flowId, // Solo el ID, no el objeto
-      customer._id.toString(),
+      flowId,
+      customerId,
       customer.email
     );
+    
+    // ✅ Preparar tags para Resend
+    const emailTags = [
+      { name: 'flow_id', value: flowId },
+      { name: 'execution_id', value: executionId },
+      { name: 'customer_id', value: customerId }
+    ];
+    
+    console.log(`📋 Email tags:`, emailTags);
     
     // Enviar con Resend
     const result = await emailService.sendEmail({
       to: customer.email,
       subject: personalizedSubject,
       html,
-      tags: [
-        { name: 'flow_id', value: flowId }, // Solo el ID
-        { name: 'execution_id', value: execution._id.toString() },
-        { name: 'customer_id', value: customer._id.toString() }
-      ]
+      tags: emailTags  // ✅ Pasar tags directamente
     });
     
-    console.log(`✅ Email sent successfully: ${result.id}`);
+    // ✅ Mejor logging del resultado
+    if (result.success) {
+      console.log(`✅ Email sent successfully!`);
+      console.log(`   Resend ID: ${result.id || 'N/A'}`);
+      console.log(`   To: ${result.email}`);
+    } else {
+      console.error(`❌ Email failed to send: ${result.error}`);
+      throw new Error(`Failed to send email: ${result.error}`);
+    }
     
     // Actualizar métricas del flow
     await Flow.findByIdAndUpdate(flowId, {
@@ -306,13 +322,15 @@ class FlowService {
     
     // Intentar agregar a cola
     try {
-      const { addFlowJob } = require('../jobs/flowQueue');
-      if (addFlowJob) {
-        await addFlowJob(
+      const flowQueue = require('../jobs/flowQueue');
+      
+      if (flowQueue.flowQueue && typeof flowQueue.flowQueue.add === 'function') {
+        await flowQueue.flowQueue.add(
+          'resume-flow',
           { executionId: execution._id.toString() },
           { delay: delayMinutes * 60 * 1000 }
         );
-        console.log('✅ Flow job scheduled');
+        console.log('✅ Flow job scheduled in Redis queue');
       } else {
         console.log('⚠️  Flow queue not available, using setTimeout fallback');
         this.scheduleWithTimeout(execution._id.toString(), delayMinutes * 60 * 1000);
