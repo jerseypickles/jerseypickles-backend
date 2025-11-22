@@ -1,4 +1,4 @@
-// backend/server.js (ACTUALIZADO CON FLOWS & TRIGGERS)
+// backend/server.js (ACTUALIZADO CON FLOWS & MANEJO DE ERRORES)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -63,7 +63,7 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
-// ✅ express.raw() SOLO para webhooks de Shopify (necesitan Buffer para HMAC)
+// express.raw() SOLO para webhooks de Shopify (necesitan Buffer para HMAC)
 app.use('/api/webhooks/customers', express.raw({ 
   type: 'application/json',
   limit: '10mb'
@@ -74,8 +74,8 @@ app.use('/api/webhooks/orders', express.raw({
   limit: '10mb'
 }));
 
-// 🆕 NUEVOS WEBHOOKS PARA FLOWS
-app.use('/api/webhooks/carts', express.raw({ 
+// NUEVOS WEBHOOKS PARA FLOWS
+app.use('/api/webhooks/checkouts', express.raw({ 
   type: 'application/json',
   limit: '10mb'
 }));
@@ -85,7 +85,12 @@ app.use('/api/webhooks/products', express.raw({
   limit: '10mb'
 }));
 
-// express.json() para todas las demás rutas (incluyendo /api/webhooks/resend)
+app.use('/api/webhooks/refunds', express.raw({ 
+  type: 'application/json',
+  limit: '10mb'
+}));
+
+// express.json() para todas las demás rutas
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
@@ -114,9 +119,9 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({ 
     message: '🥒 Jersey Pickles Email Marketing API',
-    version: '2.0.0', // 🆕 Actualizado a 2.0 con Flows
+    version: '2.0.0',
     status: 'running',
-    features: { // 🆕 Features agregadas
+    features: {
       campaigns: '✅ Email Campaigns',
       flows: '✅ Automation Flows',
       segmentation: '✅ Dynamic Segments',
@@ -130,7 +135,7 @@ app.get('/', (req, res) => {
       orders: '/api/orders',
       segments: '/api/segments',
       campaigns: '/api/campaigns',
-      flows: '/api/flows', // 🆕 NUEVO ENDPOINT
+      flows: '/api/flows',
       lists: '/api/lists',
       webhooks: '/api/webhooks',
       tracking: '/api/track',
@@ -149,7 +154,21 @@ app.use('/api/customers', require('./src/routes/customers'));
 app.use('/api/orders', require('./src/routes/orders'));
 app.use('/api/segments', require('./src/routes/segments'));
 app.use('/api/campaigns', require('./src/routes/campaigns'));
-app.use('/api/flows', require('./src/routes/flows')); // 🆕 FLOWS ROUTES
+
+// FLOWS ROUTES - con manejo de errores
+try {
+  const flowsRoutes = require('./src/routes/flows');
+  app.use('/api/flows', flowsRoutes);
+} catch (error) {
+  console.log('⚠️  Flows routes not available:', error.message);
+  app.use('/api/flows', (req, res) => {
+    res.status(503).json({ 
+      error: 'Flows feature is currently unavailable',
+      message: 'Please check system configuration'
+    });
+  });
+}
+
 app.use('/api/lists', require('./src/routes/lists'));
 app.use('/api/track', require('./src/routes/tracking'));
 app.use('/api/analytics', require('./src/routes/analytics'));
@@ -170,6 +189,9 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 
+// Variable para tracking de features disponibles
+let flowEngineAvailable = false;
+
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('╔════════════════════════════════════════════════╗');
   console.log('║   🥒 Jersey Pickles Email Marketing v2.0      ║');
@@ -180,13 +202,22 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🍪 Cookie Parser: Enabled`);
   console.log(`🔒 Webhook Validation: ${process.env.SHOPIFY_WEBHOOK_SECRET ? 'Enabled' : '⚠️  Disabled'}`);
   console.log(`📧 Email Queue: ${process.env.REDIS_URL ? '✅ Redis Connected' : '⚠️  Direct Send Mode'}`);
-  console.log(`🔄 Flow Engine: ✅ Active`); // 🆕
   console.log(`✅ Server ready - Payload limit: 10MB`);
   
-  // 🆕 Inicializar Flow Queue
-  console.log('\n🔄 Inicializando Flow Engine...');
-  require('./src/jobs/flowQueue');
-  console.log('✅ Flow Engine listo para automatizaciones');
+  // 🆕 Inicializar Flow Queue con manejo de errores mejorado
+  setTimeout(() => {
+    console.log('\n🔄 Inicializando Flow Engine...');
+    try {
+      const flowQueue = require('./src/jobs/flowQueue');
+      flowEngineAvailable = true;
+      console.log('✅ Flow Engine listo para automatizaciones');
+    } catch (error) {
+      flowEngineAvailable = false;
+      console.log('⚠️  Flow Engine no disponible:', error.message);
+      console.log('   El sistema continuará funcionando sin automatizaciones');
+      console.log('   Para habilitar flows, instale las dependencias necesarias');
+    }
+  }, 2000); // Delay de 2 segundos para evitar conflictos de inicialización
 });
 
 // ==================== GRACEFUL SHUTDOWN ====================
@@ -197,23 +228,25 @@ const gracefulShutdown = async (signal) => {
   server.close(async () => {
     console.log('✅ HTTP server closed');
     
-    // ✅ CERRAR EMAIL QUEUE
+    // CERRAR EMAIL QUEUE
     try {
       await closeQueue();
       console.log('✅ Email queue closed');
     } catch (err) {
-      console.error('❌ Error closing email queue:', err);
+      console.error('⚠️  Error closing email queue:', err.message);
     }
     
-    // 🆕 CERRAR FLOW QUEUE
-    try {
-      const { flowQueue } = require('./src/jobs/flowQueue');
-      if (flowQueue) {
-        await flowQueue.close();
-        console.log('✅ Flow queue closed');
+    // CERRAR FLOW QUEUE - con mejor manejo de errores
+    if (flowEngineAvailable) {
+      try {
+        const flowQueueModule = require('./src/jobs/flowQueue');
+        if (flowQueueModule && typeof flowQueueModule.close === 'function') {
+          await flowQueueModule.close();
+          console.log('✅ Flow queue closed');
+        }
+      } catch (err) {
+        console.log('⚠️  Flow queue not closed:', err.message);
       }
-    } catch (err) {
-      console.error('❌ Error closing flow queue:', err);
     }
     
     // Cerrar MongoDB
@@ -221,7 +254,7 @@ const gracefulShutdown = async (signal) => {
       await mongoose.connection.close();
       console.log('✅ MongoDB connection closed');
     } catch (err) {
-      console.error('❌ Error closing MongoDB:', err);
+      console.error('⚠️  Error closing MongoDB:', err.message);
     }
     
     console.log('👋 Graceful shutdown completed');
@@ -235,26 +268,28 @@ const gracefulShutdown = async (signal) => {
   }, 10000);
 };
 
-// ✅ SIGNALS para shutdown
+// SIGNALS para shutdown
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// ✅ UNHANDLED REJECTION - NO HACER SHUTDOWN en producción
+// UNHANDLED REJECTION - NO HACER SHUTDOWN en producción
 process.on('unhandledRejection', (err) => {
   console.error('❌ Unhandled Promise Rejection:', err);
   console.error('Stack:', err.stack);
-  
-  // ✅ NO cerrar servidor - solo loggear el error
-  // El servidor debe seguir corriendo a pesar del error
+  // NO cerrar servidor - solo loggear el error
 });
 
-// ✅ UNCAUGHT EXCEPTION - Este sí es crítico
+// UNCAUGHT EXCEPTION - Este sí es crítico
 process.on('uncaughtException', (err) => {
   console.error('❌ Uncaught Exception:', err);
   console.error('Stack:', err.stack);
   
-  // ✅ Este sí debería cerrar el servidor porque es más grave
-  gracefulShutdown('uncaughtException');
+  // Solo cerrar si NO es un error de módulo faltante
+  if (err.code !== 'MODULE_NOT_FOUND') {
+    gracefulShutdown('uncaughtException');
+  } else {
+    console.log('⚠️  Continuando a pesar del módulo faltante...');
+  }
 });
 
 module.exports = app;
