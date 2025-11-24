@@ -1,6 +1,5 @@
 // backend/src/services/segmentationService.js
 const Customer = require('../models/Customer');
-const { Op } = require('mongoose');
 
 class SegmentationService {
   
@@ -9,10 +8,21 @@ class SegmentationService {
     try {
       const query = this.buildQuery(conditions, options);
       
-      const customers = await Customer.find(query)
+      let cursor = Customer.find(query)
         .select(options.select || 'email firstName lastName totalSpent ordersCount acceptsMarketing')
-        .limit(options.limit || 0)
-        .sort(options.sort || { createdAt: -1 });
+        .sort(options.sort || { _id: 1 }); // ✅ Usar _id para paginación consistente
+      
+      // ✅ AGREGADO: Soporte para skip (paginación)
+      if (options.skip) {
+        cursor = cursor.skip(options.skip);
+      }
+      
+      if (options.limit) {
+        cursor = cursor.limit(options.limit);
+      }
+      
+      // ✅ AGREGADO: .lean() para mejor rendimiento de memoria
+      const customers = await cursor.lean();
       
       return customers;
       
@@ -24,11 +34,8 @@ class SegmentationService {
 
   // Construir query de MongoDB desde condiciones
   buildQuery(conditions, options = {}) {
-    // ✅ CAMBIO: acceptsMarketing ahora es opcional
     const query = {};
     
-    // Por defecto, incluir TODOS los clientes (no filtrar por marketing)
-    // Si quieres solo los que aceptan marketing, pasa { onlyMarketing: true }
     if (options.onlyMarketing) {
       query.acceptsMarketing = true;
     }
@@ -42,9 +49,7 @@ class SegmentationService {
       
       let fieldQuery = this.buildFieldQuery(field, operator, value);
       
-      // Si es la primera condición o es AND, agregar directamente
       if (index === 0 || logicalOperator === 'AND') {
-        // Si el campo ya existe, combinar con $and
         if (query[field]) {
           if (!query.$and) {
             query.$and = [];
@@ -54,7 +59,6 @@ class SegmentationService {
           query[field] = fieldQuery;
         }
       } else if (logicalOperator === 'OR') {
-        // Para OR, usar $or
         if (!query.$or) {
           query.$or = [];
         }
@@ -127,7 +131,6 @@ class SegmentationService {
 
   // ==================== SEGMENTOS PREDEFINIDOS ====================
   
-  // Clientes VIP (más de $500 gastados, 3+ órdenes)
   async getVIPCustomers(onlyMarketing = false) {
     const query = {
       totalSpent: { $gte: 500 },
@@ -138,10 +141,9 @@ class SegmentationService {
       query.acceptsMarketing = true;
     }
     
-    return await Customer.find(query).sort({ totalSpent: -1 });
+    return await Customer.find(query).sort({ totalSpent: -1 }).lean();
   }
 
-  // Nuevos suscriptores (menos de 30 días, sin órdenes)
   async getNewSubscribers(onlyMarketing = false) {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -155,10 +157,9 @@ class SegmentationService {
       query.acceptsMarketing = true;
     }
     
-    return await Customer.find(query).sort({ createdAt: -1 });
+    return await Customer.find(query).sort({ createdAt: -1 }).lean();
   }
 
-  // Clientes inactivos (última orden hace más de 90 días)
   async getInactiveCustomers(onlyMarketing = false) {
     const ninetyDaysAgo = new Date();
     ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
@@ -172,10 +173,9 @@ class SegmentationService {
       query.acceptsMarketing = true;
     }
     
-    return await Customer.find(query).sort({ lastOrderDate: 1 });
+    return await Customer.find(query).sort({ lastOrderDate: 1 }).lean();
   }
 
-  // One-time buyers (exactamente 1 orden)
   async getOneTimeBuyers(onlyMarketing = false) {
     const query = {
       ordersCount: 1
@@ -185,10 +185,9 @@ class SegmentationService {
       query.acceptsMarketing = true;
     }
     
-    return await Customer.find(query).sort({ lastOrderDate: -1 });
+    return await Customer.find(query).sort({ lastOrderDate: -1 }).lean();
   }
 
-  // Repeat customers (2+ órdenes)
   async getRepeatCustomers(onlyMarketing = false) {
     const query = {
       ordersCount: { $gte: 2 }
@@ -198,10 +197,9 @@ class SegmentationService {
       query.acceptsMarketing = true;
     }
     
-    return await Customer.find(query).sort({ ordersCount: -1 });
+    return await Customer.find(query).sort({ ordersCount: -1 }).lean();
   }
 
-  // Clientes por ubicación
   async getCustomersByLocation(state = null, country = 'US', onlyMarketing = false) {
     const query = {
       'address.country': country
@@ -215,10 +213,9 @@ class SegmentationService {
       query.acceptsMarketing = true;
     }
     
-    return await Customer.find(query);
+    return await Customer.find(query).lean();
   }
 
-  // High AOV customers (valor promedio de orden alto)
   async getHighAOVCustomers(minAOV = 100, onlyMarketing = false) {
     const query = {
       averageOrderValue: { $gte: minAOV },
@@ -229,7 +226,7 @@ class SegmentationService {
       query.acceptsMarketing = true;
     }
     
-    return await Customer.find(query).sort({ averageOrderValue: -1 });
+    return await Customer.find(query).sort({ averageOrderValue: -1 }).lean();
   }
 }
 

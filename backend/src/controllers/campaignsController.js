@@ -247,7 +247,9 @@ class CampaignsController {
     }
   }
 
-  // Enviar campaña
+  // ============================================================
+  // ENVIAR CAMPAÑA - OPTIMIZADO PARA ALTO VOLUMEN (80K+ emails)
+  // ============================================================
   async send(req, res) {
     try {
       const campaign = await Campaign.findById(req.params.id)
@@ -269,39 +271,6 @@ class CampaignsController {
       console.log(`║  📧 ENVIANDO CAMPAÑA: ${campaign.name}`);
       console.log('╚═══════════════════════════════════════════════╝\n');
       
-      let customers;
-      
-      // Obtener clientes según targetType
-      if (campaign.targetType === 'list') {
-        console.log(`📋 Obteniendo clientes de la lista: ${campaign.list.name}`);
-        
-        const list = await List.findById(campaign.list._id);
-        if (!list || list.members.length === 0) {
-          return res.status(400).json({ error: 'La lista no tiene miembros' });
-        }
-        
-        customers = await Customer.find({
-          _id: { $in: list.members }
-        }).select('email firstName lastName _id');
-        
-      } else {
-        console.log(`🎯 Evaluando segmento: ${campaign.segment.name}`);
-        customers = await segmentationService.evaluateSegment(
-          campaign.segment.conditions,
-          { select: 'email firstName lastName _id' }
-        );
-      }
-      
-      if (customers.length === 0) {
-        return res.status(400).json({ 
-          error: campaign.targetType === 'list' 
-            ? 'La lista no tiene miembros' 
-            : 'El segmento no tiene clientes' 
-        });
-      }
-      
-      console.log(`👥 Destinatarios: ${customers.length} clientes`);
-      
       // Opciones de envío
       const { testMode = false, testEmail = null } = req.body;
       
@@ -309,11 +278,26 @@ class CampaignsController {
       if (testMode && testEmail) {
         console.log(`🧪 MODO TEST: Enviando a ${testEmail}\n`);
         
-        const testCustomer = customers[0] || { 
-          firstName: 'Test', 
-          lastName: 'User',
-          email: testEmail 
-        };
+        let testCustomer;
+        
+        if (campaign.targetType === 'list') {
+          const list = await List.findById(campaign.list._id).select('members');
+          if (list && list.members.length > 0) {
+            testCustomer = await Customer.findById(list.members[0])
+              .select('email firstName lastName _id')
+              .lean();
+          }
+        } else {
+          const customers = await segmentationService.evaluateSegment(
+            campaign.segment.conditions,
+            { select: 'email firstName lastName _id', limit: 1 }
+          );
+          testCustomer = customers[0];
+        }
+        
+        if (!testCustomer) {
+          testCustomer = { firstName: 'Test', lastName: 'User', email: testEmail };
+        }
         
         let html = campaign.htmlContent;
         html = emailService.personalize(html, testCustomer);
@@ -321,7 +305,7 @@ class CampaignsController {
           html, 
           campaign._id.toString(), 
           testCustomer._id ? testCustomer._id.toString() : 'test',
-          testEmail  // ← AGREGAR
+          testEmail
         );
         
         const result = await emailService.sendEmail({
@@ -347,173 +331,200 @@ class CampaignsController {
         }
       }
       
-      // ==================== MODO PRODUCCIÓN CON COLA ====================
-      console.log('🚀 Preparando envío con cola de Redis + Batch Sending...\n');
-      
-      const { emailQueue, addEmailsToQueue, isAvailable } = require('../jobs/emailQueue');
+      // ==================== MODO PRODUCCIÓN ====================
+      const { addEmailsToQueue, isAvailable } = require('../jobs/emailQueue');
       
       if (!isAvailable()) {
-        console.warn('⚠️  Cola no disponible, usando envío directo limitado');
-        
-        const MAX_DIRECT_SEND = 50;
-        if (customers.length > MAX_DIRECT_SEND) {
-          return res.status(400).json({
-            error: `Redis no está disponible. El envío directo está limitado a ${MAX_DIRECT_SEND} emails.`,
-            message: 'Configura Redis (REDIS_URL) para envíos masivos.',
-            customersCount: customers.length,
-            limit: MAX_DIRECT_SEND
-          });
-        }
-        
-        // Fallback: Envío directo sincrónico
-        console.log('⚠️  Enviando directamente (sin cola)...\n');
-        
-        const startTime = Date.now();
-        
-        campaign.status = 'sending';
-        await campaign.save();
-        
-        const emails = customers.map(customer => {
-          let html = campaign.htmlContent;
-          html = emailService.personalize(html, customer);
-          html = emailService.injectTracking(
-            html, 
-            campaign._id.toString(), 
-            customer._id.toString(),
-            customer.email  // ← AGREGAR
-          );
-          
-          return {
-            to: customer.email,
-            subject: campaign.subject,
-            html,
-            from: `${campaign.fromName} <${campaign.fromEmail}>`,
-            replyTo: campaign.replyTo,
-            campaignId: campaign._id.toString(),
-            customerId: customer._id.toString()
-          };
-        });
-        
-        const results = await emailService.sendBulkEmails(emails, {
-          chunkSize: 5,
-          delayBetweenChunks: 1000
-        });
-        
-        // Registrar eventos
-        let sent = 0;
-        let failed = 0;
-        
-        for (const detail of results.details) {
-          try {
-            const customer = customers.find(c => c.email === detail.email);
-            
-            if (detail.status === 'sent' && customer) {
-              await EmailEvent.create({
-                campaign: campaign._id,
-                customer: customer._id,
-                email: customer.email,
-                eventType: 'sent',
-                source: 'custom',
-                resendId: detail.id
-              });
-              sent++;
-            } else {
-              failed++;
-            }
-          } catch (error) {
-            console.error('Error registrando evento:', error.message);
-          }
-        }
-        
-        campaign.status = 'sent';
-        campaign.sentAt = new Date();
-        campaign.stats.sent = sent;
-        campaign.stats.delivered = sent;
-        campaign.stats.totalRecipients = customers.length;
-        campaign.updateRates();
-        await campaign.save();
-        
-        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-        
-        console.log(`✅ Envío directo completado: ${sent} enviados, ${failed} fallidos (${duration}s)\n`);
-        
-        return res.json({
-          success: true,
-          campaign: campaign.toObject(),
-          results: { sent, failed, total: customers.length, duration: `${duration}s` },
-          warning: 'Enviado sin cola. Configura Redis para mejor rendimiento.'
+        return res.status(400).json({
+          error: 'Redis no está disponible. Configura REDIS_URL para envíos masivos.',
+          message: 'La cola de emails requiere Redis para manejar grandes volúmenes.'
         });
       }
       
-      // ==================== ENVÍO CON COLA + BATCH SENDING ====================
-      console.log('📥 Preparando emails para batch sending...\n');
+      console.log('🚀 Iniciando envío optimizado para alto volumen...\n');
       
       const startTime = Date.now();
       
-      // ✅ OPTIMIZADO: Objeto más ligero para Redis
-      const emails = customers.map(customer => {
-        let html = campaign.htmlContent;
-        html = emailService.personalize(html, customer);
-        html = emailService.injectTracking(
-          html, 
-          campaign._id.toString(), 
-          customer._id.toString(),
-          customer.email  // ← AGREGAR
-        );
-        
-        return {
-          to: customer.email,
-          subject: campaign.subject,
-          html,
-          from: `${campaign.fromName} <${campaign.fromEmail}>`,
-          replyTo: campaign.replyTo,
-          campaignId: campaign._id.toString(),
-          customerId: customer._id.toString()
-        };
-      });
+      // ============================================================
+      // PASO 1: Contar total (query ligera, no carga datos)
+      // ============================================================
+      let totalCustomers = 0;
+      let memberIds = [];
       
-      // Agregar a la cola (ahora con batch processing)
-      const queueResult = await addEmailsToQueue(emails, campaign._id.toString());
+      if (campaign.targetType === 'list') {
+        const list = await List.findById(campaign.list._id).select('members');
+        memberIds = list ? list.members : [];
+        totalCustomers = memberIds.length;
+      } else {
+        totalCustomers = await segmentationService.countSegment(campaign.segment.conditions);
+      }
       
-      // Actualizar campaña a "sending"
+      if (totalCustomers === 0) {
+        return res.status(400).json({ 
+          error: campaign.targetType === 'list' 
+            ? 'La lista no tiene miembros' 
+            : 'El segmento no tiene clientes' 
+        });
+      }
+      
+      console.log(`👥 Total destinatarios: ${totalCustomers.toLocaleString()}`);
+      
+      // ============================================================
+      // PASO 2: Actualizar campaña a "sending"
+      // ============================================================
       campaign.status = 'sending';
-      campaign.stats.totalRecipients = customers.length;
+      campaign.stats.totalRecipients = totalCustomers;
+      campaign.stats.sent = 0;
+      campaign.stats.delivered = 0;
+      campaign.stats.failed = 0;
       await campaign.save();
       
-      const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-      
-      console.log('\n╔═══════════════════════════════════════════════╗');
-      console.log('║  ✅ EMAILS AGREGADOS A LA COLA CON BATCH     ║');
-      console.log('╚═══════════════════════════════════════════════╝');
-      console.log(`📊 Total emails: ${queueResult.total}`);
-      console.log(`📦 Total batches: ${queueResult.batches} (100 emails/batch)`);
-      console.log(`⏱️  Tiempo de preparación: ${duration}s`);
-      console.log(`⚡ Velocidad estimada: ~1,000 emails/segundo`);
-      console.log(`⏱️  Tiempo estimado de envío: ~${queueResult.estimatedSeconds} segundos`);
-      console.log(`🔄 Retry: 3 intentos automáticos por batch`);
-      console.log('═══════════════════════════════════════════════\n');
+      // ============================================================
+      // PASO 3: Responder inmediatamente (no bloquear request)
+      // ============================================================
+      const estimatedMinutes = Math.ceil(totalCustomers / 60000);
       
       res.json({
         success: true,
-        campaign: campaign.toObject(),
+        campaign: {
+          _id: campaign._id,
+          name: campaign.name,
+          status: 'sending',
+          stats: campaign.stats
+        },
         queue: {
-          totalEmails: queueResult.total,
-          totalBatches: queueResult.batches,
-          estimatedTime: `${queueResult.estimatedSeconds} segundos`,
-          emailsPerSecond: 1000,
-          message: 'Emails agregados con batch sending. Enviando a ~1,000 emails/segundo.',
+          totalEmails: totalCustomers,
+          processing: true,
+          estimatedTime: estimatedMinutes > 1 ? `${estimatedMinutes} minutos` : 'menos de 1 minuto',
+          message: `Procesando ${totalCustomers.toLocaleString()} emails en background...`,
           checkStatusAt: `/api/campaigns/${campaign._id}/stats`
+        }
+      });
+      
+      // ============================================================
+      // PASO 4: Procesar en background (después de responder)
+      // ============================================================
+      const CUSTOMER_BATCH_SIZE = 500;
+      const campaignId = campaign._id.toString();
+      const htmlTemplate = campaign.htmlContent;
+      const subject = campaign.subject;
+      const fromName = campaign.fromName;
+      const fromEmail = campaign.fromEmail;
+      const replyTo = campaign.replyTo;
+      const segmentConditions = campaign.segment ? campaign.segment.conditions : null;
+      const targetType = campaign.targetType;
+      
+      // Función async que corre en background
+      setImmediate(async () => {
+        let totalQueued = 0;
+        let totalBatches = 0;
+        let skip = 0;
+        
+        try {
+          console.log('📥 Procesamiento background iniciado...\n');
+          
+          while (true) {
+            // ✅ Obtener solo un batch de customers
+            let customerBatch;
+            
+            if (targetType === 'list') {
+              const batchIds = memberIds.slice(skip, skip + CUSTOMER_BATCH_SIZE);
+              
+              if (batchIds.length === 0) break;
+              
+              customerBatch = await Customer.find({ _id: { $in: batchIds } })
+                .select('email firstName lastName _id')
+                .lean();
+                
+            } else {
+              customerBatch = await segmentationService.evaluateSegment(
+                segmentConditions,
+                { 
+                  select: 'email firstName lastName _id',
+                  skip: skip,
+                  limit: CUSTOMER_BATCH_SIZE
+                }
+              );
+            }
+            
+            if (!customerBatch || customerBatch.length === 0) {
+              console.log('✅ No hay más customers para procesar');
+              break;
+            }
+            
+            const batchNum = Math.floor(skip / CUSTOMER_BATCH_SIZE) + 1;
+            console.log(`📦 Batch ${batchNum}: ${customerBatch.length} customers (skip: ${skip})`);
+            
+            // ✅ Preparar emails SOLO para este batch
+            const emails = [];
+            
+            for (const customer of customerBatch) {
+              let html = htmlTemplate;
+              html = emailService.personalize(html, customer);
+              html = emailService.injectTracking(
+                html, 
+                campaignId, 
+                customer._id.toString(),
+                customer.email
+              );
+              
+              emails.push({
+                to: customer.email,
+                subject: subject,
+                html: html,
+                from: `${fromName} <${fromEmail}>`,
+                replyTo: replyTo,
+                campaignId: campaignId,
+                customerId: customer._id.toString()
+              });
+            }
+            
+            // ✅ Agregar batch a la cola de Redis
+            const queueResult = await addEmailsToQueue(emails, campaignId);
+            
+            totalQueued += customerBatch.length;
+            totalBatches += queueResult.batches;
+            skip += CUSTOMER_BATCH_SIZE;
+            
+            // ✅ Liberar memoria
+            customerBatch = null;
+            emails.length = 0;
+            
+            // Pequeña pausa para no saturar MongoDB
+            await new Promise(resolve => setTimeout(resolve, 50));
+          }
+          
+          const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+          
+          console.log('\n╔═══════════════════════════════════════════════╗');
+          console.log('║  ✅ EMAILS ENCOLADOS EXITOSAMENTE             ║');
+          console.log('╚═══════════════════════════════════════════════╝');
+          console.log(`📊 Total emails encolados: ${totalQueued.toLocaleString()}`);
+          console.log(`📦 Total batches de Redis: ${totalBatches}`);
+          console.log(`⏱️  Tiempo de preparación: ${duration}s`);
+          console.log(`🚀 Worker de Redis enviando emails...`);
+          console.log('═══════════════════════════════════════════════\n');
+          
+        } catch (error) {
+          console.error('\n❌ Error en procesamiento background:', error);
+          
+          try {
+            await Campaign.findByIdAndUpdate(campaignId, {
+              status: 'draft',
+              'stats.error': error.message
+            });
+            console.log('⚠️  Campaña revertida a draft debido a error');
+          } catch (err) {
+            console.error('Error actualizando estado:', err);
+          }
         }
       });
       
     } catch (error) {
       console.error('\n❌ Error enviando campaña:', error);
       
-      // Marcar campaña como draft si falla
       try {
-        await Campaign.findByIdAndUpdate(req.params.id, {
-          status: 'draft'
-        });
+        await Campaign.findByIdAndUpdate(req.params.id, { status: 'draft' });
       } catch (err) {
         console.error('Error actualizando estado:', err);
       }
