@@ -1,4 +1,4 @@
-// backend/src/jobs/emailQueue.js (MEJORADO)
+// backend/src/jobs/emailQueue.js (CORREGIDO)
 const { Queue, Worker } = require('bullmq');
 const emailService = require('../services/emailService');
 const Campaign = require('../models/Campaign');
@@ -8,18 +8,19 @@ let emailQueue;
 let emailWorker;
 let isQueueReady = false;
 
+// ✅ CONTADOR GLOBAL para jobIds únicos
+let globalJobCounter = 0;
+
 // ✅ CONFIGURACIÓN DE RATE LIMIT según plan de Resend CON BATCH SENDING
 const RATE_LIMIT_CONFIG = {
-  // Plan Pro: 10 req/s × 100 emails/batch = 1000 emails/segundo
   pro: {
     concurrency: 5,
-    max: 10,              // 10 batches por segundo
+    max: 10,
     duration: 1000,
-    batchSize: 100,       // 100 emails por batch
-    emailsPerSecond: 1000, // 10 req/s × 100 emails
+    batchSize: 100,
+    emailsPerSecond: 1000,
     monthlyLimit: 50000
   },
-  // Plan Scale: 50 req/s × 100 emails/batch = 5000 emails/segundo
   scale: {
     concurrency: 10,
     max: 50,
@@ -30,7 +31,6 @@ const RATE_LIMIT_CONFIG = {
   }
 };
 
-// ✅ Usar plan Pro
 const RESEND_PLAN = process.env.RESEND_PLAN || 'pro';
 const RATE_LIMIT = RATE_LIMIT_CONFIG[RESEND_PLAN] || RATE_LIMIT_CONFIG.pro;
 
@@ -41,7 +41,7 @@ if (RATE_LIMIT.monthlyLimit) {
   console.log(`📆 Límite mensual: ${RATE_LIMIT.monthlyLimit.toLocaleString()} emails`);
 }
 
-// 🆕 FUNCIÓN HELPER: Verificar si la campaña terminó
+// Función helper: Verificar si la campaña terminó
 async function checkAndFinalizeCampaign(campaignId) {
   try {
     const campaign = await Campaign.findById(campaignId);
@@ -51,23 +51,20 @@ async function checkAndFinalizeCampaign(campaignId) {
       return false;
     }
     
-    // Solo procesar si está en "sending"
     if (campaign.status !== 'sending') {
       return false;
     }
     
     console.log(`🔍 Verificando campaña ${campaign.name}: ${campaign.stats.sent}/${campaign.stats.totalRecipients}`);
     
-    // Si ya se enviaron todos
     if (campaign.stats.sent >= campaign.stats.totalRecipients && campaign.stats.totalRecipients > 0) {
       
-      // 🆕 Doble verificación: Chequear si quedan batches pendientes
       if (emailQueue && isQueueReady) {
         try {
           const counts = await emailQueue.getJobCounts('waiting', 'active', 'delayed');
           const pending = (counts.waiting || 0) + (counts.active || 0) + (counts.delayed || 0);
           
-          if (pending > 1) { // Más de 1 porque el actual puede seguir procesándose
+          if (pending > 1) {
             console.log(`⏳ Aún hay ${pending} batches pendientes, esperando...`);
             return false;
           }
@@ -76,7 +73,6 @@ async function checkAndFinalizeCampaign(campaignId) {
         }
       }
       
-      // Marcar como enviada
       campaign.status = 'sent';
       
       if (!campaign.sentAt) {
@@ -116,23 +112,33 @@ async function initializeQueue() {
 
     console.log('🔄 Inicializando BullMQ con Upstash Redis...');
     
-    // ✅ PARSEAR URL de Upstash
     const url = new URL(redisUrl);
-    const connection = {
+    
+    // ✅ Conexión para Queue
+    const queueConnection = {
       host: url.hostname,
       port: parseInt(url.port) || 6379,
       password: url.password,
       tls: url.protocol === 'rediss:' ? {} : undefined,
-      
-      // ✅ CONFIGURACIÓN OPTIMIZADA para Upstash
       maxRetriesPerRequest: null,
       enableReadyCheck: false,
       enableOfflineQueue: true,
     };
     
-    // ✅ CREAR QUEUE (para agregar jobs)
+    // ✅ Conexión SEPARADA para Worker
+    const workerConnection = {
+      host: url.hostname,
+      port: parseInt(url.port) || 6379,
+      password: url.password,
+      tls: url.protocol === 'rediss:' ? {} : undefined,
+      maxRetriesPerRequest: null,
+      enableReadyCheck: false,
+      enableOfflineQueue: true,
+    };
+    
+    // ✅ CREAR QUEUE
     emailQueue = new Queue('email-sending', {
-      connection,
+      connection: queueConnection,
       defaultJobOptions: {
         attempts: 3,
         backoff: {
@@ -141,7 +147,7 @@ async function initializeQueue() {
         },
         removeOnComplete: {
           age: 3600,
-          count: 1000
+          count: 5000
         },
         removeOnFail: {
           age: 86400
@@ -158,11 +164,9 @@ async function initializeQueue() {
         console.log(`📦 [${job.id}] Procesando batch de ${emailBatch.length} emails...`);
         
         try {
-          // 🆕 Enviar batch completo a Resend
           const result = await emailService.sendBatch(emailBatch);
           
           if (result.success) {
-            // Registrar eventos para todos los emails del batch
             const events = emailBatch.map((email, index) => ({
               campaign: campaignId,
               customer: email.customerId,
@@ -174,7 +178,6 @@ async function initializeQueue() {
             
             await EmailEvent.insertMany(events);
             
-            // Actualizar stats de campaña
             await Campaign.findByIdAndUpdate(campaignId, {
               $inc: { 
                 'stats.sent': emailBatch.length,
@@ -193,21 +196,18 @@ async function initializeQueue() {
         } catch (error) {
           console.error(`❌ [${job.id}] Error en batch:`, error.message);
           
-          // ✅ Detectar rate limit de Resend
           if (error.message && error.message.includes('rate_limit_exceeded')) {
             console.warn('⚠️  Rate limit de Resend alcanzado - reintentando batch...');
             await Campaign.findByIdAndUpdate(campaignId, {
               $inc: { 'stats.rateLimited': 1 }
             });
-            throw error; // Reintentar automáticamente
+            throw error;
           }
           
-          // Marcar todos los emails del batch como fallidos
           await Campaign.findByIdAndUpdate(campaignId, {
             $inc: { 'stats.failed': emailBatch.length }
           });
           
-          // Si es el último intento, registrar como bounced
           if (job.attemptsMade >= job.opts.attempts) {
             const failedEvents = emailBatch.map(email => ({
               campaign: campaignId,
@@ -225,22 +225,20 @@ async function initializeQueue() {
         }
       },
       {
-        connection,
-        concurrency: RATE_LIMIT.concurrency,  // 5 batches simultáneos
+        connection: workerConnection,
+        concurrency: RATE_LIMIT.concurrency,
         limiter: {
-          max: RATE_LIMIT.max,      // 10 batches por segundo
+          max: RATE_LIMIT.max,
           duration: RATE_LIMIT.duration
         }
       }
     );
     
-    // 🆕 MEJORADO: Event listener para verificar finalización
+    // Event listeners
     emailWorker.on('completed', async (job, result) => {
-      console.log(`✅ Batch job ${job.id} completado`);
+      console.log(`✅ Job ${job.id} completado`);
       
-      // Verificar si la campaña terminó
       if (result && result.campaignId) {
-        // Pequeño delay para asegurar que todos los updates se procesaron
         setTimeout(() => {
           checkAndFinalizeCampaign(result.campaignId).catch(err => {
             console.error('Error finalizando campaña:', err.message);
@@ -250,9 +248,8 @@ async function initializeQueue() {
     });
     
     emailWorker.on('failed', (job, err) => {
-      console.error(`❌ Batch job ${job.id} falló: ${err.message}`);
+      console.error(`❌ Job ${job.id} falló: ${err.message}`);
       
-      // También verificar finalización en caso de fallos
       if (job && job.data && job.data.campaignId) {
         setTimeout(() => {
           checkAndFinalizeCampaign(job.data.campaignId).catch(e => {
@@ -266,7 +263,11 @@ async function initializeQueue() {
       console.error('❌ Worker error:', err.message);
     });
     
-    // ✅ Marcar como ready
+    // ✅ Log cuando el worker está listo
+    emailWorker.on('ready', () => {
+      console.log('✅ Worker listo y escuchando jobs');
+    });
+    
     isQueueReady = true;
     console.log('✅ BullMQ Queue initialized with Upstash Redis + BATCH SENDING');
     console.log(`⚡ Rate Limit: ${RATE_LIMIT.max} batches/s | Concurrency: ${RATE_LIMIT.concurrency}`);
@@ -288,13 +289,12 @@ initializeQueue().catch(err => {
   console.error('❌ Failed to initialize queue:', err.message);
 });
 
-// 🆕 FUNCIÓN HELPER CON BATCH PROCESSING
+// ✅ FUNCIÓN CORREGIDA CON JOBIDs ÚNICOS
 async function addEmailsToQueue(emails, campaignId) {
   if (!emailQueue || !isQueueReady) {
     throw new Error('Redis queue no disponible. Verifica REDIS_URL y conexión.');
   }
   
-  // ✅ Dividir emails en batches de 100
   const batches = [];
   for (let i = 0; i < emails.length; i += RATE_LIMIT.batchSize) {
     batches.push(emails.slice(i, i + RATE_LIMIT.batchSize));
@@ -307,34 +307,40 @@ async function addEmailsToQueue(emails, campaignId) {
   console.log(`⏱️  Tiempo estimado: ~${Math.ceil(batches.length / RATE_LIMIT.max)} segundos`);
   console.log(`==================================================\n`);
   
-  // Crear jobs para cada batch
-  const jobs = batches.map((batch, index) => ({
-    name: 'send-batch',
-    data: {
-      campaignId,
-      emailBatch: batch.map(emailData => ({
-        from: emailData.from,
-        to: emailData.to,
-        subject: emailData.subject,
-        html: emailData.html,
-        reply_to: emailData.replyTo || undefined,
-        tags: [
-          { name: 'campaign_id', value: emailData.campaignId },
-          { name: 'customer_id', value: emailData.customerId }
-        ],
-        customerId: emailData.customerId // Para tracking interno
-      }))
-    },
-    opts: {
-      jobId: `${campaignId}-batch-${index}`,
-      priority: 1
-    }
-  }));
+  // ✅ CORREGIDO: Usar timestamp + contador global para jobId único
+  const timestamp = Date.now();
   
-  // ✅ Agregar todos los batches a la cola
+  const jobs = batches.map((batch, index) => {
+    globalJobCounter++; // Incrementar contador global
+    
+    return {
+      name: 'send-batch',
+      data: {
+        campaignId,
+        emailBatch: batch.map(emailData => ({
+          from: emailData.from,
+          to: emailData.to,
+          subject: emailData.subject,
+          html: emailData.html,
+          reply_to: emailData.replyTo || undefined,
+          tags: [
+            { name: 'campaign_id', value: emailData.campaignId },
+            { name: 'customer_id', value: emailData.customerId }
+          ],
+          customerId: emailData.customerId
+        }))
+      },
+      opts: {
+        // ✅ CORREGIDO: jobId ahora es único usando timestamp + contador global
+        jobId: `${campaignId}-${timestamp}-${globalJobCounter}`,
+        priority: 1
+      }
+    };
+  });
+  
   const addedJobs = await emailQueue.addBulk(jobs);
   
-  console.log(`✅ ${batches.length} batches agregados correctamente`);
+  console.log(`✅ ${batches.length} batches agregados correctamente (jobs ${globalJobCounter - batches.length + 1} a ${globalJobCounter})`);
   
   return {
     jobIds: addedJobs.map(j => j.id),
@@ -344,7 +350,7 @@ async function addEmailsToQueue(emails, campaignId) {
   };
 }
 
-// getQueueStatus (actualizado para batch)
+// getQueueStatus
 async function getQueueStatus() {
   if (!emailQueue || !isQueueReady) {
     return { 
@@ -443,10 +449,11 @@ async function cleanQueue() {
   }
   
   try {
-    await emailQueue.clean(5000, 100, 'completed');
-    await emailQueue.clean(5000, 100, 'failed');
+    await emailQueue.clean(0, 1000, 'completed');
+    await emailQueue.clean(0, 1000, 'failed');
+    await emailQueue.drain(); // ✅ También limpiar jobs pendientes
     
-    console.log('🧹 Cola limpiada');
+    console.log('🧹 Cola limpiada completamente');
     return { success: true, message: 'Queue cleaned' };
   } catch (error) {
     console.error('Clean error:', error);
@@ -486,7 +493,6 @@ async function getWaitingJobs() {
   }
 }
 
-// 🆕 Función para verificar y finalizar TODAS las campañas en "sending"
 async function checkAllSendingCampaigns() {
   try {
     console.log('🔍 Verificando todas las campañas en "sending"...');
@@ -528,6 +534,6 @@ module.exports = {
   getRateLimitConfig: () => RATE_LIMIT,
   getActiveJobs,
   getWaitingJobs,
-  checkAndFinalizeCampaign, // 🆕 Exportar para uso manual
-  checkAllSendingCampaigns  // 🆕 Verificar todas las campañas
+  checkAndFinalizeCampaign,
+  checkAllSendingCampaigns
 };
