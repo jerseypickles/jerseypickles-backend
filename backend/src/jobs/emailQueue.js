@@ -610,6 +610,61 @@ async function cleanQueue() {
   }
 }
 
+async function getActiveJobs() {
+  if (!emailQueue || !isQueueReady) {
+    return [];
+  }
+  
+  try {
+    return await emailQueue.getActive();
+  } catch (error) {
+    console.error('Error getting active jobs:', error);
+    return [];
+  }
+}
+
+async function getWaitingJobs() {
+  if (!emailQueue || !isQueueReady) {
+    return [];
+  }
+  
+  try {
+    return await emailQueue.getWaiting();
+  } catch (error) {
+    console.error('Error getting waiting jobs:', error);
+    return [];
+  }
+}
+
+async function checkAllSendingCampaigns() {
+  try {
+    console.log('🔍 Verificando todas las campañas en "sending"...');
+    
+    const sendingCampaigns = await Campaign.find({ status: 'sending' });
+    
+    console.log(`📊 Encontradas ${sendingCampaigns.length} campañas en "sending"`);
+    
+    const results = [];
+    
+    for (const campaign of sendingCampaigns) {
+      const wasFinalized = await checkAndFinalizeCampaign(campaign._id);
+      results.push({
+        id: campaign._id,
+        name: campaign.name,
+        finalized: wasFinalized,
+        sent: campaign.stats.sent,
+        total: campaign.stats.totalRecipients
+      });
+    }
+    
+    return results;
+    
+  } catch (error) {
+    console.error('Error verificando campañas:', error);
+    throw error;
+  }
+}
+
 // ========== GRACEFUL SHUTDOWN ==========
 
 async function gracefulShutdown(signal) {
@@ -664,7 +719,10 @@ module.exports = {
   pauseQueue,
   resumeQueue,
   cleanQueue,
+  getActiveJobs,
+  getWaitingJobs,
   checkAndFinalizeCampaign,
+  checkAllSendingCampaigns,
   isAvailable: () => emailQueue && isQueueReady,
   getConfig: () => RESEND_CONFIG,
   

@@ -995,8 +995,8 @@ class CampaignsController {
 
   async getQueueStatus(req, res) {
     try {
-      const { getQueueStatus, getActiveJobs, getWaitingJobs } = require('../jobs/emailQueue');
-      const status = await getQueueStatus();
+      const emailQueueModule = require('../jobs/emailQueue');
+      const status = await emailQueueModule.getQueueStatus();
       
       if (!status.available) {
         return res.json(status);
@@ -1004,9 +1004,21 @@ class CampaignsController {
       
       let currentCampaign = null;
       
+      // Intentar obtener información de campaña actual
       try {
-        const activeJobs = await getActiveJobs();
-        const waitingJobs = await getWaitingJobs();
+        // Verificar que los métodos existen
+        if (typeof emailQueueModule.getActiveJobs !== 'function' || 
+            typeof emailQueueModule.getWaitingJobs !== 'function') {
+          console.warn('⚠️  getActiveJobs/getWaitingJobs no disponibles');
+          return res.json({
+            ...status,
+            currentCampaign: null,
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        const activeJobs = await emailQueueModule.getActiveJobs();
+        const waitingJobs = await emailQueueModule.getWaitingJobs();
         
         const job = activeJobs[0] || waitingJobs[0];
         
@@ -1032,10 +1044,13 @@ class CampaignsController {
               createdAt: campaign.createdAt,
               sentAt: campaign.sentAt
             };
+            
+            console.log(`📊 Campaña activa: ${campaign.name} - ${currentCampaign.sent}/${totalRecipients}`);
           }
         }
       } catch (error) {
         console.error('Error obteniendo campaña activa:', error.message);
+        // No fallar el request, solo continuar sin currentCampaign
       }
       
       res.json({
