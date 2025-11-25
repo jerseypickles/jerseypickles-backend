@@ -370,7 +370,6 @@ class CampaignsController {
       });
       
       // ========== PASO 4: Procesar en background ==========
-      const { addCampaignToQueue } = require('../jobs/emailQueue');
       const campaignId = campaign._id.toString();
       const htmlTemplate = campaign.htmlContent;
       const subject = campaign.subject;
