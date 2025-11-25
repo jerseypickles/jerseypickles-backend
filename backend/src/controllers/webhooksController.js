@@ -1,13 +1,15 @@
-// backend/src/controllers/webhooksController.js (COMPLETO CON FLOWS & TRIGGERS)
+// backend/src/controllers/webhooksController.js - COMPLETO (Shopify + Resend)
 const Customer = require('../models/Customer');
 const Order = require('../models/Order');
 const EmailEvent = require('../models/EmailEvent');
+const EmailSend = require('../models/EmailSend');
 const Campaign = require('../models/Campaign');
 const AttributionService = require('../middleware/attributionTracking');
+const crypto = require('crypto');
 
 class WebhooksController {
   
-  // ==================== CUSTOMERS ====================
+  // ==================== SHOPIFY WEBHOOKS ====================
   
   async customerCreate(req, res) {
     try {
@@ -45,7 +47,7 @@ class WebhooksController {
       
       console.log('✅ Cliente creado/actualizado:', customer.email);
       
-      // FLOW TRIGGER: CUSTOMER_CREATED (solo si es nuevo)
+      // FLOW TRIGGER: CUSTOMER_CREATED
       const isNewCustomer = !shopifyCustomer.created_at || 
         new Date(shopifyCustomer.created_at) > new Date(Date.now() - 60000);
       
@@ -146,8 +148,6 @@ class WebhooksController {
     }
   }
 
-  // ==================== ORDERS ====================
-  
   async orderCreate(req, res) {
     try {
       const shopifyOrder = req.body;
@@ -409,8 +409,6 @@ class WebhooksController {
     }
   }
   
-  // 🆕 ==================== NUEVOS MÉTODOS PARA FLOWS ====================
-  
   async orderFulfilled(req, res) {
     try {
       const order = req.body;
@@ -621,6 +619,277 @@ class WebhooksController {
       console.error('❌ Error en refundCreate:', error);
       res.status(500).json({ error: error.message });
     }
+  }
+
+  // ==================== RESEND WEBHOOKS (NUEVO - IDEMPOTENTE) ====================
+  
+  /**
+   * Handler para webhooks de Resend
+   * IDEMPOTENCIA: Usa eventId único para prevenir procesamiento duplicado
+   * 
+   * Eventos soportados:
+   * - email.sent
+   * - email.delivered ← IMPORTANTE: Incrementa delivered aquí (NO en worker)
+   * - email.opened
+   * - email.clicked
+   * - email.bounced
+   * - email.complained
+   */
+  async handleResendWebhook(req, res) {
+    try {
+      const { type, data, created_at } = req.body;
+      
+      if (!type || !data) {
+        return res.status(400).json({ error: 'Payload inválido' });
+      }
+      
+      console.log(`\n📬 Webhook Resend: ${type} → ${data.to || data.email || 'unknown'}`);
+      
+      // ========== PASO 1: Generar eventId ÚNICO ==========
+      const eventId = this.generateEventId(data.email_id, type);
+      
+      // ========== PASO 2: Intentar crear evento (idempotente) ==========
+      try {
+        await EmailEvent.create({
+          eventId,                          // Índice único - falla si ya existe
+          campaign: data.tags?.campaign_id || null,
+          customer: data.tags?.customer_id || null,
+          email: data.to || data.email,
+          eventType: this.mapResendEventType(type),
+          source: 'resend',
+          resendId: data.email_id,
+          eventDate: created_at ? new Date(created_at) : new Date(),
+          metadata: {
+            subject: data.subject,
+            from: data.from,
+            ...this.extractEventMetadata(type, data)
+          }
+        });
+        
+        console.log(`   ✅ Evento ${eventId} creado`);
+        
+      } catch (error) {
+        if (error.code === 11000) {
+          // Duplicate key - evento ya procesado
+          console.log(`   ℹ️  Evento ${eventId} ya procesado (duplicado ignorado)`);
+          return res.status(200).json({ 
+            success: true, 
+            message: 'Evento ya procesado' 
+          });
+        }
+        throw error;
+      }
+      
+      // ========== PASO 3: Actualizar EmailSend status ==========
+      if (data.email_id) {
+        await this.updateEmailSendStatus(data.email_id, type, data);
+      }
+      
+      // ========== PASO 4: Actualizar stats de campaña ==========
+      if (data.tags?.campaign_id) {
+        await this.updateCampaignStats(data.tags.campaign_id, type);
+      }
+      
+      // ========== PASO 5: Verificar si campaña terminó ==========
+      if (data.tags?.campaign_id && type === 'email.delivered') {
+        const { checkAndFinalizeCampaign } = require('../jobs/emailQueue');
+        
+        setImmediate(async () => {
+          try {
+            await checkAndFinalizeCampaign(data.tags.campaign_id);
+          } catch (err) {
+            console.error('Error verificando finalización:', err.message);
+          }
+        });
+      }
+      
+      console.log(`   ✅ Webhook procesado exitosamente\n`);
+      
+      // CRÍTICO: Siempre responder 200 para que Resend no reintente
+      res.status(200).json({ success: true });
+      
+    } catch (error) {
+      console.error('❌ Error procesando webhook Resend:', error);
+      
+      // Aún así responder 200 para evitar reintentos infinitos
+      res.status(200).json({ 
+        success: false, 
+        error: error.message 
+      });
+    }
+  }
+  
+  /**
+   * Actualiza el estado de EmailSend basado en el webhook
+   */
+  async updateEmailSendStatus(resendEmailId, eventType, data) {
+    try {
+      const emailSend = await EmailSend.findOne({ 
+        externalMessageId: resendEmailId 
+      });
+      
+      if (!emailSend) {
+        console.log(`   ⚠️  EmailSend no encontrado para ${resendEmailId}`);
+        return;
+      }
+      
+      const updates = {};
+      
+      switch (eventType) {
+        case 'email.sent':
+          // Ya está marcado como 'sent' desde el worker
+          break;
+          
+        case 'email.delivered':
+          updates.status = 'delivered';
+          updates.deliveredAt = new Date();
+          console.log(`   📧 Email ${emailSend.recipientEmail} → delivered`);
+          break;
+          
+        case 'email.bounced':
+          updates.status = 'bounced';
+          updates.lastError = data.bounce?.message || 'Email bounced';
+          console.log(`   ⚠️  Email ${emailSend.recipientEmail} → bounced`);
+          break;
+          
+        case 'email.complained':
+          updates.status = 'bounced';
+          updates.lastError = 'Spam complaint';
+          console.log(`   ⚠️  Email ${emailSend.recipientEmail} → spam complaint`);
+          break;
+          
+        default:
+          // Eventos de tracking (opened, clicked) no cambian status
+          break;
+      }
+      
+      if (Object.keys(updates).length > 0) {
+        await EmailSend.findByIdAndUpdate(emailSend._id, {
+          $set: updates,
+          $inc: { version: 1 }
+        });
+      }
+      
+    } catch (error) {
+      console.error(`   Error actualizando EmailSend: ${error.message}`);
+    }
+  }
+  
+  /**
+   * Actualiza stats de campaña basado en el webhook
+   * IMPORTANTE: delivered se incrementa AQUÍ, no en el worker
+   */
+  async updateCampaignStats(campaignId, eventType) {
+    try {
+      const campaign = await Campaign.findById(campaignId);
+      
+      if (!campaign) {
+        console.log(`   ⚠️  Campaña ${campaignId} no encontrada`);
+        return;
+      }
+      
+      const updates = {};
+      
+      switch (eventType) {
+        case 'email.delivered':
+          // ✅ CRÍTICO: delivered se incrementa SOLO aquí (NO en worker)
+          updates['stats.delivered'] = 1;
+          console.log(`   📊 Campaign ${campaign.name}: delivered +1`);
+          break;
+          
+        case 'email.opened':
+          updates['stats.opened'] = 1;
+          break;
+          
+        case 'email.clicked':
+          updates['stats.clicked'] = 1;
+          break;
+          
+        case 'email.bounced':
+          updates['stats.bounced'] = 1;
+          break;
+          
+        case 'email.complained':
+          updates['stats.complained'] = 1;
+          break;
+      }
+      
+      if (Object.keys(updates).length > 0) {
+        await Campaign.findByIdAndUpdate(campaignId, {
+          $inc: updates
+        });
+        
+        // Actualizar rates
+        if (eventType === 'email.delivered' || eventType === 'email.opened' || eventType === 'email.clicked') {
+          const refreshedCampaign = await Campaign.findById(campaignId);
+          refreshedCampaign.updateRates();
+          await refreshedCampaign.save();
+        }
+      }
+      
+    } catch (error) {
+      console.error(`   Error actualizando campaign stats: ${error.message}`);
+    }
+  }
+  
+  /**
+   * Genera un eventId único para idempotencia
+   */
+  generateEventId(emailId, eventType) {
+    const normalized = `${emailId}:${eventType}`;
+    return crypto
+      .createHash('sha256')
+      .update(normalized)
+      .digest('hex')
+      .slice(0, 32);
+  }
+  
+  /**
+   * Mapea tipos de eventos de Resend a nuestros tipos
+   */
+  mapResendEventType(resendType) {
+    const mapping = {
+      'email.sent': 'sent',
+      'email.delivered': 'delivered',
+      'email.opened': 'opened',
+      'email.clicked': 'clicked',
+      'email.bounced': 'bounced',
+      'email.complained': 'complained',
+      'email.delivery_delayed': 'delayed'
+    };
+    
+    return mapping[resendType] || 'unknown';
+  }
+  
+  /**
+   * Extrae metadata relevante según tipo de evento
+   */
+  extractEventMetadata(eventType, data) {
+    const metadata = {};
+    
+    switch (eventType) {
+      case 'email.opened':
+        metadata.userAgent = data.user_agent;
+        metadata.ipAddress = data.ip_address;
+        break;
+        
+      case 'email.clicked':
+        metadata.url = data.click?.link;
+        metadata.userAgent = data.user_agent;
+        metadata.ipAddress = data.ip_address;
+        break;
+        
+      case 'email.bounced':
+        metadata.bounceType = data.bounce?.type;
+        metadata.bounceMessage = data.bounce?.message;
+        break;
+        
+      case 'email.complained':
+        metadata.feedbackType = data.complaint?.feedback_type;
+        break;
+    }
+    
+    return metadata;
   }
 }
 
