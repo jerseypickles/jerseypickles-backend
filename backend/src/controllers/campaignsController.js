@@ -370,9 +370,11 @@ class CampaignsController {
       });
       
       // ========== PASO 4: Procesar en background ==========
+      const self = this; // Guardar referencia para usar en setImmediate
+      
       setImmediate(async () => {
         try {
-          await this.processCampaignInBackground({
+          await self.processCampaignInBackground({
             campaign,
             totalRecipients,
             startTime
