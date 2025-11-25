@@ -8,7 +8,6 @@ const EmailEvent = require('../models/EmailEvent');
 const emailService = require('../services/emailService');
 const templateService = require('../services/templateService');
 const segmentationService = require('../services/segmentationService');
-const crypto = require('crypto');
 
 class CampaignsController {
   
@@ -306,7 +305,7 @@ class CampaignsController {
       }
       
       // ==================== MODO PRODUCCIÓN ====================
-      const { addCampaignToQueue, isAvailable } = require('../jobs/emailQueue');
+      const { addCampaignToQueue, isAvailable, generateJobId } = require('../jobs/emailQueue');
       
       if (!isAvailable()) {
         return res.status(400).json({
@@ -414,13 +413,8 @@ class CampaignsController {
           for await (const customer of cursor) {
             processedCount++;
             
-            // Generar jobId determinístico
-            const normalized = `${campaignId}:${customer.email.toLowerCase().trim()}`;
-            const jobId = crypto
-              .createHash('sha256')
-              .update(normalized)
-              .digest('hex')
-              .slice(0, 24);
+            // Generar jobId determinístico usando la misma función que el worker
+            const jobId = generateJobId(campaignId, customer.email);
             
             // ========== Crear EmailSend record (idempotencia) ==========
             try {
