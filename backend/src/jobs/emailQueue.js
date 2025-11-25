@@ -239,6 +239,14 @@ async function processEmailBatch(job) {
     const recipient = recipients[i];
     const jobId = generateJobId(campaignId, recipient.email);
     
+    // ========== DEBUG LOGS ==========
+    if (i === 0) {
+      console.log(`\n   🔍 DEBUG - Primer email del batch:`);
+      console.log(`      Email recibido: "${recipient.email}"`);
+      console.log(`      JobId generado: ${jobId}`);
+      console.log(`      CampaignId: ${campaignId}`);
+    }
+    
     try {
       // ========== PASO 1: ATOMIC CLAIM ==========
       // Intenta reclamar el email para procesar
@@ -246,6 +254,39 @@ async function processEmailBatch(job) {
       const claim = await EmailSend.claimForProcessing(jobId, workerId);
       
       if (!claim) {
+        // DEBUG: Buscar por qué no se encontró
+        if (i === 0) {
+          console.log(`      ❌ Claim falló - Verificando razón...`);
+          
+          // Buscar por jobId
+          const byJobId = await EmailSend.findOne({ jobId }).lean();
+          console.log(`      Búsqueda por jobId: ${byJobId ? 'ENCONTRADO' : 'NO ENCONTRADO'}`);
+          
+          if (byJobId) {
+            console.log(`         Status: ${byJobId.status}`);
+            console.log(`         LockedBy: ${byJobId.lockedBy || 'null'}`);
+            console.log(`         LockedAt: ${byJobId.lockedAt || 'null'}`);
+          }
+          
+          // Buscar por email
+          const byEmail = await EmailSend.findOne({ 
+            campaignId,
+            recipientEmail: recipient.email.toLowerCase().trim()
+          }).lean();
+          console.log(`      Búsqueda por email: ${byEmail ? 'ENCONTRADO' : 'NO ENCONTRADO'}`);
+          
+          if (byEmail) {
+            console.log(`         JobId en BD: ${byEmail.jobId}`);
+            console.log(`         Status: ${byEmail.status}`);
+            console.log(`         Email en BD: "${byEmail.recipientEmail}"`);
+          }
+          
+          // Comparar jobIds si ambos existen
+          if (byJobId && byEmail && byJobId.jobId !== byEmail.jobId) {
+            console.log(`      ⚠️  MISMATCH: JobId generado (${jobId}) vs JobId en BD (${byEmail.jobId})`);
+          }
+        }
+        
         // Ya fue procesado por otro worker o está en proceso
         results.skipped++;
         continue;
