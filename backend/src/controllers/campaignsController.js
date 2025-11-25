@@ -370,20 +370,155 @@ class CampaignsController {
       });
       
       // ========== PASO 4: Procesar en background ==========
-      const self = this; // Guardar referencia para usar en setImmediate
+      const { addCampaignToQueue } = require('../jobs/emailQueue');
+      const campaignId = campaign._id.toString();
+      const htmlTemplate = campaign.htmlContent;
+      const subject = campaign.subject;
+      const fromName = campaign.fromName;
+      const fromEmail = campaign.fromEmail;
+      const replyTo = campaign.replyTo;
+      const targetType = campaign.targetType;
+      const listId = campaign.list?._id;
+      const segmentConditions = campaign.segment?.conditions;
       
       setImmediate(async () => {
+        console.log('📥 Procesamiento background iniciado...\n');
+        
+        const CHUNK_SIZE = 500;
+        let processedCount = 0;
+        let createdEmailSends = 0;
+        const allRecipients = [];
+        
         try {
-          await self.processCampaignInBackground({
-            campaign,
-            totalRecipients,
-            startTime
-          });
+          // ========== CREAR CURSOR SEGÚN TIPO ==========
+          let cursor;
+          
+          if (targetType === 'list') {
+            const list = await List.findById(listId).select('members');
+            const memberIds = list?.members || [];
+            
+            cursor = Customer
+              .find({ _id: { $in: memberIds } })
+              .select('email firstName lastName _id')
+              .lean()
+              .cursor({ batchSize: CHUNK_SIZE });
+              
+          } else {
+            // Para segmentos
+            cursor = await segmentationService.getCursorForSegment(
+              segmentConditions,
+              { select: 'email firstName lastName _id' }
+            );
+          }
+          
+          // ========== ITERAR CON CURSOR (memoria eficiente) ==========
+          for await (const customer of cursor) {
+            processedCount++;
+            
+            // Generar jobId determinístico
+            const normalized = `${campaignId}:${customer.email.toLowerCase().trim()}`;
+            const jobId = crypto
+              .createHash('sha256')
+              .update(normalized)
+              .digest('hex')
+              .slice(0, 24);
+            
+            // ========== Crear EmailSend record (idempotencia) ==========
+            try {
+              await EmailSend.findOneAndUpdate(
+                {
+                  campaignId,
+                  recipientEmail: customer.email.toLowerCase().trim()
+                },
+                {
+                  $setOnInsert: {
+                    jobId,
+                    campaignId,
+                    recipientEmail: customer.email.toLowerCase().trim(),
+                    customerId: customer._id,
+                    status: 'pending',
+                    attempts: 0,
+                    createdAt: new Date()
+                  }
+                },
+                {
+                  upsert: true,
+                  new: true,
+                  setDefaultsOnInsert: true
+                }
+              );
+              
+              createdEmailSends++;
+              
+            } catch (error) {
+              if (error.code === 11000) {
+                console.log(`   ⚠️  Email duplicado: ${customer.email}, skipping`);
+                continue;
+              }
+              throw error;
+            }
+            
+            // ========== Personalizar email ==========
+            let html = htmlTemplate;
+            html = emailService.personalize(html, customer);
+            html = emailService.injectTracking(
+              html,
+              campaignId,
+              customer._id.toString(),
+              customer.email
+            );
+            
+            allRecipients.push({
+              email: customer.email,
+              subject: subject,
+              html: html,
+              from: `${fromName} <${fromEmail}>`,
+              replyTo: replyTo,
+              customerId: customer._id.toString()
+            });
+            
+            // Log progreso
+            if (processedCount % 1000 === 0) {
+              console.log(`   📊 Procesados: ${processedCount.toLocaleString()} / ${totalRecipients.toLocaleString()}`);
+            }
+          }
+          
+          console.log(`\n✅ Preparación completada:`);
+          console.log(`   Total procesados: ${processedCount.toLocaleString()}`);
+          console.log(`   EmailSend records: ${createdEmailSends.toLocaleString()}`);
+          
+          // ========== Encolar todos los emails ==========
+          if (allRecipients.length === 0) {
+            console.log('⚠️  No hay recipientes para encolar\n');
+            
+            await Campaign.findByIdAndUpdate(campaignId, {
+              status: 'sent',
+              'stats.error': 'No hay destinatarios válidos'
+            });
+            
+            return;
+          }
+          
+          console.log(`\n📤 Encolando ${allRecipients.length.toLocaleString()} emails...\n`);
+          
+          const queueResult = await addCampaignToQueue(allRecipients, campaignId);
+          
+          const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+          
+          console.log('╔════════════════════════════════════════════════╗');
+          console.log('║  ✅ CAMPAÑA ENCOLADA EXITOSAMENTE             ║');
+          console.log('╚════════════════════════════════════════════════╝');
+          console.log(`📊 Total emails: ${queueResult.totalEmails.toLocaleString()}`);
+          console.log(`📦 Total batches: ${queueResult.totalJobs}`);
+          console.log(`⏱️  Tiempo preparación: ${duration}s`);
+          console.log(`🚀 Workers procesando...`);
+          console.log('════════════════════════════════════════════════\n');
+          
         } catch (error) {
           console.error('\n❌ Error en background:', error);
           
           try {
-            await Campaign.findByIdAndUpdate(campaign._id, {
+            await Campaign.findByIdAndUpdate(campaignId, {
               status: 'draft',
               'stats.error': error.message
             });
@@ -410,153 +545,6 @@ class CampaignsController {
         success: false,
         error: error.message 
       });
-    }
-  }
-  
-  // ========== PROCESAMIENTO EN BACKGROUND ==========
-  
-  async processCampaignInBackground(options) {
-    const { campaign, totalRecipients, startTime } = options;
-    const { addCampaignToQueue } = require('../jobs/emailQueue');
-    
-    console.log('📥 Procesamiento background iniciado...\n');
-    
-    const CHUNK_SIZE = 500; // Procesar 500 customers a la vez
-    const campaignId = campaign._id.toString();
-    const htmlTemplate = campaign.htmlContent;
-    const subject = campaign.subject;
-    const fromName = campaign.fromName;
-    const fromEmail = campaign.fromEmail;
-    const replyTo = campaign.replyTo;
-    
-    let processedCount = 0;
-    let createdEmailSends = 0;
-    const allRecipients = [];
-    
-    try {
-      // ========== CREAR CURSOR SEGÚN TIPO ==========
-      let cursor;
-      
-      if (campaign.targetType === 'list') {
-        const list = await List.findById(campaign.list._id).select('members');
-        const memberIds = list?.members || [];
-        
-        cursor = Customer
-          .find({ _id: { $in: memberIds } })
-          .select('email firstName lastName _id')
-          .lean()
-          .cursor({ batchSize: CHUNK_SIZE });
-          
-      } else {
-        // Para segmentos
-        cursor = await segmentationService.getCursorForSegment(
-          campaign.segment.conditions,
-          { select: 'email firstName lastName _id' }
-        );
-      }
-      
-      // ========== ITERAR CON CURSOR (memoria eficiente) ==========
-      for await (const customer of cursor) {
-        processedCount++;
-        
-        // Generar jobId determinístico
-        const jobId = this.generateJobId(campaignId, customer.email);
-        
-        // ========== Crear EmailSend record (idempotencia) ==========
-        try {
-          await EmailSend.findOneAndUpdate(
-            {
-              campaignId,
-              recipientEmail: customer.email.toLowerCase().trim()
-            },
-            {
-              $setOnInsert: {
-                jobId,
-                campaignId,
-                recipientEmail: customer.email.toLowerCase().trim(),
-                customerId: customer._id,
-                status: 'pending',
-                attempts: 0,
-                createdAt: new Date()
-              }
-            },
-            {
-              upsert: true,
-              new: true,
-              setDefaultsOnInsert: true
-            }
-          );
-          
-          createdEmailSends++;
-          
-        } catch (error) {
-          if (error.code === 11000) {
-            // Duplicate - ya existe
-            console.log(`   ⚠️  Email duplicado: ${customer.email}, skipping`);
-            continue;
-          }
-          throw error;
-        }
-        
-        // ========== Personalizar email ==========
-        let html = htmlTemplate;
-        html = emailService.personalize(html, customer);
-        html = emailService.injectTracking(
-          html,
-          campaignId,
-          customer._id.toString(),
-          customer.email
-        );
-        
-        allRecipients.push({
-          email: customer.email,
-          subject: subject,
-          html: html,
-          from: `${fromName} <${fromEmail}>`,
-          replyTo: replyTo,
-          customerId: customer._id.toString()
-        });
-        
-        // Log progreso
-        if (processedCount % 1000 === 0) {
-          console.log(`   📊 Procesados: ${processedCount.toLocaleString()} / ${totalRecipients.toLocaleString()}`);
-        }
-      }
-      
-      console.log(`\n✅ Preparación completada:`);
-      console.log(`   Total procesados: ${processedCount.toLocaleString()}`);
-      console.log(`   EmailSend records: ${createdEmailSends.toLocaleString()}`);
-      
-      // ========== Encolar todos los emails ==========
-      if (allRecipients.length === 0) {
-        console.log('⚠️  No hay recipientes para encolar\n');
-        
-        await Campaign.findByIdAndUpdate(campaignId, {
-          status: 'sent',
-          'stats.error': 'No hay destinatarios válidos'
-        });
-        
-        return;
-      }
-      
-      console.log(`\n📤 Encolando ${allRecipients.length.toLocaleString()} emails...\n`);
-      
-      const queueResult = await addCampaignToQueue(allRecipients, campaignId);
-      
-      const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-      
-      console.log('╔════════════════════════════════════════════════╗');
-      console.log('║  ✅ CAMPAÑA ENCOLADA EXITOSAMENTE             ║');
-      console.log('╚════════════════════════════════════════════════╝');
-      console.log(`📊 Total emails: ${queueResult.totalEmails.toLocaleString()}`);
-      console.log(`📦 Total batches: ${queueResult.totalJobs}`);
-      console.log(`⏱️  Tiempo preparación: ${duration}s`);
-      console.log(`🚀 Workers procesando...`);
-      console.log('════════════════════════════════════════════════\n');
-      
-    } catch (error) {
-      console.error('❌ Error en procesamiento:', error);
-      throw error;
     }
   }
   
@@ -632,17 +620,6 @@ class CampaignsController {
         error: error.message
       });
     }
-  }
-  
-  // ========== UTILIDADES ==========
-  
-  generateJobId(campaignId, email) {
-    const normalized = `${campaignId}:${email.toLowerCase().trim()}`;
-    return crypto
-      .createHash('sha256')
-      .update(normalized)
-      .digest('hex')
-      .slice(0, 24);
   }
   
   // ==================== ESTADÍSTICAS ====================
