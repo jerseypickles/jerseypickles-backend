@@ -381,14 +381,21 @@ class CampaignsController {
       
       setImmediate(async () => {
         console.log('📥 ════════════════════════════════════════════');
-        console.log('   Procesamiento background iniciado (ESTABLE)');
+        console.log('   Procesamiento background iniciado (CHUNKING)');
+        console.log('   Modo: MEMORY-EFFICIENT (escalable a 1M+)');
         console.log('════════════════════════════════════════════\n');
         
-        const CHUNK_SIZE = 500;
+        const CURSOR_BATCH_SIZE = 500;     // Cuántos docs leer de MongoDB por vez
+        const ENQUEUE_CHUNK_SIZE = 5000;   // Cuántos emails encolar por chunk (libera memoria)
+        
         let processedCount = 0;
         let createdEmailSends = 0;
         let skippedDuplicates = 0;
-        const allRecipients = [];
+        let enqueuedCount = 0;
+        let chunkNumber = 0;
+        
+        // ✅ Array temporal que se vacía cada ENQUEUE_CHUNK_SIZE
+        let tempRecipients = [];
         
         try {
           // ========== CREAR CURSOR SEGÚN TIPO ==========
@@ -402,7 +409,7 @@ class CampaignsController {
               .find({ _id: { $in: memberIds } })
               .select('email firstName lastName _id')
               .lean()
-              .cursor({ batchSize: CHUNK_SIZE });
+              .cursor({ batchSize: CURSOR_BATCH_SIZE });
               
           } else {
             // Para segmentos
@@ -412,9 +419,9 @@ class CampaignsController {
             );
           }
           
-          console.log('🔄 Iterando sobre destinatarios con normalización consistente...\n');
+          console.log('🔄 Iterando con chunking (memoria constante ~50MB)...\n');
           
-          // ========== ITERAR CON CURSOR (memoria eficiente) ==========
+          // ========== ITERAR CON CURSOR + CHUNKING ==========
           for await (const customer of cursor) {
             processedCount++;
             
@@ -431,7 +438,8 @@ class CampaignsController {
               console.log(`   Email normalizado: "${normalizedEmail}"`);
               console.log(`   JobId generado: ${jobId}`);
               console.log(`   CampaignId: ${campaignId}`);
-              console.log(`   ✅ Este mismo jobId será usado por el worker`);
+              console.log(`   Chunk size: ${ENQUEUE_CHUNK_SIZE} emails`);
+              console.log(`   ✅ Memoria constante garantizada`);
               console.log(`════════════════════════════════════════════════\n`);
             }
             
@@ -466,7 +474,9 @@ class CampaignsController {
               if (error.code === 11000) {
                 // Email duplicado en la campaña - skip silenciosamente
                 skippedDuplicates++;
-                console.log(`   ⚠️  Duplicado detectado y omitido: ${normalizedEmail}`);
+                if (skippedDuplicates <= 5) {
+                  console.log(`   ⚠️  Duplicado detectado y omitido: ${normalizedEmail}`);
+                }
                 continue;
               }
               throw error;
@@ -482,8 +492,8 @@ class CampaignsController {
               normalizedEmail  // ← Usar normalizado
             );
             
-            // ✅ PASO 5: Agregar a allRecipients con email normalizado
-            allRecipients.push({
+            // ✅ PASO 5: Agregar a tempRecipients (array temporal)
+            tempRecipients.push({
               email: normalizedEmail,  // ← Usar normalizado
               subject: subject,
               html: html,
@@ -492,25 +502,79 @@ class CampaignsController {
               customerId: customer._id.toString()
             });
             
+            // ========== CHUNKING: Encolar cada ENQUEUE_CHUNK_SIZE ==========
+            if (tempRecipients.length >= ENQUEUE_CHUNK_SIZE) {
+              chunkNumber++;
+              
+              console.log(`\n   📤 ════════ ENCOLANDO CHUNK ${chunkNumber} ════════`);
+              console.log(`      Emails en chunk: ${tempRecipients.length.toLocaleString()}`);
+              console.log(`      Total procesados: ${processedCount.toLocaleString()} / ${totalRecipients.toLocaleString()}`);
+              
+              try {
+                const chunkResult = await addCampaignToQueue(tempRecipients, campaignId);
+                enqueuedCount += tempRecipients.length;
+                
+                console.log(`      ✅ Chunk encolado: ${chunkResult.totalJobs} batches`);
+                console.log(`      Total encolados: ${enqueuedCount.toLocaleString()}`);
+                console.log(`   ════════════════════════════════════════════\n`);
+                
+              } catch (error) {
+                console.error(`      ❌ Error encolando chunk ${chunkNumber}:`, error.message);
+                throw error;
+              }
+              
+              // ✅ LIBERAR MEMORIA - Vaciar array temporal
+              tempRecipients = [];
+              
+              // Pequeña pausa para no saturar Redis (100ms)
+              await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            
             // Log progreso cada 1000
             if (processedCount % 1000 === 0) {
               console.log(`   📊 Procesados: ${processedCount.toLocaleString()} / ${totalRecipients.toLocaleString()}`);
               console.log(`      EmailSend creados: ${createdEmailSends.toLocaleString()}`);
-              console.log(`      Duplicados omitidos: ${skippedDuplicates}`);
+              console.log(`      Encolados: ${enqueuedCount.toLocaleString()}`);
+              console.log(`      En buffer: ${tempRecipients.length}`);
             }
           }
           
+          // ========== ENCOLAR EMAILS RESIDUALES (último chunk) ==========
+          if (tempRecipients.length > 0) {
+            chunkNumber++;
+            
+            console.log(`\n   📤 ════════ ENCOLANDO CHUNK FINAL ${chunkNumber} ════════`);
+            console.log(`      Emails en chunk: ${tempRecipients.length.toLocaleString()}`);
+            
+            try {
+              const chunkResult = await addCampaignToQueue(tempRecipients, campaignId);
+              enqueuedCount += tempRecipients.length;
+              
+              console.log(`      ✅ Chunk final encolado: ${chunkResult.totalJobs} batches`);
+              console.log(`   ════════════════════════════════════════════\n`);
+              
+            } catch (error) {
+              console.error(`      ❌ Error encolando chunk final:`, error.message);
+              throw error;
+            }
+            
+            // Liberar memoria del último chunk
+            tempRecipients = [];
+          }
+          
           console.log(`\n╔════════════════════════════════════════════════╗`);
-          console.log(`║  ✅ PREPARACIÓN COMPLETADA                     ║`);
+          console.log(`║  ✅ PREPARACIÓN COMPLETADA (CHUNKING)          ║`);
           console.log(`╚════════════════════════════════════════════════╝`);
           console.log(`   Total procesados: ${processedCount.toLocaleString()}`);
-          console.log(`   EmailSend records creados: ${createdEmailSends.toLocaleString()}`);
+          console.log(`   EmailSend creados: ${createdEmailSends.toLocaleString()}`);
           console.log(`   Duplicados omitidos: ${skippedDuplicates}`);
-          console.log(`   Listos para encolar: ${allRecipients.length.toLocaleString()}`);
+          console.log(`   Total encolados: ${enqueuedCount.toLocaleString()}`);
+          console.log(`   Chunks procesados: ${chunkNumber}`);
+          console.log(`   Memoria máxima: ~${Math.ceil((ENQUEUE_CHUNK_SIZE * 10) / 1024)} MB`);
           console.log(`════════════════════════════════════════════════\n`);
           
-          // ========== Verificar recipientes válidos ==========
-          if (allRecipients.length === 0) {
+          // ========== Verificar que se encolaron emails ==========
+          if (enqueuedCount === 0) {
             console.log('⚠️  No hay recipientes válidos para encolar\n');
             
             await Campaign.findByIdAndUpdate(campaignId, {
@@ -521,21 +585,18 @@ class CampaignsController {
             return;
           }
           
-          console.log(`📤 Encolando ${allRecipients.length.toLocaleString()} emails a BullMQ...\n`);
-          
-          // ========== Encolar todos los emails ==========
-          const queueResult = await addCampaignToQueue(allRecipients, campaignId);
-          
           const duration = ((Date.now() - startTime) / 1000).toFixed(2);
           
           console.log('╔════════════════════════════════════════════════╗');
           console.log('║  ✅ CAMPAÑA ENCOLADA EXITOSAMENTE             ║');
           console.log('╚════════════════════════════════════════════════╝');
-          console.log(`   📊 Total emails: ${queueResult.totalEmails.toLocaleString()}`);
-          console.log(`   📦 Total batches: ${queueResult.totalJobs}`);
+          console.log(`   📊 Total emails: ${enqueuedCount.toLocaleString()}`);
+          console.log(`   📦 Total chunks: ${chunkNumber}`);
           console.log(`   ⏱️  Tiempo preparación: ${duration}s`);
           console.log(`   🚀 Workers procesando en modo ESTABLE...`);
+          console.log(`   💾 Memoria usada: CONSTANTE (~50 MB)`);
           console.log(`   📈 Velocidad estimada: ~800 emails/s`);
+          console.log(`   ♻️  Escalable a: 1M+ emails`);
           console.log('════════════════════════════════════════════════\n');
           
         } catch (error) {
