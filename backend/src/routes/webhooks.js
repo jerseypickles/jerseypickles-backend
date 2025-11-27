@@ -1,4 +1,4 @@
-// backend/src/routes/webhooks.js (ACTUALIZADO CON IDEMPOTENCIA)
+// backend/src/routes/webhooks.js - CORREGIDO (sin duplicados)
 const express = require('express');
 const router = express.Router();
 const webhooksController = require('../controllers/webhooksController');
@@ -32,6 +32,16 @@ router.post('/products/update', validateShopifyWebhook, webhooksController.produ
 router.post('/refunds/create', validateShopifyWebhook, webhooksController.refundCreate);
 
 // ==================== WEBHOOKS DE RESEND ====================
+/**
+ * Handler de webhooks de Resend - CORREGIDO
+ * 
+ * IMPORTANTE - Lógica de stats:
+ * - 'sent' → Se incrementa en emailQueue.js worker (NO aquí)
+ * - 'delivered' → Se incrementa AQUÍ vía webhook
+ * - 'opened', 'clicked', etc → Se incrementan AQUÍ vía webhook
+ * 
+ * Esto evita el doble conteo que causaba sent: 1840 con 920 recipients
+ */
 router.post('/resend', async (req, res) => {
   try {
     const event = req.body;
@@ -42,7 +52,7 @@ router.post('/resend', async (req, res) => {
     
     const { type, data } = event;
     
-    // Extraer tags
+    // Extraer tags (soporta array y objeto)
     let campaignId, customerId, flowId, executionId;
     
     if (data.tags && Array.isArray(data.tags)) {
@@ -57,19 +67,17 @@ router.post('/resend', async (req, res) => {
       executionId = data.tags.execution_id;
     }
     
+    // Si no hay campaign ni flow, ignorar
     if (!campaignId && !flowId) {
       return res.status(200).json({ received: true });
     }
     
-    if (!customerId) {
-      return res.status(200).json({ received: true });
-    }
-    
     const EmailEvent = require('../models/EmailEvent');
+    const EmailSend = require('../models/EmailSend');
     const Campaign = require('../models/Campaign');
     const Customer = require('../models/Customer');
-    const Flow = require('../models/Flow');
     
+    // Mapeo de tipos de eventos
     const eventTypeMap = {
       'email.sent': 'sent',
       'email.delivered': 'delivered',
@@ -86,33 +94,39 @@ router.post('/resend', async (req, res) => {
       return res.status(200).json({ received: true });
     }
     
-    // ✅ IDEMPOTENCIA: Verificar duplicados
+    // ========== IDEMPOTENCIA: Verificar duplicados ==========
     const resendEventId = data.email_id || data.id;
+    const idempotencyKey = `${resendEventId}:${eventType}`;
     
     if (resendEventId) {
       const existingEvent = await EmailEvent.findOne({
-        'metadata.resendEventId': resendEventId,
-        eventType: eventType
+        $or: [
+          { 'metadata.resendEventId': resendEventId, eventType: eventType },
+          { 'metadata.idempotencyKey': idempotencyKey }
+        ]
       });
       
       if (existingEvent) {
-        console.log(`⏭️  Duplicado: ${resendEventId} (${eventType})`);
-        // ✅ CRÍTICO: Responder INMEDIATAMENTE
+        console.log(`⏭️  Duplicado ignorado: ${resendEventId} (${eventType})`);
         return res.status(200).json({ received: true, duplicate: true });
       }
     }
     
     const emailAddress = Array.isArray(data.to) ? data.to[0] : (data.to || data.email || 'unknown');
     
-    // ✅ RESPONDER RÁPIDO (antes de procesar)
+    console.log(`\n📬 Resend Webhook: ${type}`);
+    console.log(`   Email: ${emailAddress}`);
+    console.log(`   Campaign: ${campaignId || 'N/A'}`);
+    
+    // ✅ RESPONDER INMEDIATAMENTE (Resend espera respuesta rápida)
     res.status(200).json({ received: true });
     
-    // ✅ Procesar en background (sin bloquear la respuesta)
+    // ========== PROCESAR EN BACKGROUND ==========
     setImmediate(async () => {
       try {
-        // Registrar evento
+        // 1. Crear EmailEvent
         const eventData = {
-          customer: customerId,
+          customer: customerId || null,
           email: emailAddress,
           eventType: eventType,
           source: 'resend',
@@ -121,6 +135,7 @@ router.post('/resend', async (req, res) => {
           userAgent: data.click?.user_agent || null,
           metadata: {
             resendEventId: resendEventId,
+            idempotencyKey: idempotencyKey,
             timestamp: data.created_at,
             rawTags: data.tags
           }
@@ -136,55 +151,131 @@ router.post('/resend', async (req, res) => {
         }
         
         await EmailEvent.create(eventData);
-        console.log(`✅ EmailEvent creado: ${eventType}`);
+        console.log(`   ✅ EmailEvent creado: ${eventType}`);
         
-        // Actualizar stats en paralelo
-        const statsPromises = [];
-        
-        if (campaignId) {
-          statsPromises.push(
-            Campaign.updateStats(campaignId, eventType)
-              .then(() => console.log(`✅ Campaign stats updated`))
-          );
-        }
-        
-        statsPromises.push(
-          Customer.updateEmailStats(customerId, eventType)
-            .then(() => console.log(`✅ Customer stats updated`))
-        );
-        
-        if (flowId) {
-          const metricMap = {
-            'sent': 'emailsSent',
-            'delivered': 'delivered',
-            'opened': 'opens',
-            'clicked': 'clicks',
-            'bounced': 'bounced',
-            'complained': 'complained'
-          };
+        // 2. Actualizar EmailSend status (si existe)
+        if (resendEventId) {
+          const emailSendUpdates = {};
           
-          const metricName = metricMap[eventType];
+          switch (eventType) {
+            case 'delivered':
+              emailSendUpdates.status = 'delivered';
+              emailSendUpdates.deliveredAt = new Date();
+              break;
+            case 'bounced':
+              emailSendUpdates.status = 'bounced';
+              emailSendUpdates.lastError = data.bounce?.message || 'Email bounced';
+              break;
+            case 'complained':
+              emailSendUpdates.status = 'bounced';
+              emailSendUpdates.lastError = 'Spam complaint';
+              break;
+          }
           
-          if (metricName) {
-            statsPromises.push(
-              Flow.findByIdAndUpdate(flowId, {
-                $inc: { [`metrics.${metricName}`]: 1 }
-              }).then(() => console.log(`✅ Flow metric updated`))
+          if (Object.keys(emailSendUpdates).length > 0) {
+            await EmailSend.findOneAndUpdate(
+              { externalMessageId: resendEventId },
+              { $set: emailSendUpdates, $inc: { version: 1 } }
             );
           }
         }
         
-        await Promise.all(statsPromises);
+        // 3. Actualizar Campaign stats
+        // ⚠️ IMPORTANTE: NO incrementar 'sent' aquí - ya se hace en el worker
+        if (campaignId) {
+          const statsToIncrement = {};
+          
+          switch (eventType) {
+            // 'sent' → NO SE INCREMENTA AQUÍ (ya se hace en emailQueue.js)
+            case 'delivered':
+              statsToIncrement['stats.delivered'] = 1;
+              break;
+            case 'opened':
+              statsToIncrement['stats.opened'] = 1;
+              break;
+            case 'clicked':
+              statsToIncrement['stats.clicked'] = 1;
+              break;
+            case 'bounced':
+              statsToIncrement['stats.bounced'] = 1;
+              break;
+            case 'complained':
+              statsToIncrement['stats.complained'] = 1;
+              break;
+          }
+          
+          if (Object.keys(statsToIncrement).length > 0) {
+            await Campaign.findByIdAndUpdate(campaignId, {
+              $inc: statsToIncrement
+            });
+            console.log(`   ✅ Campaign stats: ${eventType} +1`);
+          }
+          
+          // Actualizar rates para delivered/opened/clicked
+          if (['delivered', 'opened', 'clicked'].includes(eventType)) {
+            const campaign = await Campaign.findById(campaignId);
+            if (campaign && typeof campaign.updateRates === 'function') {
+              campaign.updateRates();
+              await campaign.save();
+            }
+          }
+          
+          // Verificar si campaña terminó (después de delivered)
+          if (eventType === 'delivered') {
+            try {
+              const { checkAndFinalizeCampaign, isAvailable } = require('../jobs/emailQueue');
+              if (isAvailable()) {
+                await checkAndFinalizeCampaign(campaignId);
+              }
+            } catch (err) {
+              // Queue might not be available, that's ok
+            }
+          }
+        }
         
-        console.log(`✅ Evento ${eventType} procesado completamente\n`);
+        // 4. Actualizar Customer stats
+        if (customerId) {
+          try {
+            await Customer.updateEmailStats(customerId, eventType);
+          } catch (err) {
+            console.log(`   ⚠️  Error updating customer stats: ${err.message}`);
+          }
+        }
+        
+        // 5. Actualizar Flow stats (si aplica)
+        if (flowId) {
+          try {
+            const Flow = require('../models/Flow');
+            const metricMap = {
+              'sent': 'emailsSent',
+              'delivered': 'delivered',
+              'opened': 'opens',
+              'clicked': 'clicks',
+              'bounced': 'bounced',
+              'complained': 'complained'
+            };
+            
+            const metricName = metricMap[eventType];
+            if (metricName) {
+              await Flow.findByIdAndUpdate(flowId, {
+                $inc: { [`metrics.${metricName}`]: 1 }
+              });
+            }
+          } catch (err) {
+            console.log(`   ⚠️  Flow not available: ${err.message}`);
+          }
+        }
+        
+        console.log(`   ✅ Webhook procesado completamente\n`);
         
       } catch (error) {
-        console.error('❌ Error procesando webhook en background:', error);
+        console.error('❌ Error en background:', error);
       }
     });
     
   } catch (error) {
-    console.error('❌ Error procesando webhook de Resend:', error);
+    console.error('❌ Error procesando webhook Resend:', error);
+    // Siempre responder 200 para evitar reintentos
     res.status(200).json({ received: true, error: error.message });
   }
 });
