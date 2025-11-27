@@ -1,4 +1,4 @@
-// backend/src/controllers/campaignsController.js - OPTIMIZADO PARA 100K+
+// backend/src/controllers/campaignsController.js - OPTIMIZADO PARA 100K+ (VERSIÓN ESTABLE)
 const Campaign = require('../models/Campaign');
 const Segment = require('../models/Segment');
 const List = require('../models/List');
@@ -294,7 +294,7 @@ class CampaignsController {
       }
       
       console.log('\n╔════════════════════════════════════════════════╗');
-      console.log(`║  📧 ENVIANDO: ${campaign.name.substring(0, 35)}`);
+      console.log(`║  📧 ENVIANDO: ${campaign.name.substring(0, 35).padEnd(35)} ║`);
       console.log('╚════════════════════════════════════════════════╝\n');
       
       const { testMode = false, testEmail = null } = req.body;
@@ -346,7 +346,7 @@ class CampaignsController {
       await campaign.save();
       
       // ========== PASO 3: Responder inmediatamente ==========
-      const estimatedSeconds = Math.ceil(totalRecipients / 200); // ~200 emails/s
+      const estimatedSeconds = Math.ceil(totalRecipients / 800); // ~800 emails/s con 8 req/s
       const estimatedMinutes = Math.ceil(estimatedSeconds / 60);
       
       res.json({
@@ -363,7 +363,7 @@ class CampaignsController {
           estimatedTime: estimatedMinutes > 1 
             ? `${estimatedMinutes} minutos` 
             : `${estimatedSeconds} segundos`,
-          message: `Procesando ${totalRecipients.toLocaleString()} emails...`,
+          message: `Procesando ${totalRecipients.toLocaleString()} emails en modo estable...`,
           checkStatusAt: `/api/campaigns/${campaign._id}/stats`
         }
       });
@@ -380,11 +380,14 @@ class CampaignsController {
       const segmentConditions = campaign.segment?.conditions;
       
       setImmediate(async () => {
-        console.log('📥 Procesamiento background iniciado...\n');
+        console.log('📥 ════════════════════════════════════════════');
+        console.log('   Procesamiento background iniciado (ESTABLE)');
+        console.log('════════════════════════════════════════════\n');
         
         const CHUNK_SIZE = 500;
         let processedCount = 0;
         let createdEmailSends = 0;
+        let skippedDuplicates = 0;
         const allRecipients = [];
         
         try {
@@ -409,25 +412,41 @@ class CampaignsController {
             );
           }
           
+          console.log('🔄 Iterando sobre destinatarios con normalización consistente...\n');
+          
           // ========== ITERAR CON CURSOR (memoria eficiente) ==========
           for await (const customer of cursor) {
             processedCount++;
             
-            // Generar jobId determinístico usando la misma función que el worker
-            const jobId = generateJobId(campaignId, customer.email);
+            // ✅ PASO 1: NORMALIZACIÓN CONSISTENTE
+            const normalizedEmail = customer.email.toLowerCase().trim();
             
-            // ========== Crear EmailSend record (idempotencia) ==========
+            // ✅ PASO 2: Generar jobId con email normalizado (igual que el worker)
+            const jobId = generateJobId(campaignId, normalizedEmail);
+            
+            // ✅ DEBUG: Solo primer email
+            if (processedCount === 1) {
+              console.log(`🔍 ════════ VERIFICACIÓN DE NORMALIZACIÓN ════════`);
+              console.log(`   Email original: "${customer.email}"`);
+              console.log(`   Email normalizado: "${normalizedEmail}"`);
+              console.log(`   JobId generado: ${jobId}`);
+              console.log(`   CampaignId: ${campaignId}`);
+              console.log(`   ✅ Este mismo jobId será usado por el worker`);
+              console.log(`════════════════════════════════════════════════\n`);
+            }
+            
+            // ✅ PASO 3: Crear EmailSend record con normalización consistente
             try {
               await EmailSend.findOneAndUpdate(
                 {
                   campaignId,
-                  recipientEmail: customer.email.toLowerCase().trim()
+                  recipientEmail: normalizedEmail  // ← Usar normalizado
                 },
                 {
                   $setOnInsert: {
-                    jobId,
+                    jobId,                         // ← JobId determinístico
                     campaignId,
-                    recipientEmail: customer.email.toLowerCase().trim(),
+                    recipientEmail: normalizedEmail, // ← Mismo normalizado
                     customerId: customer._id,
                     status: 'pending',
                     attempts: 0,
@@ -445,24 +464,27 @@ class CampaignsController {
               
             } catch (error) {
               if (error.code === 11000) {
-                console.log(`   ⚠️  Email duplicado: ${customer.email}, skipping`);
+                // Email duplicado en la campaña - skip silenciosamente
+                skippedDuplicates++;
+                console.log(`   ⚠️  Duplicado detectado y omitido: ${normalizedEmail}`);
                 continue;
               }
               throw error;
             }
             
-            // ========== Personalizar email ==========
+            // ✅ PASO 4: Personalizar email
             let html = htmlTemplate;
             html = emailService.personalize(html, customer);
             html = emailService.injectTracking(
               html,
               campaignId,
               customer._id.toString(),
-              customer.email
+              normalizedEmail  // ← Usar normalizado
             );
             
+            // ✅ PASO 5: Agregar a allRecipients con email normalizado
             allRecipients.push({
-              email: customer.email,
+              email: normalizedEmail,  // ← Usar normalizado
               subject: subject,
               html: html,
               from: `${fromName} <${fromEmail}>`,
@@ -470,19 +492,26 @@ class CampaignsController {
               customerId: customer._id.toString()
             });
             
-            // Log progreso
+            // Log progreso cada 1000
             if (processedCount % 1000 === 0) {
               console.log(`   📊 Procesados: ${processedCount.toLocaleString()} / ${totalRecipients.toLocaleString()}`);
+              console.log(`      EmailSend creados: ${createdEmailSends.toLocaleString()}`);
+              console.log(`      Duplicados omitidos: ${skippedDuplicates}`);
             }
           }
           
-          console.log(`\n✅ Preparación completada:`);
+          console.log(`\n╔════════════════════════════════════════════════╗`);
+          console.log(`║  ✅ PREPARACIÓN COMPLETADA                     ║`);
+          console.log(`╚════════════════════════════════════════════════╝`);
           console.log(`   Total procesados: ${processedCount.toLocaleString()}`);
-          console.log(`   EmailSend records: ${createdEmailSends.toLocaleString()}`);
+          console.log(`   EmailSend records creados: ${createdEmailSends.toLocaleString()}`);
+          console.log(`   Duplicados omitidos: ${skippedDuplicates}`);
+          console.log(`   Listos para encolar: ${allRecipients.length.toLocaleString()}`);
+          console.log(`════════════════════════════════════════════════\n`);
           
-          // ========== Encolar todos los emails ==========
+          // ========== Verificar recipientes válidos ==========
           if (allRecipients.length === 0) {
-            console.log('⚠️  No hay recipientes para encolar\n');
+            console.log('⚠️  No hay recipientes válidos para encolar\n');
             
             await Campaign.findByIdAndUpdate(campaignId, {
               status: 'sent',
@@ -492,8 +521,9 @@ class CampaignsController {
             return;
           }
           
-          console.log(`\n📤 Encolando ${allRecipients.length.toLocaleString()} emails...\n`);
+          console.log(`📤 Encolando ${allRecipients.length.toLocaleString()} emails a BullMQ...\n`);
           
+          // ========== Encolar todos los emails ==========
           const queueResult = await addCampaignToQueue(allRecipients, campaignId);
           
           const duration = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -501,14 +531,20 @@ class CampaignsController {
           console.log('╔════════════════════════════════════════════════╗');
           console.log('║  ✅ CAMPAÑA ENCOLADA EXITOSAMENTE             ║');
           console.log('╚════════════════════════════════════════════════╝');
-          console.log(`📊 Total emails: ${queueResult.totalEmails.toLocaleString()}`);
-          console.log(`📦 Total batches: ${queueResult.totalJobs}`);
-          console.log(`⏱️  Tiempo preparación: ${duration}s`);
-          console.log(`🚀 Workers procesando...`);
+          console.log(`   📊 Total emails: ${queueResult.totalEmails.toLocaleString()}`);
+          console.log(`   📦 Total batches: ${queueResult.totalJobs}`);
+          console.log(`   ⏱️  Tiempo preparación: ${duration}s`);
+          console.log(`   🚀 Workers procesando en modo ESTABLE...`);
+          console.log(`   📈 Velocidad estimada: ~800 emails/s`);
           console.log('════════════════════════════════════════════════\n');
           
         } catch (error) {
-          console.error('\n❌ Error en background:', error);
+          console.error('\n╔════════════════════════════════════════════════╗');
+          console.error('║  ❌ ERROR EN BACKGROUND                        ║');
+          console.error('╚════════════════════════════════════════════════╝');
+          console.error(`   Error: ${error.message}`);
+          console.error(`   Stack: ${error.stack}`);
+          console.error('════════════════════════════════════════════════\n');
           
           try {
             await Campaign.findByIdAndUpdate(campaignId, {
@@ -517,7 +553,7 @@ class CampaignsController {
             });
             console.log('⚠️  Campaña revertida a draft\n');
           } catch (err) {
-            console.error('Error revertiendo:', err);
+            console.error('❌ Error revertiendo campaña:', err.message);
           }
         }
       });
@@ -544,7 +580,9 @@ class CampaignsController {
   // ========== ENVÍO DE EMAIL DE PRUEBA ==========
   
   async sendTestEmail(campaign, testEmail, res) {
-    console.log(`🧪 MODO TEST: Enviando a ${testEmail}\n`);
+    console.log(`🧪 ════════ MODO TEST ════════`);
+    console.log(`   Enviando a: ${testEmail}`);
+    console.log(`════════════════════════════\n`);
     
     try {
       let testCustomer;
@@ -595,11 +633,11 @@ class CampaignsController {
       });
       
       if (result.success) {
-        console.log('✅ Email de prueba enviado\n');
+        console.log('✅ Email de prueba enviado correctamente\n');
         return res.json({
           success: true,
           testMode: true,
-          message: `Email enviado a ${testEmail}`,
+          message: `Email de prueba enviado a ${testEmail}`,
           emailId: result.id
         });
       } else {
@@ -960,6 +998,97 @@ class CampaignsController {
     } catch (error) {
       console.error('Error limpiando borradores:', error);
       res.status(500).json({ error: error.message });
+    }
+  }
+
+  // ==================== HEALTH CHECK ====================
+
+  async healthCheck(req, res) {
+    try {
+      const { isAvailable, getQueueStatus } = require('../jobs/emailQueue');
+      
+      // Verificar Redis/Queue
+      const queueAvailable = isAvailable();
+      if (!queueAvailable) {
+        return res.status(503).json({
+          healthy: false,
+          error: 'Queue no disponible',
+          message: 'Redis/BullMQ no está conectado',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Obtener estado de la cola
+      const queueStatus = await getQueueStatus();
+      
+      // Verificar EmailSend stats
+      const pendingJobs = await EmailSend.countDocuments({ status: 'pending' });
+      const processingJobs = await EmailSend.countDocuments({ status: 'processing' });
+      const stuckJobs = await EmailSend.countDocuments({
+        status: 'processing',
+        lockedAt: { $lt: new Date(Date.now() - 10 * 60 * 1000) } // Más de 10 minutos
+      });
+      
+      // Campañas activas
+      const sendingCampaigns = await Campaign.countDocuments({ status: 'sending' });
+      
+      const health = {
+        healthy: true,
+        timestamp: new Date().toISOString(),
+        queue: {
+          available: queueAvailable,
+          waiting: queueStatus.waiting || 0,
+          active: queueStatus.active || 0,
+          completed: queueStatus.completed || 0,
+          failed: queueStatus.failed || 0,
+          paused: queueStatus.paused || false,
+          total: queueStatus.total || 0
+        },
+        emailSends: {
+          pending: pendingJobs,
+          processing: processingJobs,
+          stuck: stuckJobs
+        },
+        campaigns: {
+          sending: sendingCampaigns
+        },
+        config: {
+          batchSize: 100,
+          rateLimit: '8 req/s (80% capacidad)',
+          concurrency: 2,
+          maxRetries: 3,
+          mode: 'STABLE'
+        }
+      };
+      
+      // Alertar si hay problemas
+      const warnings = [];
+      
+      if (stuckJobs > 0) {
+        warnings.push(`${stuckJobs} jobs están bloqueados por más de 10 minutos`);
+      }
+      
+      if (queueStatus.failed > 100) {
+        warnings.push(`${queueStatus.failed} jobs han fallado`);
+      }
+      
+      if (queueStatus.waiting > 10000) {
+        warnings.push(`${queueStatus.waiting} jobs esperando - considerar aumentar concurrency`);
+      }
+      
+      if (warnings.length > 0) {
+        health.warnings = warnings;
+      }
+      
+      res.json(health);
+      
+    } catch (error) {
+      console.error('Error en health check:', error);
+      res.status(500).json({
+        healthy: false,
+        error: error.message,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 

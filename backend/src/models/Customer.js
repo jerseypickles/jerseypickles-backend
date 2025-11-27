@@ -88,7 +88,8 @@ const customerSchema = new mongoose.Schema({
       'website-popup', 
       'website-popup-v2', 
       'website-popup-v3',  // ✅ AGREGADO
-      'manual'
+      'manual',
+      'black-friday-banner'
     ],
     default: 'shopify'
   },

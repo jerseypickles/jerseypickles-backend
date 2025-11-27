@@ -1,4 +1,4 @@
-// backend/src/jobs/emailQueue.js - PRODUCCIÓN 100K+
+// backend/src/jobs/emailQueue.js - PRODUCCIÓN 100K+ (VERSIÓN ESTABLE)
 const { Queue, Worker } = require('bullmq');
 const crypto = require('crypto');
 const emailService = require('../services/emailService');
@@ -11,20 +11,25 @@ let emailWorker;
 let isQueueReady = false;
 let isShuttingDown = false;
 
-// ========== CONFIGURACIÓN DE RESEND ==========
+// ========== CONFIGURACIÓN DE RESEND (MODO ESTABLE) ==========
 const RESEND_CONFIG = {
-  BATCH_SIZE: 100,           // Resend permite 100 emails por batch
-  RATE_LIMIT_PER_SECOND: 2,  // 2 requests/segundo (default todos los planes)
-  CONCURRENCY: 3,            // Workers concurrentes
+  BATCH_SIZE: 100,
+  RATE_LIMIT_PER_SECOND: 8,  // 80% del límite de 10 (margen de seguridad 20%)
+  CONCURRENCY: 2,             // Reducido para estabilidad
   MAX_RETRIES: 3,
-  LOCK_DURATION: 300000      // 5 minutos para batch jobs
+  LOCK_DURATION: 300000       // 5 minutos
 };
 
-console.log('📊 Configuración de Email Queue:');
+console.log('\n╔════════════════════════════════════════════════╗');
+console.log('║  📊 CONFIGURACIÓN EMAIL QUEUE (ESTABLE)        ║');
+console.log('╚════════════════════════════════════════════════╝');
 console.log(`   Batch size: ${RESEND_CONFIG.BATCH_SIZE} emails`);
-console.log(`   Rate limit: ${RESEND_CONFIG.RATE_LIMIT_PER_SECOND} req/s`);
+console.log(`   Rate limit: ${RESEND_CONFIG.RATE_LIMIT_PER_SECOND} req/s (80% capacidad)`);
 console.log(`   Concurrency: ${RESEND_CONFIG.CONCURRENCY} workers`);
-console.log(`   Velocidad máxima: ~${RESEND_CONFIG.BATCH_SIZE * RESEND_CONFIG.RATE_LIMIT_PER_SECOND} emails/segundo\n`);
+console.log(`   Velocidad máxima: ~${RESEND_CONFIG.BATCH_SIZE * RESEND_CONFIG.RATE_LIMIT_PER_SECOND} emails/s`);
+console.log(`   Margen de seguridad: 20%`);
+console.log(`   Modo: ESTABLE (prioridad: reliability > speed)`);
+console.log('════════════════════════════════════════════════\n');
 
 // ========== GENERACIÓN DE JOB IDs DETERMINÍSTICOS ==========
 
@@ -149,7 +154,11 @@ async function initializeQueue() {
     });
     
     emailWorker.on('completed', async (job, result) => {
-      console.log(`✅ [${job.id}] Batch completado: ${result.sent} enviados, ${result.skipped} omitidos, ${result.failed} fallidos`);
+      const throughput = result.sent > 0 
+        ? ((result.sent / ((Date.now() - (job.timestamp || Date.now())) / 1000)) || 0).toFixed(1)
+        : '0.0';
+      
+      console.log(`✅ [Batch ${result.chunkIndex}] Completado: ${result.sent} sent, ${result.skipped} skipped, ${result.failed} failed (${throughput} emails/s)`);
       
       if (result.campaignId) {
         // Verificar si la campaña terminó después de cada batch
@@ -162,7 +171,7 @@ async function initializeQueue() {
     });
     
     emailWorker.on('failed', (job, err) => {
-      console.error(`❌ [${job?.id || 'unknown'}] Job falló: ${err.message}`);
+      console.error(`❌ [Batch ${job?.data?.chunkIndex || 'unknown'}] Job falló: ${err.message}`);
       
       if (job?.data?.campaignId) {
         // También verificar tras fallos por si fue el último batch
@@ -184,11 +193,13 @@ async function initializeQueue() {
     
     isQueueReady = true;
     
-    console.log('═══════════════════════════════════════════════');
-    console.log('✅ BullMQ Queue inicializada correctamente');
+    console.log('╔═══════════════════════════════════════════════╗');
+    console.log('║  ✅ BullMQ INICIALIZADO CORRECTAMENTE         ║');
+    console.log('╚═══════════════════════════════════════════════╝');
     console.log(`   Rate Limit: ${RESEND_CONFIG.RATE_LIMIT_PER_SECOND} req/s`);
     console.log(`   Concurrency: ${RESEND_CONFIG.CONCURRENCY} workers`);
     console.log(`   Batch Size: ${RESEND_CONFIG.BATCH_SIZE} emails`);
+    console.log(`   Modo: ESTABLE`);
     console.log('═══════════════════════════════════════════════\n');
     
     // Recuperar locks expirados al iniciar
@@ -215,16 +226,22 @@ async function initializeQueue() {
 // ========== PROCESAMIENTO DE BATCH ==========
 
 /**
- * Procesa un batch de emails
+ * Procesa un batch de emails con logging detallado
  * Usa EmailSend model para idempotencia a nivel de BD
  */
 async function processEmailBatch(job) {
   const { campaignId, recipients, chunkIndex } = job.data;
-  const workerId = `worker-${process.pid}-${job.id}`;
+  const workerId = `worker-${process.pid}-${Date.now()}`;
+  const startTime = Date.now();
   
-  console.log(`\n📦 [Job ${job.id}] Procesando batch ${chunkIndex}`);
+  // ✅ Logging detallado de inicio
+  console.log(`\n╔════════════════════════════════════════════╗`);
+  console.log(`║  📦 BATCH ${String(chunkIndex).padStart(3, '0')} - ${recipients.length} emails${' '.repeat(17)}║`);
+  console.log(`╚════════════════════════════════════════════╝`);
   console.log(`   Campaign: ${campaignId}`);
-  console.log(`   Recipients: ${recipients.length}`);
+  console.log(`   Worker: ${workerId}`);
+  console.log(`   Started: ${new Date().toISOString()}`);
+  console.log(`   Mode: STABLE (prioridad en reliability)`);
   
   const results = {
     campaignId,
@@ -237,62 +254,28 @@ async function processEmailBatch(job) {
   
   for (let i = 0; i < recipients.length; i++) {
     const recipient = recipients[i];
+    
+    // ✅ Generar jobId con email normalizado (igual que controller)
     const jobId = generateJobId(campaignId, recipient.email);
     
-    // ========== DEBUG LOGS ==========
+    // ✅ DEBUG: Solo primer email de cada batch
     if (i === 0) {
-      console.log(`\n   🔍 DEBUG - Primer email del batch:`);
-      console.log(`      Email recibido: "${recipient.email}"`);
-      console.log(`      JobId generado: ${jobId}`);
-      console.log(`      CampaignId: ${campaignId}`);
+      console.log(`\n   🔍 Verificación primer email:`);
+      console.log(`      Email: "${recipient.email}"`);
+      console.log(`      JobId: ${jobId}`);
     }
     
     try {
       // ========== PASO 1: ATOMIC CLAIM ==========
-      // Intenta reclamar el email para procesar
-      // Si ya fue procesado o está siendo procesado, claim será null
       const claim = await EmailSend.claimForProcessing(jobId, workerId);
       
       if (!claim) {
-        // DEBUG: Buscar por qué no se encontró
-        if (i === 0) {
-          console.log(`      ❌ Claim falló - Verificando razón...`);
-          
-          // Buscar por jobId
-          const byJobId = await EmailSend.findOne({ jobId }).lean();
-          console.log(`      Búsqueda por jobId: ${byJobId ? 'ENCONTRADO' : 'NO ENCONTRADO'}`);
-          
-          if (byJobId) {
-            console.log(`         Status: ${byJobId.status}`);
-            console.log(`         LockedBy: ${byJobId.lockedBy || 'null'}`);
-            console.log(`         LockedAt: ${byJobId.lockedAt || 'null'}`);
-          }
-          
-          // Buscar por email
-          const byEmail = await EmailSend.findOne({ 
-            campaignId,
-            recipientEmail: recipient.email.toLowerCase().trim()
-          }).lean();
-          console.log(`      Búsqueda por email: ${byEmail ? 'ENCONTRADO' : 'NO ENCONTRADO'}`);
-          
-          if (byEmail) {
-            console.log(`         JobId en BD: ${byEmail.jobId}`);
-            console.log(`         Status: ${byEmail.status}`);
-            console.log(`         Email en BD: "${byEmail.recipientEmail}"`);
-          }
-          
-          // Comparar jobIds si ambos existen
-          if (byJobId && byEmail && byJobId.jobId !== byEmail.jobId) {
-            console.log(`      ⚠️  MISMATCH: JobId generado (${jobId}) vs JobId en BD (${byEmail.jobId})`);
-          }
-        }
-        
-        // Ya fue procesado por otro worker o está en proceso
+        // Ya fue procesado o está siendo procesado
         results.skipped++;
         continue;
       }
       
-      // Verificar si ya está sent (idempotencia)
+      // Verificar si ya está sent (idempotencia doble)
       if (claim.status === 'sent' || claim.status === 'delivered') {
         results.skipped++;
         continue;
@@ -346,15 +329,15 @@ async function processEmailBatch(job) {
       
     } catch (error) {
       // ========== MANEJO DE ERRORES ==========
-      console.error(`   ❌ Error procesando ${recipient.email}:`, error.message);
-      
-      // Clasificar error
       const errorType = classifyError(error);
       
       if (errorType === 'rate_limit') {
-        // Rate limit alcanzado - pausar worker temporalmente
-        const retryAfter = parseInt(error.headers?.['retry-after'] || '60');
-        await emailWorker.rateLimit(retryAfter * 1000);
+        // ⚠️ Rate limit alcanzado
+        console.warn(`\n   ⚠️  RATE LIMIT detectado en batch ${chunkIndex}`);
+        console.warn(`      Esperando 60s antes de reintentar...`);
+        
+        // Pausar procesamiento
+        await new Promise(resolve => setTimeout(resolve, 60000));
         
         // Rollback el claim para que se reintente
         await EmailSend.findOneAndUpdate(
@@ -364,12 +347,16 @@ async function processEmailBatch(job) {
               status: 'pending',
               lockedBy: null,
               lockedAt: null,
-              lastError: 'Rate limit alcanzado'
-            }
+              lastError: 'Rate limit - will retry'
+            },
+            $inc: { attempts: 1 }
           }
         );
         
-        throw error; // BullMQ reintentará el job completo
+        console.warn(`      Reintentando después de espera...\n`);
+        
+        // Re-throw para que BullMQ reintente el batch completo
+        throw error;
         
       } else if (errorType === 'fatal') {
         // Error permanente (email inválido, etc)
@@ -382,6 +369,11 @@ async function processEmailBatch(job) {
         results.failed++;
         results.errors.push({ email: recipient.email, error: error.message });
         
+        // Log solo si es el primer error
+        if (results.failed === 1) {
+          console.error(`   ❌ Error fatal: ${error.message}`);
+        }
+        
       } else {
         // Error temporal - permitir reintento
         await EmailSend.findOneAndUpdate(
@@ -392,7 +384,8 @@ async function processEmailBatch(job) {
               lockedBy: null,
               lockedAt: null,
               lastError: error.message
-            }
+            },
+            $inc: { attempts: 1 }
           }
         );
         
@@ -401,13 +394,42 @@ async function processEmailBatch(job) {
       }
     }
     
-    // Update progress
+    // Update progress cada 10 emails
     if (i % 10 === 0 && i > 0) {
       await job.updateProgress(Math.round((i / recipients.length) * 100));
     }
+    
+    // Log progreso cada 25 emails
+    if (i > 0 && i % 25 === 0) {
+      const partialDuration = ((Date.now() - startTime) / 1000).toFixed(1);
+      const partialThroughput = (results.sent / partialDuration).toFixed(1);
+      console.log(`   [${chunkIndex}] Progreso: ${i}/${recipients.length} | Sent: ${results.sent} | Throughput: ${partialThroughput}/s`);
+    }
   }
   
-  console.log(`   ✅ Batch ${chunkIndex} terminado: ${results.sent} sent, ${results.skipped} skipped, ${results.failed} failed\n`);
+  // ✅ Logging detallado de finalización
+  const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+  const throughput = (results.sent / duration).toFixed(1);
+  const successRate = ((results.sent / recipients.length) * 100).toFixed(1);
+  
+  console.log(`\n   ✅ Batch ${chunkIndex} completado:`);
+  console.log(`      Sent: ${results.sent} | Skipped: ${results.skipped} | Failed: ${results.failed}`);
+  console.log(`      Duration: ${duration}s | Throughput: ${throughput} emails/s`);
+  console.log(`      Success rate: ${successRate}%`);
+  
+  if (results.errors.length > 0 && results.errors.length <= 5) {
+    console.log(`      Errores: ${results.errors.length}`);
+    results.errors.forEach(err => {
+      console.log(`        - ${err.email}: ${err.error.substring(0, 50)}`);
+    });
+  } else if (results.errors.length > 5) {
+    console.log(`      Errores: ${results.errors.length} (mostrando primeros 3)`);
+    results.errors.slice(0, 3).forEach(err => {
+      console.log(`        - ${err.email}: ${err.error.substring(0, 50)}`);
+    });
+  }
+  
+  console.log(`════════════════════════════════════════════\n`);
   
   return results;
 }
@@ -420,7 +442,7 @@ function classifyError(error) {
   const statusCode = error.statusCode || error.status;
   
   // Rate limit
-  if (statusCode === 429 || message.includes('rate_limit') || message.includes('too many requests')) {
+  if (statusCode === 429 || message.includes('rate_limit') || message.toLowerCase().includes('too many requests')) {
     return 'rate_limit';
   }
   
@@ -430,7 +452,7 @@ function classifyError(error) {
   }
   
   // Email inválido
-  if (message.includes('invalid email') || message.includes('invalid recipient')) {
+  if (message.toLowerCase().includes('invalid email') || message.toLowerCase().includes('invalid recipient')) {
     return 'fatal';
   }
   
@@ -457,7 +479,9 @@ async function addCampaignToQueue(recipients, campaignId) {
     throw new Error('Redis queue no disponible. Verifica REDIS_URL.');
   }
   
-  console.log('\n📥 ════════ AGREGANDO CAMPAÑA A COLA ════════');
+  console.log('╔════════════════════════════════════════════════╗');
+  console.log('║  📥 AGREGANDO CAMPAÑA A COLA (MODO ESTABLE)   ║');
+  console.log('╚════════════════════════════════════════════════╝');
   console.log(`   Total recipients: ${recipients.length.toLocaleString()}`);
   console.log(`   Batch size: ${RESEND_CONFIG.BATCH_SIZE}`);
   
@@ -467,10 +491,14 @@ async function addCampaignToQueue(recipients, campaignId) {
     chunks.push(recipients.slice(i, i + RESEND_CONFIG.BATCH_SIZE));
   }
   
+  const estimatedSeconds = Math.ceil(recipients.length / (RESEND_CONFIG.BATCH_SIZE * RESEND_CONFIG.RATE_LIMIT_PER_SECOND));
+  const estimatedMinutes = Math.ceil(estimatedSeconds / 60);
+  
   console.log(`   Total batches: ${chunks.length}`);
   console.log(`   Velocidad estimada: ${RESEND_CONFIG.BATCH_SIZE * RESEND_CONFIG.RATE_LIMIT_PER_SECOND} emails/s`);
-  console.log(`   Tiempo estimado: ~${Math.ceil(recipients.length / (RESEND_CONFIG.BATCH_SIZE * RESEND_CONFIG.RATE_LIMIT_PER_SECOND))} segundos`);
-  console.log('═══════════════════════════════════════════════\n');
+  console.log(`   Tiempo estimado: ${estimatedMinutes > 1 ? estimatedMinutes + ' minutos' : estimatedSeconds + ' segundos'}`);
+  console.log(`   Modo: STABLE (reliability > speed)`);
+  console.log('════════════════════════════════════════════════\n');
   
   // Crear jobs para cada chunk
   const jobs = chunks.map((chunk, index) => ({
@@ -501,7 +529,7 @@ async function addCampaignToQueue(recipients, campaignId) {
     totalEmails: recipients.length,
     batchSize: RESEND_CONFIG.BATCH_SIZE,
     jobIds: addedJobs.map(j => j.id),
-    estimatedSeconds: Math.ceil(recipients.length / (RESEND_CONFIG.BATCH_SIZE * RESEND_CONFIG.RATE_LIMIT_PER_SECOND))
+    estimatedSeconds
   };
 }
 
@@ -554,13 +582,14 @@ async function checkAndFinalizeCampaign(campaignId) {
       await campaign.save();
       
       console.log('\n╔═══════════════════════════════════════════╗');
-      console.log('║  🎉 CAMPAÑA COMPLETADA                    ║');
+      console.log('║  🎉 CAMPAÑA COMPLETADA EXITOSAMENTE       ║');
       console.log('╚═══════════════════════════════════════════╝');
       console.log(`   Campaña: ${campaign.name}`);
-      console.log(`   Total enviados: ${emailSendStats.sent}`);
-      console.log(`   Total fallidos: ${emailSendStats.failed + emailSendStats.bounced}`);
+      console.log(`   Total enviados: ${emailSendStats.sent.toLocaleString()}`);
+      console.log(`   Total fallidos: ${(emailSendStats.failed + emailSendStats.bounced).toLocaleString()}`);
+      console.log(`   Success rate: ${((emailSendStats.sent / totalRecipients) * 100).toFixed(1)}%`);
       console.log(`   Status: sent`);
-      console.log(`   Completada: ${campaign.sentAt}`);
+      console.log(`   Completada: ${campaign.sentAt.toISOString()}`);
       console.log('═══════════════════════════════════════════\n');
       
       return true;
@@ -767,7 +796,7 @@ module.exports = {
   isAvailable: () => emailQueue && isQueueReady,
   getConfig: () => RESEND_CONFIG,
   
-  // Para testing
+  // ✅ Exportar para testing y uso en controller
   generateJobId,
   generateBatchJobId
 };
