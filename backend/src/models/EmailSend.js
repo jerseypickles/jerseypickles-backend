@@ -295,7 +295,7 @@ emailSendSchema.statics.recoverExpiredLocks = async function() {
  */
 emailSendSchema.statics.getCampaignStats = async function(campaignId) {
   const pipeline = [
-    { $match: { campaignId: mongoose.Types.ObjectId(campaignId) } },
+    { $match: { campaignId: new mongoose.Types.ObjectId(campaignId) } },
     {
       $group: {
         _id: '$status',
