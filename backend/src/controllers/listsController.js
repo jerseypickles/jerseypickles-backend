@@ -1,4 +1,4 @@
-// backend/src/controllers/listsController.js
+// backend/src/controllers/listsController.js - CON BOUNCE MANAGEMENT
 const List = require('../models/List');
 const Customer = require('../models/Customer');
 const Campaign = require('../models/Campaign');
@@ -8,8 +8,8 @@ const { Readable } = require('stream');
 
 class ListsController {
   
-  // Listar todas las listas - ✅ RENOMBRADO
-  async getAll(req, res) {  // ← ERA "list", ahora "getAll"
+  // Listar todas las listas
+  async getAll(req, res) {
     try {
       const { 
         page = 1, 
@@ -26,7 +26,7 @@ class ListsController {
         ];
       }
       
-      const lists = await List.find(query)  // ← Ahora funciona
+      const lists = await List.find(query)
         .sort({ createdAt: -1 })
         .limit(limit * 1)
         .skip((page - 1) * limit)
@@ -272,7 +272,6 @@ class ListsController {
       const { page = 1, limit = 50 } = req.query;
       const skip = (parseInt(page) - 1) * parseInt(limit);
       
-      // Obtener la lista sin populate
       const list = await List.findById(req.params.id);
       
       if (!list) {
@@ -286,7 +285,7 @@ class ListsController {
       const members = await Customer.find({
         _id: { $in: memberIdsPage }
       })
-      .select('email firstName lastName phone createdAt')
+      .select('email firstName lastName phone emailStatus bounceInfo createdAt')
       .lean();
       
       // Mantener el orden original del array
@@ -305,6 +304,219 @@ class ListsController {
       
     } catch (error) {
       console.error('Error obteniendo miembros:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // ==================== ✅ NUEVO: BOUNCE MANAGEMENT ====================
+
+  // GET /api/lists/:id/health - Ver salud de la lista
+  async getHealth(req, res) {
+    try {
+      const { id } = req.params;
+      
+      const list = await List.findById(id);
+      
+      if (!list) {
+        return res.status(404).json({ error: 'Lista no encontrada' });
+      }
+      
+      console.log(`📊 Analizando salud de lista: ${list.name}`);
+      
+      // Obtener stats de los miembros
+      const memberStats = await Customer.aggregate([
+        { $match: { _id: { $in: list.members } } },
+        {
+          $group: {
+            _id: '$emailStatus',
+            count: { $sum: 1 }
+          }
+        }
+      ]);
+      
+      const bouncedCount = await Customer.countDocuments({
+        _id: { $in: list.members },
+        'bounceInfo.isBounced': true
+      });
+      
+      const hardBounces = await Customer.countDocuments({
+        _id: { $in: list.members },
+        'bounceInfo.bounceType': 'hard'
+      });
+      
+      const softBounces = await Customer.countDocuments({
+        _id: { $in: list.members },
+        'bounceInfo.bounceType': 'soft'
+      });
+      
+      const complainedCount = await Customer.countDocuments({
+        _id: { $in: list.members },
+        emailStatus: 'complained'
+      });
+      
+      const unsubscribedCount = await Customer.countDocuments({
+        _id: { $in: list.members },
+        emailStatus: 'unsubscribed'
+      });
+      
+      const activeCount = await Customer.countDocuments({
+        _id: { $in: list.members },
+        emailStatus: 'active',
+        'bounceInfo.isBounced': false
+      });
+      
+      const healthScore = list.memberCount > 0
+        ? ((activeCount / list.memberCount) * 100).toFixed(1)
+        : 100;
+      
+      console.log(`✅ Salud de lista: ${healthScore}%`);
+      
+      res.json({
+        success: true,
+        listId: list._id,
+        listName: list.name,
+        totalMembers: list.memberCount,
+        membersByStatus: memberStats,
+        bounces: {
+          total: bouncedCount,
+          hard: hardBounces,
+          soft: softBounces,
+          percentage: list.memberCount > 0 
+            ? ((bouncedCount / list.memberCount) * 100).toFixed(1) 
+            : 0
+        },
+        complained: complainedCount,
+        unsubscribed: unsubscribedCount,
+        active: activeCount,
+        healthScore: parseFloat(healthScore),
+        recommendation: 
+          healthScore > 95 ? 'Excelente - lista muy saludable' :
+          healthScore > 90 ? 'Muy buena - mantener monitoreo' : 
+          healthScore > 75 ? 'Buena - considerar limpieza preventiva' :
+          healthScore > 50 ? 'Regular - requiere limpieza' :
+          'Crítica - limpieza urgente requerida'
+      });
+      
+    } catch (error) {
+      console.error('Error obteniendo health de lista:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // POST /api/lists/:id/auto-clean - Auto-limpiar bounced/complained
+  async autoClean(req, res) {
+    try {
+      const { id } = req.params;
+      const { dryRun = false } = req.body;
+      
+      const list = await List.findById(id);
+      
+      if (!list) {
+        return res.status(404).json({ error: 'Lista no encontrada' });
+      }
+      
+      console.log(`🧹 ${dryRun ? 'Simulando' : 'Ejecutando'} limpieza de: ${list.name}`);
+      
+      // Encontrar miembros bounced y complained
+      const badMembers = await Customer.find({
+        _id: { $in: list.members },
+        $or: [
+          { 'bounceInfo.isBounced': true },
+          { emailStatus: 'bounced' },
+          { emailStatus: 'complained' }
+        ]
+      }).select('_id email bounceInfo emailStatus');
+      
+      console.log(`🔍 Encontrados ${badMembers.length} miembros para remover`);
+      
+      if (dryRun) {
+        return res.json({
+          success: true,
+          dryRun: true,
+          listName: list.name,
+          currentMembers: list.memberCount,
+          toRemove: badMembers.length,
+          afterClean: list.memberCount - badMembers.length,
+          members: badMembers.map(m => ({
+            email: m.email,
+            status: m.emailStatus,
+            bounceType: m.bounceInfo?.bounceType,
+            lastBounce: m.bounceInfo?.lastBounceDate
+          }))
+        });
+      }
+      
+      // Ejecutar limpieza real
+      const idsToRemove = badMembers.map(m => m._id);
+      
+      list.members = list.members.filter(
+        memberId => !idsToRemove.some(id => id.equals(memberId))
+      );
+      
+      list.memberCount = list.members.length;
+      await list.save();
+      
+      console.log(`✅ Limpieza completada: ${badMembers.length} removidos`);
+      
+      res.json({
+        success: true,
+        listName: list.name,
+        removed: badMembers.length,
+        currentMembers: list.memberCount,
+        removedEmails: badMembers.map(m => ({
+          email: m.email,
+          status: m.emailStatus,
+          bounceType: m.bounceInfo?.bounceType
+        }))
+      });
+      
+    } catch (error) {
+      console.error('Error auto-cleaning lista:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // GET /api/lists/:id/bounced - Listar emails bounced
+  async getBounced(req, res) {
+    try {
+      const { id } = req.params;
+      
+      const list = await List.findById(id);
+      
+      if (!list) {
+        return res.status(404).json({ error: 'Lista no encontrada' });
+      }
+      
+      const bouncedMembers = await Customer.find({
+        _id: { $in: list.members },
+        $or: [
+          { 'bounceInfo.isBounced': true },
+          { emailStatus: 'bounced' }
+        ]
+      })
+      .select('email firstName lastName bounceInfo emailStatus createdAt')
+      .sort({ 'bounceInfo.lastBounceDate': -1 });
+      
+      res.json({
+        success: true,
+        listName: list.name,
+        totalBounced: bouncedMembers.length,
+        members: bouncedMembers.map(m => ({
+          id: m._id,
+          email: m.email,
+          name: m.firstName || m.lastName 
+            ? `${m.firstName || ''} ${m.lastName || ''}`.trim() 
+            : null,
+          bounceType: m.bounceInfo?.bounceType,
+          bounceReason: m.bounceInfo?.bounceReason,
+          bounceCount: m.bounceInfo?.bounceCount,
+          lastBounceDate: m.bounceInfo?.lastBounceDate,
+          status: m.emailStatus
+        }))
+      });
+      
+    } catch (error) {
+      console.error('Error obteniendo bounced de lista:', error);
       res.status(500).json({ error: error.message });
     }
   }
@@ -343,7 +555,7 @@ class ListsController {
         });
       }
       
-      // Detectar columnas de email (case-insensitive y variaciones)
+      // Detectar columnas de email
       const firstRow = rows[0];
       const emailColumn = Object.keys(firstRow).find(key => 
         /^e-?mail$/i.test(key.trim()) || /^correo$/i.test(key.trim())
@@ -357,9 +569,8 @@ class ListsController {
       }
       
       console.log(`✅ Columna de email detectada: "${emailColumn}"`);
-      console.log(`📋 Columnas disponibles: ${Object.keys(firstRow).join(', ')}`);
       
-      // Función helper para buscar columnas con variaciones
+      // Helper para buscar columnas
       const findColumn = (row, variations) => {
         const key = Object.keys(row).find(k => 
           variations.some(v => new RegExp(`^${v}$`, 'i').test(k.trim()))
@@ -367,7 +578,7 @@ class ListsController {
         return key ? row[key] : '';
       };
       
-      // Procesar filas y crear/encontrar customers
+      // Procesar filas
       const customerIds = [];
       const emailsImported = [];
       const stats = {
@@ -380,7 +591,6 @@ class ListsController {
       
       for (const row of rows) {
         try {
-          // Buscar email con variaciones
           const email = row[emailColumn]?.trim();
           
           if (!email) {
@@ -388,14 +598,12 @@ class ListsController {
             continue;
           }
           
-          // Validar formato de email básico
           if (!email.includes('@') || !email.includes('.')) {
             console.log(`⚠️  Email inválido: ${email}`);
             stats.errors++;
             continue;
           }
           
-          // Buscar otros campos opcionales con variaciones
           const firstName = findColumn(row, [
             'firstName', 'first_name', 'FirstName', 'First Name', 
             'nombre', 'Nombre', 'name', 'Name'
@@ -411,26 +619,22 @@ class ListsController {
             'Telefono', 'Teléfono', 'mobile', 'cel', 'celular'
           ]);
           
-          // Buscar o crear customer
           let customer = await Customer.findOne({ 
             email: email.toLowerCase().trim() 
           });
           
           if (!customer) {
-            const customerData = {
+            customer = await Customer.create({
               email: email.toLowerCase().trim(),
               firstName: firstName?.trim() || '',
               lastName: lastName?.trim() || '',
               phone: phone?.trim() || null,
               source: 'csv-import',
               tags: ['imported-from-csv']
-            };
-            
-            customer = await Customer.create(customerData);
+            });
             stats.created++;
             console.log(`✨ Cliente creado: ${email}`);
           } else {
-            // Actualizar campos si están vacíos y vienen en el CSV
             let updated = false;
             if (!customer.firstName && firstName) {
               customer.firstName = firstName.trim();
@@ -445,7 +649,6 @@ class ListsController {
               updated = true;
             }
             
-            // Agregar tag si no lo tiene
             if (!customer.tags) customer.tags = [];
             if (!customer.tags.includes('imported-from-csv')) {
               customer.tags.push('imported-from-csv');
@@ -475,7 +678,7 @@ class ListsController {
       console.log(`   - Creados: ${stats.created}`);
       console.log(`   - Encontrados: ${stats.found}`);
       console.log(`   - Errores: ${stats.errors}`);
-      console.log(`   - Saltados (sin email): ${stats.skipped}`);
+      console.log(`   - Saltados: ${stats.skipped}`);
       
       if (customerIds.length === 0) {
         return res.status(400).json({ 
@@ -484,15 +687,12 @@ class ListsController {
         });
       }
       
-      // Crear o actualizar lista
       let list = await List.findOne({ name });
       
       if (list) {
-        // Actualizar lista existente
         await list.addMembers(customerIds);
-        console.log(`🔄 Lista actualizada: ${list.name} (${list.memberCount} miembros)`);
+        console.log(`🔄 Lista actualizada: ${list.name}`);
       } else {
-        // Crear nueva lista
         list = await List.create({
           name,
           description: description || `Importada desde CSV el ${new Date().toLocaleDateString()}`,
@@ -502,7 +702,7 @@ class ListsController {
         });
         
         await list.addMembers(customerIds);
-        console.log(`✅ Lista creada: ${list.name} (${list.memberCount} miembros)\n`);
+        console.log(`✅ Lista creada: ${list.name}\n`);
       }
       
       res.json({
@@ -523,7 +723,6 @@ class ListsController {
 
   // ==================== ANÁLISIS DE ENGAGEMENT ====================
 
-  // Analizar engagement de los miembros de una lista
   async analyzeEngagement(req, res) {
     try {
       const list = await List.findById(req.params.id);
@@ -534,24 +733,22 @@ class ListsController {
       
       console.log(`📊 Analizando engagement de lista: ${list.name}`);
       
-      // Obtener todas las campañas enviadas a esta lista
       const campaigns = await Campaign.find({
         targetType: 'list',
         list: list._id,
         status: 'sent'
       }).select('_id name sentAt');
       
-        if (campaigns.length === 0) {
+      if (campaigns.length === 0) {
         return res.json({
-            list: {
+          list: {
             id: list._id,
             name: list.name,
             memberCount: list.memberCount
-            },
-            campaignsSent: 0,
-            message: 'No hay campañas enviadas a esta lista aún',
-            // ✅ AGREGAR ESTO:
-            stats: {
+          },
+          campaignsSent: 0,
+          message: 'No hay campañas enviadas a esta lista aún',
+          stats: {
             total: list.memberCount,
             highlyEngaged: 0,
             engaged: 0,
@@ -560,26 +757,22 @@ class ListsController {
             bounced: 0,
             neverSent: list.memberCount,
             engagedPercent: 0
-            },
-            members: []
+          },
+          members: []
         });
-        }
+      }
       
-      console.log(`📧 Analizando ${campaigns.length} campañas enviadas`);
+      console.log(`📧 Analizando ${campaigns.length} campañas`);
       
       const campaignIds = campaigns.map(c => c._id);
-      
-      // Obtener todos los eventos de estas campañas
       const events = await EmailEvent.find({
         campaign: { $in: campaignIds }
       }).populate('customer', 'email firstName lastName');
       
       console.log(`📈 ${events.length} eventos encontrados`);
       
-      // Analizar engagement por customer
       const memberEngagement = {};
       
-      // Inicializar todos los miembros de la lista
       for (const memberId of list.members) {
         memberEngagement[memberId.toString()] = {
           customerId: memberId,
@@ -593,7 +786,6 @@ class ListsController {
         };
       }
       
-      // Contar eventos por customer - ✅ VALIDACIÓN SEGURA
       const validEvents = events.filter(event => 
         event.customer && event.customer._id
       );
@@ -635,7 +827,6 @@ class ListsController {
         }
       });
       
-      // Cargar información de customers
       const customerIds = Object.keys(memberEngagement);
       const customers = await Customer.find({
         _id: { $in: customerIds }
@@ -646,17 +837,14 @@ class ListsController {
         customersMap[c._id.toString()] = c;
       });
       
-      // Calcular engagement score y clasificar
       const members = Object.values(memberEngagement).map(engagement => {
         const customer = customersMap[engagement.customerId.toString()];
         
         if (!customer) return null;
         
-        // Calcular score: opens (5pts) + clicks (10pts) - bounces (20pts)
         const score = (engagement.opens * 5) + (engagement.clicks * 10) - (engagement.bounces * 20);
         engagement.engagementScore = score;
         
-        // Clasificar engagement
         if (engagement.bounces > 0) {
           engagement.status = 'bounced';
         } else if (engagement.campaignsSent === 0) {
@@ -671,7 +859,6 @@ class ListsController {
           engagement.status = 'low-engagement';
         }
         
-        // Calcular open rate
         engagement.openRate = engagement.campaignsSent > 0 
           ? ((engagement.opens / engagement.campaignsSent) * 100).toFixed(1)
           : 0;
@@ -681,7 +868,6 @@ class ListsController {
         return engagement;
       }).filter(Boolean);
       
-      // Calcular estadísticas
       const stats = {
         total: members.length,
         highlyEngaged: members.filter(m => m.status === 'highly-engaged').length,
@@ -692,7 +878,6 @@ class ListsController {
         neverSent: members.filter(m => m.status === 'never-sent').length
       };
       
-      // Calcular porcentajes
       stats.engagedPercent = stats.total > 0 
         ? (((stats.highlyEngaged + stats.engaged) / stats.total) * 100).toFixed(1)
         : 0;
@@ -721,7 +906,7 @@ class ListsController {
     }
   }
 
-  // Limpiar miembros inactivos de una lista
+  // Limpiar miembros inactivos
   async cleanMembers(req, res) {
     try {
       const list = await List.findById(req.params.id);
@@ -746,7 +931,6 @@ class ListsController {
       if (criteria === 'custom' && req.body.customerIds) {
         customersToRemove = req.body.customerIds;
       } else {
-        // Obtener análisis de engagement
         const campaigns = await Campaign.find({
           targetType: 'list',
           list: list._id,
@@ -764,7 +948,6 @@ class ListsController {
           campaign: { $in: campaignIds }
         });
         
-        // Analizar por customer
         const customerActivity = {};
         
         events.forEach(event => {
@@ -795,7 +978,6 @@ class ListsController {
           }
         });
         
-        // Filtrar según criterio
         const now = new Date();
         const ninetyDaysAgo = new Date(now.getTime() - (90 * 24 * 60 * 60 * 1000));
         
@@ -839,7 +1021,6 @@ class ListsController {
       
       console.log(`🔍 Encontrados ${customersToRemove.length} miembros para remover`);
       
-      // Si es dry run, solo retornar la simulación
       if (dryRun) {
         const customersInfo = await Customer.find({
           _id: { $in: customersToRemove }
@@ -855,7 +1036,6 @@ class ListsController {
         });
       }
       
-      // Ejecutar limpieza real
       const originalCount = list.memberCount;
       
       for (const customerId of customersToRemove) {
