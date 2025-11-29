@@ -311,97 +311,108 @@ class ListsController {
   // ==================== ✅ NUEVO: BOUNCE MANAGEMENT ====================
 
   // GET /api/lists/:id/health - Ver salud de la lista
-  async getHealth(req, res) {
-    try {
-      const { id } = req.params;
-      
-      const list = await List.findById(id);
-      
-      if (!list) {
-        return res.status(404).json({ error: 'Lista no encontrada' });
-      }
-      
-      console.log(`📊 Analizando salud de lista: ${list.name}`);
-      
-      // Obtener stats de los miembros
-      const memberStats = await Customer.aggregate([
-        { $match: { _id: { $in: list.members } } },
-        {
-          $group: {
-            _id: '$emailStatus',
-            count: { $sum: 1 }
-          }
-        }
-      ]);
-      
-      const bouncedCount = await Customer.countDocuments({
-        _id: { $in: list.members },
-        'bounceInfo.isBounced': true
-      });
-      
-      const hardBounces = await Customer.countDocuments({
-        _id: { $in: list.members },
-        'bounceInfo.bounceType': 'hard'
-      });
-      
-      const softBounces = await Customer.countDocuments({
-        _id: { $in: list.members },
-        'bounceInfo.bounceType': 'soft'
-      });
-      
-      const complainedCount = await Customer.countDocuments({
-        _id: { $in: list.members },
-        emailStatus: 'complained'
-      });
-      
-      const unsubscribedCount = await Customer.countDocuments({
-        _id: { $in: list.members },
-        emailStatus: 'unsubscribed'
-      });
-      
-      const activeCount = await Customer.countDocuments({
-        _id: { $in: list.members },
-        emailStatus: 'active',
-        'bounceInfo.isBounced': false
-      });
-      
-      const healthScore = list.memberCount > 0
-        ? ((activeCount / list.memberCount) * 100).toFixed(1)
-        : 100;
-      
-      console.log(`✅ Salud de lista: ${healthScore}%`);
-      
-      res.json({
-        success: true,
-        listId: list._id,
-        listName: list.name,
-        totalMembers: list.memberCount,
-        membersByStatus: memberStats,
-        bounces: {
-          total: bouncedCount,
-          hard: hardBounces,
-          soft: softBounces,
-          percentage: list.memberCount > 0 
-            ? ((bouncedCount / list.memberCount) * 100).toFixed(1) 
-            : 0
-        },
-        complained: complainedCount,
-        unsubscribed: unsubscribedCount,
-        active: activeCount,
-        healthScore: parseFloat(healthScore),
-        recommendation: 
-          healthScore > 95 ? 'Excelente - lista muy saludable' :
-          healthScore > 90 ? 'Muy buena - mantener monitoreo' : 
-          healthScore > 75 ? 'Buena - considerar limpieza preventiva' :
-          healthScore > 50 ? 'Regular - requiere limpieza' :
-          'Crítica - limpieza urgente requerida'
-      });
-      
-    } catch (error) {
-      console.error('Error obteniendo health de lista:', error);
-      res.status(500).json({ error: error.message });
+// GET /api/lists/:id/health - Ver salud de la lista
+async getHealth(req, res) {
+  try {
+    const { id } = req.params;
+    
+    const list = await List.findById(id);
+    
+    if (!list) {
+      return res.status(404).json({ error: 'Lista no encontrada' });
     }
+    
+    console.log(`📊 Analizando salud de lista: ${list.name}`);
+    
+    // Obtener stats de los miembros
+    const memberStats = await Customer.aggregate([
+      { $match: { _id: { $in: list.members } } },
+      {
+        $group: {
+          _id: '$emailStatus',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+    
+    // ✅ FIX: Convertir array a objeto
+    const membersByStatus = memberStats.reduce((acc, stat) => {
+      acc[stat._id || 'active'] = stat.count;
+      return acc;
+    }, { active: 0, bounced: 0, unsubscribed: 0, complained: 0 });
+    
+    const bouncedCount = await Customer.countDocuments({
+      _id: { $in: list.members },
+      'bounceInfo.isBounced': true
+    });
+    
+    const hardBounces = await Customer.countDocuments({
+      _id: { $in: list.members },
+      'bounceInfo.bounceType': 'hard'
+    });
+    
+    const softBounces = await Customer.countDocuments({
+      _id: { $in: list.members },
+      'bounceInfo.bounceType': 'soft'
+    });
+    
+    const complainedCount = await Customer.countDocuments({
+      _id: { $in: list.members },
+      emailStatus: 'complained'
+    });
+    
+    const unsubscribedCount = await Customer.countDocuments({
+      _id: { $in: list.members },
+      emailStatus: 'unsubscribed'
+    });
+    
+    const activeCount = await Customer.countDocuments({
+      _id: { $in: list.members },
+      emailStatus: 'active',
+      'bounceInfo.isBounced': false
+    });
+    
+    const healthScore = list.memberCount > 0
+      ? ((activeCount / list.memberCount) * 100).toFixed(1)
+      : 100;
+    
+    console.log(`✅ Salud de lista: ${healthScore}%`);
+    console.log(`   - Active: ${activeCount}`);
+    console.log(`   - Bounced: ${bouncedCount}`);
+    console.log(`   - Soft: ${softBounces}`);
+    console.log(`   - Hard: ${hardBounces}`);
+    
+    res.json({
+      success: true,
+      listId: list._id,
+      listName: list.name,
+      totalMembers: list.memberCount,
+      membersByStatus: membersByStatus,  // ✅ USAR OBJETO CONVERTIDO
+      bounces: {
+        total: bouncedCount,
+        hard: hardBounces,
+        soft: softBounces,
+        percentage: list.memberCount > 0 
+          ? ((bouncedCount / list.memberCount) * 100).toFixed(1) 
+          : 0
+      },
+      complained: complainedCount,
+      unsubscribed: unsubscribedCount,
+      active: activeCount,
+      healthScore: parseFloat(healthScore),
+      recommendation: 
+        healthScore > 95 ? 'Excelente - lista muy saludable' :
+        healthScore > 90 ? 'Muy buena - mantener monitoreo' : 
+        healthScore > 75 ? 'Buena - considerar limpieza preventiva' :
+        healthScore > 50 ? 'Regular - requiere limpieza' :
+        'Crítica - limpieza urgente requerida'
+    });
+    
+  } catch (error) {
+    console.error('Error obteniendo health de lista:', error);
+    res.status(500).json({ error: error.message });
   }
+}
 
   // POST /api/lists/:id/auto-clean - Auto-limpiar bounced/complained
   async autoClean(req, res) {
