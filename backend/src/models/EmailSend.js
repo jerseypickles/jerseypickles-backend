@@ -1,4 +1,4 @@
-// backend/src/models/EmailSend.js
+// backend/src/models/EmailSend.js - VERSIÓN COMPLETA CON BATCH OPS
 const mongoose = require('mongoose');
 
 /**
@@ -44,7 +44,7 @@ const emailSendSchema = new mongoose.Schema({
   // ========== ESTADO DEL ENVÍO ==========
   status: {
     type: String,
-    enum: ['pending', 'processing', 'sending', 'sent', 'delivered', 'failed', 'bounced'],
+    enum: ['pending', 'processing', 'sending', 'sent', 'delivered', 'failed', 'bounced', 'skipped'],
     default: 'pending',
     index: true,
     description: `
@@ -55,6 +55,7 @@ const emailSendSchema = new mongoose.Schema({
       delivered   - Webhook confirmó entrega
       failed      - Error permanente
       bounced     - Email rebotó
+      skipped     - Saltado (bounced/unsubscribed/complained)
     `
   },
   
@@ -79,6 +80,11 @@ const emailSendSchema = new mongoose.Schema({
   },
   
   deliveredAt: {
+    type: Date,
+    default: null
+  },
+  
+  skippedAt: {
     type: Date,
     default: null
   },
@@ -174,6 +180,137 @@ emailSendSchema.methods.canRetry = function() {
 };
 
 // ========== MÉTODOS ESTÁTICOS ==========
+
+/**
+ * ✅ NUEVO: Batch Create/Update optimizado para campañas
+ * 
+ * Crea EmailSend records en batch usando bulkWrite
+ * Pre-valida duplicados para evitar errores
+ * 
+ * @param {Array} recipients - Array de { jobId, campaignId, recipientEmail, customerId }
+ * @returns {Object} { created, duplicates, errors }
+ */
+emailSendSchema.statics.bulkCreateOrUpdate = async function(recipients) {
+  if (!Array.isArray(recipients) || recipients.length === 0) {
+    throw new Error('recipients debe ser un array no vacío');
+  }
+
+  const results = {
+    created: 0,
+    duplicates: 0,
+    errors: 0,
+    details: []
+  };
+
+  // ========== PASO 1: PRE-VALIDACIÓN EN MEMORIA ==========
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const validRecipients = [];
+  const seenJobIds = new Set();
+  const seenEmailKeys = new Set();
+
+  for (const recipient of recipients) {
+    // Validar campos requeridos
+    if (!recipient.jobId || !recipient.campaignId || !recipient.recipientEmail) {
+      results.errors++;
+      results.details.push({
+        email: recipient.recipientEmail,
+        error: 'Missing required fields',
+        type: 'validation'
+      });
+      continue;
+    }
+
+    // Validar formato de email
+    if (!emailRegex.test(recipient.recipientEmail)) {
+      results.errors++;
+      results.details.push({
+        email: recipient.recipientEmail,
+        error: 'Invalid email format',
+        type: 'validation'
+      });
+      continue;
+    }
+
+    // Deduplicar en memoria (mismo jobId)
+    if (seenJobIds.has(recipient.jobId)) {
+      results.duplicates++;
+      results.details.push({
+        email: recipient.recipientEmail,
+        jobId: recipient.jobId,
+        type: 'duplicate_jobId'
+      });
+      continue;
+    }
+
+    // Deduplicar por email+campaña
+    const emailKey = `${recipient.campaignId}:${recipient.recipientEmail.toLowerCase().trim()}`;
+    if (seenEmailKeys.has(emailKey)) {
+      results.duplicates++;
+      results.details.push({
+        email: recipient.recipientEmail,
+        type: 'duplicate_email_campaign'
+      });
+      continue;
+    }
+
+    seenJobIds.add(recipient.jobId);
+    seenEmailKeys.add(emailKey);
+    validRecipients.push(recipient);
+  }
+
+  if (validRecipients.length === 0) {
+    return results;
+  }
+
+  // ========== PASO 2: BULK WRITE A MONGODB ==========
+  const bulkOps = validRecipients.map(recipient => ({
+    updateOne: {
+      filter: {
+        campaignId: recipient.campaignId,
+        recipientEmail: recipient.recipientEmail.toLowerCase().trim()
+      },
+      update: {
+        $setOnInsert: {
+          jobId: recipient.jobId,
+          campaignId: recipient.campaignId,
+          recipientEmail: recipient.recipientEmail.toLowerCase().trim(),
+          customerId: recipient.customerId || null,
+          status: 'pending',
+          attempts: 0,
+          createdAt: new Date()
+        }
+      },
+      upsert: true
+    }
+  }));
+
+  try {
+    const bulkResult = await this.bulkWrite(bulkOps, {
+      ordered: false // Continuar aunque haya errores
+    });
+
+    results.created = bulkResult.upsertedCount || 0;
+
+    // Los que no fueron insertados son duplicados en BD
+    const notInserted = validRecipients.length - results.created;
+    if (notInserted > 0) {
+      results.duplicates += notInserted;
+    }
+
+  } catch (error) {
+    // Manejar errores de duplicados (código 11000)
+    if (error.code === 11000 || error.name === 'BulkWriteError') {
+      // Algunos se insertaron, otros fallaron por duplicados
+      const writeErrors = error.writeErrors || [];
+      results.errors += writeErrors.filter(e => e.code !== 11000).length;
+      results.duplicates += writeErrors.filter(e => e.code === 11000).length;
+    } else {
+      throw error;
+    }
+  }
+
+  return results;
+};
 
 /**
  * Atomic claim de un email para procesar
@@ -314,7 +451,8 @@ emailSendSchema.statics.getCampaignStats = async function(campaignId) {
     sent: 0,
     delivered: 0,
     failed: 0,
-    bounced: 0
+    bounced: 0,
+    skipped: 0
   };
   
   results.forEach(r => {
