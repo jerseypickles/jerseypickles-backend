@@ -49,8 +49,7 @@ const customerSchema = new mongoose.Schema({
   // Código de descuento del popup
   popupDiscountCode: {
     type: String,
-    sparse: true,
-    index: true
+    sparse: true  // Solo sparse, sin index
   },
   
   // Segmentación
