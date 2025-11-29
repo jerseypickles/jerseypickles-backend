@@ -1,4 +1,4 @@
-// backend/src/models/Customer.js (VERSIÓN CON BOUNCE MANAGEMENT)
+// backend/src/models/Customer.js (VERSIÓN COMPLETA CON BOUNCE MANAGEMENT FIXED)
 const mongoose = require('mongoose');
 
 const customerSchema = new mongoose.Schema({
@@ -49,7 +49,7 @@ const customerSchema = new mongoose.Schema({
   // Código de descuento del popup
   popupDiscountCode: {
     type: String,
-    sparse: true  // Solo sparse, sin index
+    sparse: true
   },
   
   // Segmentación
@@ -70,7 +70,7 @@ const customerSchema = new mongoose.Schema({
     lastClickedAt: Date
   },
   
-  // ✅ NUEVO: Estado del email para bounce management
+  // ✅ Estado del email para bounce management
   emailStatus: {
     type: String,
     enum: ['active', 'bounced', 'unsubscribed', 'complained'],
@@ -78,7 +78,7 @@ const customerSchema = new mongoose.Schema({
     index: true
   },
   
-  // ✅ NUEVO: Información detallada de bounces
+  // ✅ Información detallada de bounces
   bounceInfo: {
     isBounced: { type: Boolean, default: false, index: true },
     bounceType: { 
@@ -137,7 +137,7 @@ customerSchema.index({ acceptsMarketing: 1, 'emailStats.sent': 1 });
 customerSchema.index({ popupDiscountCode: 1 });
 customerSchema.index({ source: 1 });
 
-// ✅ NUEVO: Índices para bounce management
+// ✅ Índices para bounce management
 customerSchema.index({ emailStatus: 1, 'bounceInfo.isBounced': 1 });
 customerSchema.index({ 'bounceInfo.bounceType': 1 });
 customerSchema.index({ 'bounceInfo.lastBounceDate': -1 });
@@ -173,70 +173,87 @@ customerSchema.methods.matchesSegment = function(segment) {
   return false;
 };
 
-// ✅ NUEVO: Marcar customer como bounced
-customerSchema.methods.markAsBounced = async function(bounceType, reason, campaignId) {
-  console.log(`\n🚫 Procesando bounce para: ${this.email}`);
-  console.log(`   Tipo: ${bounceType}`);
-  console.log(`   Razón: ${reason}`);
-  console.log(`   Bounce count actual: ${this.bounceInfo.bounceCount}`);
+// ✅ FIXED: Marcar customer como bounced
+customerSchema.methods.markAsBounced = async function(bounceType = 'soft', reason = '', campaignId = null) {
+  console.log(`\n🔴 Marcando bounce: ${this.email}`);
+  console.log(`   Tipo recibido: ${bounceType}`);
+  console.log(`   Bounce count actual: ${this.bounceInfo.bounceCount || 0}`);
+  
+  // Inicializar bounceInfo si no existe
+  if (!this.bounceInfo) {
+    this.bounceInfo = {
+      isBounced: false,
+      bounceType: null,
+      bounceCount: 0,
+      lastBounceDate: null,
+      bounceReason: null,
+      bouncedCampaignId: null
+    };
+  }
   
   // Incrementar contador
-  this.bounceInfo.bounceCount += 1;
+  this.bounceInfo.bounceCount = (this.bounceInfo.bounceCount || 0) + 1;
   this.bounceInfo.lastBounceDate = new Date();
   this.bounceInfo.bounceReason = reason;
+  this.bounceInfo.bounceType = bounceType;
   
   if (campaignId) {
     this.bounceInfo.bouncedCampaignId = campaignId;
   }
   
-  // Determinar si es hard bounce
-  const isHardBounce = bounceType === 'hard' || this.bounceInfo.bounceCount >= 3;
+  // ✅ CRÍTICO: SIEMPRE marcar isBounced = true
+  this.bounceInfo.isBounced = true;
   
-  if (isHardBounce) {
-    console.log(`   ⚠️  HARD BOUNCE detectado (count: ${this.bounceInfo.bounceCount})`);
-    
-    this.emailStatus = 'bounced';
-    this.bounceInfo.isBounced = true;
+  // ✅ CRÍTICO: SIEMPRE actualizar emailStatus
+  this.emailStatus = 'bounced';
+  
+  console.log(`   → isBounced: ${this.bounceInfo.isBounced}`);
+  console.log(`   → emailStatus: ${this.emailStatus}`);
+  console.log(`   → bounceType: ${this.bounceInfo.bounceType}`);
+  console.log(`   → bounceCount: ${this.bounceInfo.bounceCount}`);
+  
+  // Convertir soft a hard después de 3 bounces
+  if (bounceType === 'soft' && this.bounceInfo.bounceCount >= 3) {
+    console.log(`   ⚠️  CONVIRTIENDO a hard bounce (3+ soft bounces)`);
     this.bounceInfo.bounceType = 'hard';
-    
-    // ✅ Auto-remover de TODAS las listas (con manejo de errores)
+  }
+  
+  // Guardar ANTES de remover de listas
+  await this.save();
+  console.log(`✅ Customer guardado: ${this.email}`);
+  
+  // Auto-remove de listas SOLO si es hard bounce
+  if (this.bounceInfo.bounceType === 'hard') {
     try {
       // Verificar si el modelo List está registrado
-      const mongoose = require('mongoose');
       const listModelExists = mongoose.modelNames().includes('List');
       
       if (listModelExists) {
         const List = mongoose.model('List');
-        const result = await List.updateMany(
-          { members: this._id },
-          { 
-            $pull: { members: this._id },
-            $inc: { memberCount: -1 }
-          }
-        );
+        const listsWithMember = await List.find({ members: this._id });
         
-        console.log(`   ✅ Removido de ${result.modifiedCount} lista(s)`);
+        console.log(`   🗑️  Removiendo de ${listsWithMember.length} lista(s)`);
+        
+        for (const list of listsWithMember) {
+          await list.removeMember(this._id);
+        }
+        
+        console.log(`   ✅ Removido de todas las listas (hard bounce)`);
       } else {
-        console.log(`   ⚠️  Modelo List no disponible (skip auto-remove en test)`);
+        console.log(`   ℹ️  Modelo List no disponible (skip auto-remove)`);
       }
     } catch (error) {
       console.log(`   ⚠️  Error removiendo de listas: ${error.message}`);
     }
-    
-    console.log(`   🔒 Email marcado como BOUNCED permanentemente\n`);
-    
   } else {
-    // Soft bounce
-    this.bounceInfo.bounceType = 'soft';
-    console.log(`   ⚠️  Soft bounce registrado (#${this.bounceInfo.bounceCount})`);
+    console.log(`   ℹ️  Soft bounce - permanece en listas`);
     console.log(`   ℹ️  Se convertirá a hard en bounce #3\n`);
   }
   
-  await this.save();
   return this;
 };
 
-// ✅ NUEVO: Resetear bounce info (para casos especiales)
+// ✅ Resetear bounce info (para casos especiales)
 customerSchema.methods.resetBounceInfo = async function() {
   this.emailStatus = 'active';
   this.bounceInfo = {
@@ -288,7 +305,7 @@ customerSchema.statics.updateEmailStats = async function(customerId, eventType, 
   }
 };
 
-// ✅ NUEVO: Obtener todos los customers bounced
+// ✅ Obtener todos los customers bounced
 customerSchema.statics.getBounced = async function(options = {}) {
   const query = {
     'bounceInfo.isBounced': true
@@ -312,7 +329,7 @@ customerSchema.statics.getBounced = async function(options = {}) {
     .limit(options.limit || 1000);
 };
 
-// ✅ NUEVO: Obtener estadísticas globales de bounces
+// ✅ Obtener estadísticas globales de bounces
 customerSchema.statics.getBounceStats = async function() {
   const [stats] = await this.aggregate([
     {
@@ -396,19 +413,20 @@ customerSchema.statics.getBounceStats = async function() {
   };
 };
 
-// ✅ NUEVO: Obtener customers con soft bounces cercanos a convertirse en hard
+// ✅ Obtener customers con soft bounces cercanos a convertirse en hard
 customerSchema.statics.getAtRiskCustomers = async function() {
   return this.find({
     'bounceInfo.bounceType': 'soft',
     'bounceInfo.bounceCount': { $gte: 2 },
-    emailStatus: 'active'
+    'bounceInfo.isBounced': true,
+    emailStatus: 'bounced'
   })
   .select('email firstName lastName bounceInfo')
   .sort({ 'bounceInfo.bounceCount': -1 })
   .limit(100);
 };
 
-// ✅ NUEVO: Limpiar bounces antiguos (para mantenimiento)
+// ✅ Limpiar bounces antiguos (para mantenimiento)
 customerSchema.statics.cleanOldBounces = async function(daysOld = 90) {
   const cutoffDate = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000);
   
