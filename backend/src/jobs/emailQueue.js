@@ -227,38 +227,44 @@ async function initializeQueue() {
 
 /**
  * Procesa un batch de emails con logging detallado
- * Usa EmailSend model para idempotencia a nivel de BD
+ * ✅ AHORA CON FILTRADO AUTOMÁTICO DE BOUNCED EMAILS
  */
 async function processEmailBatch(job) {
   const { campaignId, recipients, chunkIndex } = job.data;
   const workerId = `worker-${process.pid}-${Date.now()}`;
   const startTime = Date.now();
   
-  // ✅ Logging detallado de inicio
+  // Logging detallado de inicio
   console.log(`\n╔════════════════════════════════════════════╗`);
   console.log(`║  📦 BATCH ${String(chunkIndex).padStart(3, '0')} - ${recipients.length} emails${' '.repeat(17)}║`);
   console.log(`╚════════════════════════════════════════════╝`);
   console.log(`   Campaign: ${campaignId}`);
   console.log(`   Worker: ${workerId}`);
   console.log(`   Started: ${new Date().toISOString()}`);
-  console.log(`   Mode: STABLE (prioridad en reliability)`);
+  console.log(`   Mode: STABLE + BOUNCE FILTER`);
   
   const results = {
     campaignId,
     chunkIndex,
     sent: 0,
     skipped: 0,
+    skippedBounced: 0,    // ✅ NUEVO: contador de bounced
+    skippedComplained: 0, // ✅ NUEVO: contador de complained
+    skippedUnsubscribed: 0, // ✅ NUEVO: contador de unsubscribed
     failed: 0,
     errors: []
   };
   
+  // ✅ NUEVO: Cargar Customer model una sola vez
+  const Customer = require('../models/Customer');
+  
   for (let i = 0; i < recipients.length; i++) {
     const recipient = recipients[i];
     
-    // ✅ Generar jobId con email normalizado (igual que controller)
+    // Generar jobId con email normalizado
     const jobId = generateJobId(campaignId, recipient.email);
     
-    // ✅ DEBUG: Solo primer email de cada batch
+    // DEBUG: Solo primer email de cada batch
     if (i === 0) {
       console.log(`\n   🔍 Verificación primer email:`);
       console.log(`      Email: "${recipient.email}"`);
@@ -266,6 +272,89 @@ async function processEmailBatch(job) {
     }
     
     try {
+      // ========== ✅ NUEVO: VERIFICAR SI EMAIL ESTÁ BOUNCED/COMPLAINED/UNSUBSCRIBED ==========
+      const customer = await Customer.findOne({ 
+        email: recipient.email.toLowerCase().trim() 
+      }).select('emailStatus bounceInfo email').lean();
+      
+      if (customer) {
+        // Verificar si está bounced
+        if (customer.emailStatus === 'bounced' || customer.bounceInfo?.isBounced === true) {
+          
+          if (i === 0 || results.skippedBounced < 3) {
+            console.log(`   ⏭️  SKIPPED (bounced): ${recipient.email}`);
+          }
+          
+          results.skippedBounced++;
+          results.skipped++;
+          
+          // Marcar en EmailSend como skipped
+          await EmailSend.findOneAndUpdate(
+            { jobId },
+            { 
+              $set: {
+                status: 'skipped',
+                lastError: `Email is bounced (${customer.bounceInfo?.bounceType || 'unknown'}) - not sending`,
+                skippedAt: new Date()
+              }
+            },
+            { upsert: true }
+          );
+          
+          continue; // ← NO enviar este email
+        }
+        
+        // Verificar si está complained (spam report)
+        if (customer.emailStatus === 'complained') {
+          
+          if (i === 0 || results.skippedComplained < 3) {
+            console.log(`   ⏭️  SKIPPED (complained): ${recipient.email}`);
+          }
+          
+          results.skippedComplained++;
+          results.skipped++;
+          
+          await EmailSend.findOneAndUpdate(
+            { jobId },
+            { 
+              $set: {
+                status: 'skipped',
+                lastError: 'Email has complained (spam report) - not sending',
+                skippedAt: new Date()
+              }
+            },
+            { upsert: true }
+          );
+          
+          continue;
+        }
+        
+        // Verificar si está unsubscribed
+        if (customer.emailStatus === 'unsubscribed') {
+          
+          if (i === 0 || results.skippedUnsubscribed < 3) {
+            console.log(`   ⏭️  SKIPPED (unsubscribed): ${recipient.email}`);
+          }
+          
+          results.skippedUnsubscribed++;
+          results.skipped++;
+          
+          await EmailSend.findOneAndUpdate(
+            { jobId },
+            { 
+              $set: {
+                status: 'skipped',
+                lastError: 'Email is unsubscribed - not sending',
+                skippedAt: new Date()
+              }
+            },
+            { upsert: true }
+          );
+          
+          continue;
+        }
+      }
+      
       // ========== PASO 1: ATOMIC CLAIM ==========
       const claim = await EmailSend.claimForProcessing(jobId, workerId);
       
@@ -314,8 +403,7 @@ async function processEmailBatch(job) {
           resendId: sendResult.id
         });
         
-        // ✅ SOLO incrementar 'sent' aquí (NO incrementar delivered)
-        // delivered se incrementará vía webhook cuando Resend confirme
+        // SOLO incrementar 'sent' aquí (NO incrementar delivered)
         await Campaign.findByIdAndUpdate(campaignId, {
           $inc: { 'stats.sent': 1 }
         });
@@ -328,18 +416,15 @@ async function processEmailBatch(job) {
       }
       
     } catch (error) {
-      // ========== MANEJO DE ERRORES ==========
+      // ========== MANEJO DE ERRORES (sin cambios) ==========
       const errorType = classifyError(error);
       
       if (errorType === 'rate_limit') {
-        // ⚠️ Rate limit alcanzado
         console.warn(`\n   ⚠️  RATE LIMIT detectado en batch ${chunkIndex}`);
         console.warn(`      Esperando 60s antes de reintentar...`);
         
-        // Pausar procesamiento
         await new Promise(resolve => setTimeout(resolve, 60000));
         
-        // Rollback el claim para que se reintente
         await EmailSend.findOneAndUpdate(
           { jobId, lockedBy: workerId },
           {
@@ -354,12 +439,9 @@ async function processEmailBatch(job) {
         );
         
         console.warn(`      Reintentando después de espera...\n`);
-        
-        // Re-throw para que BullMQ reintente el batch completo
         throw error;
         
       } else if (errorType === 'fatal') {
-        // Error permanente (email inválido, etc)
         await EmailSend.markAsFailed(jobId, workerId, error.message);
         
         await Campaign.findByIdAndUpdate(campaignId, {
@@ -369,13 +451,11 @@ async function processEmailBatch(job) {
         results.failed++;
         results.errors.push({ email: recipient.email, error: error.message });
         
-        // Log solo si es el primer error
         if (results.failed === 1) {
           console.error(`   ❌ Error fatal: ${error.message}`);
         }
         
       } else {
-        // Error temporal - permitir reintento
         await EmailSend.findOneAndUpdate(
           { jobId, lockedBy: workerId },
           {
@@ -403,17 +483,32 @@ async function processEmailBatch(job) {
     if (i > 0 && i % 25 === 0) {
       const partialDuration = ((Date.now() - startTime) / 1000).toFixed(1);
       const partialThroughput = (results.sent / partialDuration).toFixed(1);
-      console.log(`   [${chunkIndex}] Progreso: ${i}/${recipients.length} | Sent: ${results.sent} | Throughput: ${partialThroughput}/s`);
+      console.log(`   [${chunkIndex}] Progreso: ${i}/${recipients.length} | Sent: ${results.sent} | Skipped: ${results.skipped} | Throughput: ${partialThroughput}/s`);
     }
   }
   
-  // ✅ Logging detallado de finalización
+  // ✅ LOGGING MEJORADO CON BOUNCE STATS
   const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-  const throughput = (results.sent / duration).toFixed(1);
+  const throughput = results.sent > 0 ? (results.sent / duration).toFixed(1) : '0.0';
   const successRate = ((results.sent / recipients.length) * 100).toFixed(1);
   
   console.log(`\n   ✅ Batch ${chunkIndex} completado:`);
   console.log(`      Sent: ${results.sent} | Skipped: ${results.skipped} | Failed: ${results.failed}`);
+  
+  // ✅ NUEVO: Desglose de skipped
+  if (results.skippedBounced > 0 || results.skippedComplained > 0 || results.skippedUnsubscribed > 0) {
+    console.log(`      Skipped details:`);
+    if (results.skippedBounced > 0) {
+      console.log(`        - Bounced: ${results.skippedBounced}`);
+    }
+    if (results.skippedComplained > 0) {
+      console.log(`        - Complained: ${results.skippedComplained}`);
+    }
+    if (results.skippedUnsubscribed > 0) {
+      console.log(`        - Unsubscribed: ${results.skippedUnsubscribed}`);
+    }
+  }
+  
   console.log(`      Duration: ${duration}s | Throughput: ${throughput} emails/s`);
   console.log(`      Success rate: ${successRate}%`);
   
