@@ -1,4 +1,4 @@
-// backend/src/routes/webhooks.js - CORREGIDO (sin duplicados)
+// backend/src/routes/webhooks.js - CON BOUNCE MANAGEMENT AUTOMÁTICO
 const express = require('express');
 const router = express.Router();
 const webhooksController = require('../controllers/webhooksController');
@@ -16,7 +16,7 @@ router.post('/customers/update', validateShopifyWebhook, webhooksController.cust
 router.post('/orders/create', validateShopifyWebhook, webhooksController.orderCreate);
 router.post('/orders/update', validateShopifyWebhook, webhooksController.orderUpdate);
 
-// 🆕 NUEVOS WEBHOOKS PARA FLOWS
+// NUEVOS WEBHOOKS PARA FLOWS
 router.post('/orders/fulfilled', validateShopifyWebhook, webhooksController.orderFulfilled);
 router.post('/orders/cancelled', validateShopifyWebhook, webhooksController.orderCancelled);
 router.post('/orders/paid', validateShopifyWebhook, webhooksController.orderPaid);
@@ -33,12 +33,13 @@ router.post('/refunds/create', validateShopifyWebhook, webhooksController.refund
 
 // ==================== WEBHOOKS DE RESEND ====================
 /**
- * Handler de webhooks de Resend - CORREGIDO
+ * Handler de webhooks de Resend - CON BOUNCE MANAGEMENT AUTOMÁTICO
  * 
  * IMPORTANTE - Lógica de stats:
  * - 'sent' → Se incrementa en emailQueue.js worker (NO aquí)
  * - 'delivered' → Se incrementa AQUÍ vía webhook
  * - 'opened', 'clicked', etc → Se incrementan AQUÍ vía webhook
+ * - 'bounced' → ✅ AHORA auto-marca customer como bounced
  * 
  * Esto evita el doble conteo que causaba sent: 1840 con 920 recipients
  */
@@ -137,7 +138,8 @@ router.post('/resend', async (req, res) => {
             resendEventId: resendEventId,
             idempotencyKey: idempotencyKey,
             timestamp: data.created_at,
-            rawTags: data.tags
+            rawTags: data.tags,
+            bounceType: data.bounce?.type || null // ← Guardar bounce type de Resend
           }
         };
         
@@ -152,6 +154,16 @@ router.post('/resend', async (req, res) => {
         
         await EmailEvent.create(eventData);
         console.log(`   ✅ EmailEvent creado: ${eventType}`);
+        
+        // ========== 🆕 BOUNCE MANAGEMENT AUTOMÁTICO ==========
+        if (eventType === 'bounced') {
+          await handleBounce(emailAddress, data, campaignId);
+        }
+        
+        // ========== COMPLAINT MANAGEMENT ==========
+        if (eventType === 'complained') {
+          await handleComplaint(emailAddress, data, campaignId);
+        }
         
         // 2. Actualizar EmailSend status (si existe)
         if (resendEventId) {
@@ -181,12 +193,10 @@ router.post('/resend', async (req, res) => {
         }
         
         // 3. Actualizar Campaign stats
-        // ⚠️ IMPORTANTE: NO incrementar 'sent' aquí - ya se hace en el worker
         if (campaignId) {
           const statsToIncrement = {};
           
           switch (eventType) {
-            // 'sent' → NO SE INCREMENTA AQUÍ (ya se hace en emailQueue.js)
             case 'delivered':
               statsToIncrement['stats.delivered'] = 1;
               break;
@@ -279,5 +289,112 @@ router.post('/resend', async (req, res) => {
     res.status(200).json({ received: true, error: error.message });
   }
 });
+
+// ==================== 🆕 FUNCIONES DE BOUNCE MANAGEMENT ====================
+
+/**
+ * Maneja bounces automáticamente
+ * - Detecta tipo (hard/soft) desde Resend
+ * - Marca customer como bounced
+ * - Auto-remueve de listas si es hard bounce
+ */
+async function handleBounce(email, data, campaignId) {
+  try {
+    const Customer = require('../models/Customer');
+    
+    const customer = await Customer.findOne({ email });
+    
+    if (!customer) {
+      console.log(`   ⚠️  Customer no encontrado para bounce: ${email}`);
+      return;
+    }
+    
+    // ✅ DETERMINAR TIPO DE BOUNCE desde Resend
+    let bounceType = 'soft';
+    const bounceMessage = data.bounce?.message || data.bounce?.type || '';
+    
+    // Indicadores de hard bounce
+    const hardBounceIndicators = [
+      'hard',
+      'permanent',
+      'does not exist',
+      'invalid',
+      'unknown user',
+      'no such user',
+      'mailbox not found',
+      'address rejected',
+      'user unknown',
+      'domain not found',
+      'recipient address rejected'
+    ];
+    
+    const isHardBounce = hardBounceIndicators.some(indicator =>
+      bounceMessage.toLowerCase().includes(indicator)
+    );
+    
+    if (isHardBounce) {
+      bounceType = 'hard';
+    }
+    
+    console.log(`   🚫 Bounce detectado: ${email}`);
+    console.log(`      Tipo: ${bounceType}`);
+    console.log(`      Razón: ${bounceMessage.substring(0, 100)}`);
+    
+    // ✅ MARCAR COMO BOUNCED (auto-limpia listas si hard)
+    await customer.markAsBounced(
+      bounceType,
+      bounceMessage || 'Email bounced',
+      campaignId
+    );
+    
+  } catch (error) {
+    console.error(`   ❌ Error handling bounce: ${error.message}`);
+  }
+}
+
+/**
+ * Maneja spam complaints automáticamente
+ * - Marca customer como complained
+ * - Remueve de TODAS las listas
+ */
+async function handleComplaint(email, data, campaignId) {
+  try {
+    const Customer = require('../models/Customer');
+    const List = require('../models/List');
+    
+    const customer = await Customer.findOne({ email });
+    
+    if (!customer) {
+      console.log(`   ⚠️  Customer no encontrado para complaint: ${email}`);
+      return;
+    }
+    
+    console.log(`   🚨 SPAM COMPLAINT: ${email}`);
+    
+    // Marcar como complained
+    customer.emailStatus = 'complained';
+    customer.bounceInfo.isBounced = true;
+    customer.bounceInfo.bounceType = 'hard';
+    customer.bounceInfo.lastBounceDate = new Date();
+    customer.bounceInfo.bounceReason = 'Spam complaint';
+    customer.bounceInfo.bouncedCampaignId = campaignId;
+    
+    await customer.save();
+    
+    // Remover de TODAS las listas
+    const result = await List.updateMany(
+      { members: customer._id },
+      { 
+        $pull: { members: customer._id },
+        $inc: { memberCount: -1 }
+      }
+    );
+    
+    console.log(`   ✅ Complaint procesado - removido de ${result.modifiedCount} lista(s)`);
+    
+  } catch (error) {
+    console.error(`   ❌ Error handling complaint: ${error.message}`);
+  }
+}
 
 module.exports = router;
