@@ -564,19 +564,28 @@ async function checkAndFinalizeCampaign(campaignId) {
     
     const emailSendStats = await EmailSend.getCampaignStats(campaignId);
     
-    const totalProcessed = emailSendStats.sent + emailSendStats.delivered + emailSendStats.failed + emailSendStats.bounced;
+    // ✅ FIX: Incluir "skipped" en el total
+    const totalProcessed = emailSendStats.sent + 
+                           emailSendStats.delivered + 
+                           emailSendStats.failed + 
+                           emailSendStats.bounced +
+                           emailSendStats.skipped;  // ← NUEVO
+    
     const totalRecipients = campaign.stats.totalRecipients;
     
-    console.log(`🔍 ${campaign.name}: ${totalProcessed}/${totalRecipients}`);
+    console.log(`🔍 Verificando campaña ${campaign.name}:`);
+    console.log(`   Procesados: ${totalProcessed} / ${totalRecipients}`);
+    console.log(`   Stats: sent=${emailSendStats.sent}, skipped=${emailSendStats.skipped}, failed=${emailSendStats.failed}`);
     
     if (totalProcessed >= totalRecipients && totalRecipients > 0) {
+      // Verificar que no haya jobs pendientes en la cola
       if (emailQueue && isQueueReady) {
         try {
           const counts = await emailQueue.getJobCounts('waiting', 'active', 'delayed');
           const pending = (counts.waiting || 0) + (counts.active || 0) + (counts.delayed || 0);
           
           if (pending > 0) {
-            console.log(`   ⏳ ${pending} batches pendientes\n`);
+            console.log(`   ⏳ Hay ${pending} batches pendientes, esperando...\n`);
             return false;
           }
         } catch (error) {
@@ -584,21 +593,27 @@ async function checkAndFinalizeCampaign(campaignId) {
         }
       }
       
+      // ✅ CAMPAÑA TERMINADA
       campaign.status = 'sent';
       campaign.sentAt = campaign.sentAt || new Date();
+      
+      // Actualizar stats finales
       campaign.stats.sent = emailSendStats.sent;
       campaign.stats.failed = emailSendStats.failed + emailSendStats.bounced;
+      // ✅ NUEVO: También guardar skipped
+      campaign.stats.skipped = emailSendStats.skipped || 0;
       
       campaign.updateRates();
       await campaign.save();
       
       console.log('\n╔═══════════════════════════════════════════╗');
-      console.log('║  🎉 CAMPAÑA COMPLETADA                    ║');
+      console.log('║  🎉 CAMPAÑA COMPLETADA AUTOMÁTICAMENTE    ║');
       console.log('╚═══════════════════════════════════════════╝');
       console.log(`   ${campaign.name}`);
       console.log(`   Enviados: ${emailSendStats.sent.toLocaleString()}`);
+      console.log(`   Skipped: ${emailSendStats.skipped.toLocaleString()}`);
       console.log(`   Fallidos: ${(emailSendStats.failed + emailSendStats.bounced).toLocaleString()}`);
-      console.log(`   Rate: ${((emailSendStats.sent / totalRecipients) * 100).toFixed(1)}%`);
+      console.log(`   Success rate: ${((emailSendStats.sent / totalRecipients) * 100).toFixed(1)}%`);
       console.log('═══════════════════════════════════════════\n');
       
       return true;

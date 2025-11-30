@@ -53,6 +53,7 @@ const campaignSchema = new mongoose.Schema({
     bounced: { type: Number, default: 0 },
     complained: { type: Number, default: 0 },
     unsubscribed: { type: Number, default: 0 },
+    skipped: { type: Number, default: 0 },  // ← AGREGAR ESTO
     
     // 🆕 REVENUE METRICS
     purchased: { type: Number, default: 0 },
