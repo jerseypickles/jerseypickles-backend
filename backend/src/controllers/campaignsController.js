@@ -15,8 +15,7 @@ const segmentationService = require('../services/segmentationService');
  * Intenta agregar jobs a BullMQ con retry automático
  */
 async function addBulkWithRetry(jobs, campaignId, retries = 3) {
-  const { getEmailQueue } = require('../jobs/emailQueue');
-  const emailQueue = getEmailQueue();
+  const { emailQueue } = require('../jobs/emailQueue');  // ← Directo, sin función
   
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
