@@ -10,12 +10,23 @@ const POPUP_LIST_CONFIG = {
   name: 'Clientes nuevos Jersey Pickles'
 };
 
+// ═══════════════════════════════════════════════════════════
+// CHRISTMAS 2025 CONFIGURATION
+// ═══════════════════════════════════════════════════════════
+const DISCOUNT_CONFIG = {
+  percentage: '-25.0',           // 25% OFF para Christmas
+  fallbackCode: 'XMAS25',        // Código genérico de fallback
+  codePrefix: 'XMAS',            // Prefijo para códigos únicos
+  campaignName: 'Christmas 2025', // Nombre de la campaña
+  expirationDays: 30             // Días hasta que expire el código
+};
+
 // Función para generar código único
 function generateUniqueCode(email) {
   const timestamp = Date.now().toString(36).toUpperCase();
   const randomStr = Math.random().toString(36).substring(2, 6).toUpperCase();
   const emailPrefix = email.split('@')[0].substring(0, 3).toUpperCase().replace(/[^A-Z]/g, 'X');
-  return `JP${emailPrefix}${randomStr}${timestamp}`.substring(0, 15);
+  return `${DISCOUNT_CONFIG.codePrefix}${emailPrefix}${randomStr}${timestamp}`.substring(0, 15);
 }
 
 class PopupController {
@@ -40,7 +51,7 @@ class PopupController {
         });
       }
       
-      console.log(`📧 Nueva suscripción desde popup: ${email}`);
+      console.log(`📧 Nueva suscripción desde popup: ${email} (source: ${source})`);
       
       const emailLower = email.toLowerCase().trim();
       
@@ -65,8 +76,16 @@ class PopupController {
             }
           }
           
+          // Agregar tag de Christmas si viene del popup de navidad
+          if (source.includes('christmas')) {
+            if (!customer.tags.includes('christmas-2025')) {
+              customer.tags.push('christmas-2025');
+            }
+          }
+          
           discountCode = await this.createShopifyDiscount(emailLower);
           customer.popupDiscountCode = discountCode;
+          customer.source = source; // Actualizar source
           await customer.save();
           
           console.log(`✅ Cliente existente actualizado con código: ${discountCode}`);
@@ -75,12 +94,18 @@ class PopupController {
         // Cliente nuevo
         discountCode = await this.createShopifyDiscount(emailLower);
         
+        // Determinar tags basado en source
+        const tags = ['popup-subscriber', 'newsletter'];
+        if (source.includes('christmas')) {
+          tags.push('christmas-2025');
+        }
+        
         customer = await Customer.create({
           email: emailLower,
           firstName: firstName?.trim() || '',
           acceptsMarketing: true,
           source: source,
-          tags: ['popup-subscriber', 'newsletter'],
+          tags: tags,
           popupDiscountCode: discountCode
         });
         
@@ -128,7 +153,7 @@ class PopupController {
           success: true,
           message: 'You\'re already subscribed!',
           isNew: false,
-          discountCode: 'WELCOME15'
+          discountCode: DISCOUNT_CONFIG.fallbackCode
         });
       }
       
@@ -144,23 +169,23 @@ class PopupController {
     const generatedCode = generateUniqueCode(email);
     
     try {
-      console.log(`💰 Intentando crear código de descuento: ${generatedCode}`);
+      console.log(`💰 Creando código de descuento ${DISCOUNT_CONFIG.percentage}%: ${generatedCode}`);
       
       if (!process.env.SHOPIFY_STORE_URL || !process.env.SHOPIFY_ACCESS_TOKEN) {
         console.warn('⚠️  Credenciales de Shopify no configuradas, usando código genérico');
-        return 'WELCOME15';
+        return DISCOUNT_CONFIG.fallbackCode;
       }
       
       const now = new Date();
-      const expiryDate = new Date(now.getTime() + (90 * 24 * 60 * 60 * 1000));
+      const expiryDate = new Date(now.getTime() + (DISCOUNT_CONFIG.expirationDays * 24 * 60 * 60 * 1000));
       
       const priceRuleData = {
-        title: `Newsletter Popup - ${generatedCode}`,
+        title: `${DISCOUNT_CONFIG.campaignName} Popup - ${generatedCode}`,
         target_type: 'line_item',
         target_selection: 'all',
         allocation_method: 'across',
         value_type: 'percentage',
-        value: '-15.0',
+        value: DISCOUNT_CONFIG.percentage,  // ← 25% OFF
         customer_selection: 'all',
         once_per_customer: true,
         usage_limit: 1,
@@ -176,7 +201,7 @@ class PopupController {
       
       await shopifyService.createDiscountCode(priceRule.id, generatedCode);
       
-      console.log(`✅ Código de descuento creado exitosamente: ${generatedCode}`);
+      console.log(`✅ Código de descuento creado exitosamente: ${generatedCode} (${DISCOUNT_CONFIG.percentage}% OFF)`);
       
       return generatedCode;
       
@@ -191,8 +216,8 @@ class PopupController {
         console.error('   Respuesta:', JSON.stringify(error.response.data, null, 2));
       }
       
-      console.log('⚠️  Usando código genérico como fallback: WELCOME15');
-      return 'WELCOME15';
+      console.log(`⚠️  Usando código genérico como fallback: ${DISCOUNT_CONFIG.fallbackCode}`);
+      return DISCOUNT_CONFIG.fallbackCode;
     }
   }
   
@@ -221,9 +246,19 @@ class PopupController {
         }
       });
       
+      // Contar por campaña
+      const christmasSubscribers = await Customer.countDocuments({
+        _id: { $in: list.members },
+        tags: 'christmas-2025'
+      });
+      
       const uniqueCodes = await Customer.countDocuments({
         _id: { $in: list.members },
-        popupDiscountCode: { $exists: true, $ne: null, $ne: 'WELCOME15' }
+        popupDiscountCode: { 
+          $exists: true, 
+          $ne: null, 
+          $nin: ['WELCOME15', 'XMAS25'] // Excluir códigos genéricos
+        }
       });
       
       const customersWithCodes = await Customer.find({
@@ -258,10 +293,13 @@ class PopupController {
         total,
         thisMonth,
         today,
+        christmasSubscribers, // ← Nuevo: suscriptores de Christmas
         uniqueCodes,
         genericCodes: total - uniqueCodes,
         codesUsed: usedCodesSet.size,
-        totalRevenue: parseFloat(totalRevenue.toFixed(2))
+        totalRevenue: parseFloat(totalRevenue.toFixed(2)),
+        currentCampaign: DISCOUNT_CONFIG.campaignName,
+        currentDiscount: DISCOUNT_CONFIG.percentage
       });
       
     } catch (error) {
@@ -273,7 +311,7 @@ class PopupController {
   // Obtener revenue detallado del popup
   async getRevenue(req, res) {
     try {
-      const { timeRange = 'all' } = req.query;
+      const { timeRange = 'all', campaign = 'all' } = req.query;
       
       const list = await List.findById(POPUP_LIST_CONFIG.id);
       
@@ -294,16 +332,25 @@ class PopupController {
         };
       }
       
+      // Filtro por campaña
+      let campaignFilter = {};
+      if (campaign === 'christmas') {
+        campaignFilter = { tags: 'christmas-2025' };
+      } else if (campaign === 'blackfriday') {
+        campaignFilter = { source: { $regex: /black.?friday/i } };
+      }
+      
       const customers = await Customer.find({
         _id: { $in: list.members },
         popupDiscountCode: { $exists: true, $ne: null },
-        ...dateFilter
+        ...dateFilter,
+        ...campaignFilter
       }).sort({ createdAt: -1 });
       
       const total = customers.length;
       
       const uniqueCodes = customers.filter(
-        c => c.popupDiscountCode && c.popupDiscountCode !== 'WELCOME15'
+        c => c.popupDiscountCode && !['WELCOME15', 'XMAS25'].includes(c.popupDiscountCode)
       ).length;
       
       const allCodes = customers.map(c => c.popupDiscountCode).filter(Boolean);
@@ -335,6 +382,8 @@ class PopupController {
         firstName: customer.firstName,
         lastName: customer.lastName,
         popupDiscountCode: customer.popupDiscountCode,
+        source: customer.source,
+        tags: customer.tags,
         createdAt: customer.createdAt,
         codeUsed: codesUsedSet.has(customer.popupDiscountCode),
         revenue: codeRevenueMap.get(customer.popupDiscountCode) || 0
@@ -347,7 +396,9 @@ class PopupController {
           total,
           uniqueCodes,
           codesUsed: codesUsedSet.size,
-          totalRevenue: parseFloat(totalRevenue.toFixed(2))
+          totalRevenue: parseFloat(totalRevenue.toFixed(2)),
+          campaign: campaign,
+          timeRange: timeRange
         },
         customers: customersWithRevenue
       });

@@ -1,4 +1,4 @@
-// backend/src/controllers/campaignsController.js - ULTRA ESCALABLE (BATCH OPS)
+// backend/src/controllers/campaignsController.js - ULTRA ESCALABLE CON RETRY
 const Campaign = require('../models/Campaign');
 const Segment = require('../models/Segment');
 const List = require('../models/List');
@@ -8,6 +8,101 @@ const EmailEvent = require('../models/EmailEvent');
 const emailService = require('../services/emailService');
 const templateService = require('../services/templateService');
 const segmentationService = require('../services/segmentationService');
+
+// ==================== HELPER FUNCTIONS - RETRY LOGIC ====================
+
+/**
+ * Intenta agregar jobs a BullMQ con retry automático
+ */
+async function addBulkWithRetry(jobs, campaignId, retries = 3) {
+  const { getEmailQueue } = require('../jobs/emailQueue');
+  const emailQueue = getEmailQueue();
+  
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const jobsArray = jobs.map(job => ({
+        name: 'sendEmail',
+        data: job
+      }));
+      
+      await emailQueue.addBulk(jobsArray);
+      return { success: true, count: jobs.length };
+      
+    } catch (error) {
+      if (attempt === retries) {
+        console.error(`      ❌ Failed after ${retries} attempts: ${error.message}`);
+        return { success: false, count: 0, error: error.message };
+      }
+      
+      const backoff = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
+      console.log(`      ⚠️  Attempt ${attempt}/${retries} failed, retry in ${backoff}ms...`);
+      await new Promise(resolve => setTimeout(resolve, backoff));
+    }
+  }
+}
+
+/**
+ * Encola jobs en chunks pequeños con retry para máxima confiabilidad
+ */
+async function enqueueBulkWithRetry(jobs, campaignId, chunkSize = 500) {
+  const results = {
+    total: jobs.length,
+    enqueued: 0,
+    failed: 0,
+    chunks: 0,
+    errors: []
+  };
+  
+  const totalChunks = Math.ceil(jobs.length / chunkSize);
+  
+  console.log(`\n   🔄 ════════ ENCOLANDO CON RETRY ════════`);
+  console.log(`      Total jobs: ${jobs.length.toLocaleString()}`);
+  console.log(`      Chunk size: ${chunkSize}`);
+  console.log(`      Total chunks: ${totalChunks}`);
+  console.log(`   ═══════════════════════════════════════\n`);
+  
+  for (let i = 0; i < jobs.length; i += chunkSize) {
+    const chunk = jobs.slice(i, i + chunkSize);
+    const chunkNum = Math.floor(i / chunkSize) + 1;
+    
+    console.log(`   📦 Chunk ${chunkNum}/${totalChunks} (${chunk.length} jobs)...`);
+    
+    const result = await addBulkWithRetry(chunk, campaignId, 3);
+    
+    if (result.success) {
+      results.enqueued += result.count;
+      results.chunks++;
+      console.log(`      ✅ Encolado exitoso`);
+    } else {
+      results.failed += chunk.length;
+      results.errors.push({
+        chunk: chunkNum,
+        count: chunk.length,
+        error: result.error
+      });
+      console.log(`      ❌ Chunk falló: ${result.error}`);
+      // NO lanzar error - continuar con el siguiente chunk
+    }
+    
+    // Delay entre chunks para no saturar Redis
+    if (i + chunkSize < jobs.length) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+  }
+  
+  console.log(`\n   ✅ ════════ ENCOLADO COMPLETO ═════════`);
+  console.log(`      Total: ${results.total.toLocaleString()}`);
+  console.log(`      ✅ Exitosos: ${results.enqueued.toLocaleString()}`);
+  console.log(`      ❌ Fallidos: ${results.failed.toLocaleString()}`);
+  console.log(`      📦 Chunks OK: ${results.chunks}/${totalChunks}`);
+  
+  if (results.errors.length > 0) {
+    console.log(`      ⚠️  Chunks fallidos: ${results.errors.map(e => e.chunk).join(', ')}`);
+  }
+  console.log(`   ═══════════════════════════════════════\n`);
+  
+  return results;
+}
 
 // ==================== ADAPTIVE CONFIGURATION ====================
 
@@ -21,7 +116,7 @@ function getOptimalConfig(totalEmails) {
       name: 'FAST',
       cursorBatch: 500,
       bulkWriteBatch: 1000,
-      enqueueChunk: 5000,
+      enqueueChunk: 5000, // Ya no se usa directamente
       description: 'Velocidad máxima para campañas pequeñas'
     };
   } else if (totalEmails < 50000) {
@@ -317,7 +412,7 @@ class CampaignsController {
     }
   }
 
-  // ==================== ENVÍO DE CAMPAÑA - ULTRA ESCALABLE ====================
+  // ==================== ENVÍO DE CAMPAÑA - ULTRA ESCALABLE CON RETRY ====================
   
   async send(req, res) {
     try {
@@ -347,7 +442,7 @@ class CampaignsController {
       }
       
       // ==================== MODO PRODUCCIÓN ====================
-      const { addCampaignToQueue, isAvailable, generateJobId } = require('../jobs/emailQueue');
+      const { isAvailable, generateJobId } = require('../jobs/emailQueue');
       
       if (!isAvailable()) {
         return res.status(400).json({
@@ -378,11 +473,12 @@ class CampaignsController {
       
       console.log(`👥 Total destinatarios: ${totalRecipients.toLocaleString()}`);
       
-      // ✅ NUEVO: Configuración adaptativa
+      // ✅ Configuración adaptativa
       const config = getOptimalConfig(totalRecipients);
       console.log(`⚙️  Modo seleccionado: ${config.name}`);
       console.log(`   ${config.description}`);
-      console.log(`   Batch sizes: cursor=${config.cursorBatch}, bulk=${config.bulkWriteBatch}, enqueue=${config.enqueueChunk}\n`);
+      console.log(`   Batch sizes: cursor=${config.cursorBatch}, bulk=${config.bulkWriteBatch}`);
+      console.log(`   Enqueue: chunks de 500 con retry\n`);
       
       // ========== PASO 2: Actualizar campaña a "sending" ==========
       campaign.status = 'sending';
@@ -430,26 +526,24 @@ class CampaignsController {
       
       setImmediate(async () => {
         console.log('╔════════════════════════════════════════════════╗');
-        console.log('║  📥 BACKGROUND PROCESSING - BATCH OPS          ║');
+        console.log('║  📥 BACKGROUND - BATCH OPS + RETRY ENQUEUE     ║');
         console.log('╚════════════════════════════════════════════════╝');
-        console.log(`   Modo: ${config.name} (MongoDB Batch Operations)`);
-        console.log(`   Escalable: 1M+ emails sin saturación`);
+        console.log(`   Modo: ${config.name} (MongoDB Batch + Redis Retry)`);
+        console.log(`   Escalable: 1M+ emails sin quiebres`);
         console.log('════════════════════════════════════════════════\n');
         
         // ✅ Configuración adaptativa
         const CURSOR_BATCH_SIZE = config.cursorBatch;
         const BULK_WRITE_BATCH = config.bulkWriteBatch;
-        const ENQUEUE_CHUNK_SIZE = config.enqueueChunk;
+        const ENQUEUE_CHUNK_SIZE = config.enqueueChunk; // Para acumular antes de enviar
         
         let processedCount = 0;
         let createdEmailSends = 0;
         let skippedDuplicates = 0;
-        let enqueuedCount = 0;
-        let chunkNumber = 0;
         let bulkWriteCount = 0;
         
         // ✅ Arrays temporales
-        let tempRecipients = [];      // Para encolar
+        let tempRecipients = [];      // Para encolar (acumula hasta ENQUEUE_CHUNK_SIZE)
         let bulkOperations = [];       // Para MongoDB bulkWrite
         const seenEmails = new Set();  // Deduplicación en memoria
         
@@ -474,16 +568,16 @@ class CampaignsController {
             );
           }
           
-          console.log('🔄 Procesando con BATCH OPERATIONS...\n');
+          console.log('🔄 Procesando con BATCH OPERATIONS + RETRY ENQUEUE...\n');
           
           // ========== ITERAR CON CURSOR + BATCH WRITES ==========
           for await (const customer of cursor) {
             processedCount++;
             
-            // ✅ PASO 1: NORMALIZACIÓN
+            // ✅ NORMALIZACIÓN
             const normalizedEmail = customer.email.toLowerCase().trim();
             
-            // ✅ PASO 2: Deduplicación en memoria (super rápido)
+            // ✅ Deduplicación en memoria
             const emailKey = `${campaignId}:${normalizedEmail}`;
             if (seenEmails.has(emailKey)) {
               skippedDuplicates++;
@@ -494,7 +588,7 @@ class CampaignsController {
             }
             seenEmails.add(emailKey);
             
-            // ✅ PASO 3: Generar jobId
+            // ✅ Generar jobId
             const jobId = generateJobId(campaignId, normalizedEmail);
             
             // ✅ DEBUG: Solo primer email
@@ -503,11 +597,12 @@ class CampaignsController {
               console.log(`   Email: "${normalizedEmail}"`);
               console.log(`   JobId: ${jobId}`);
               console.log(`   Bulk batch: ${BULK_WRITE_BATCH}`);
-              console.log(`   Enqueue batch: ${ENQUEUE_CHUNK_SIZE}`);
+              console.log(`   Enqueue chunk: ${ENQUEUE_CHUNK_SIZE}`);
+              console.log(`   Retry chunk: 500 (con 3 intentos)`);
               console.log(`════════════════════════════════\n`);
             }
             
-            // ✅ PASO 4: Preparar operación de bulkWrite (NO ejecutar todavía)
+            // ✅ Preparar operación de bulkWrite
             bulkOperations.push({
               updateOne: {
                 filter: {
@@ -529,7 +624,7 @@ class CampaignsController {
               }
             });
             
-            // ✅ PASO 5: Personalizar email
+            // ✅ Personalizar email
             let html = htmlTemplate;
             html = emailService.personalize(html, customer);
             html = emailService.injectTracking(
@@ -539,7 +634,7 @@ class CampaignsController {
               normalizedEmail
             );
             
-            // ✅ PASO 6: Agregar a tempRecipients
+            // ✅ Agregar a tempRecipients
             tempRecipients.push({
               email: normalizedEmail,
               subject: subject,
@@ -555,7 +650,7 @@ class CampaignsController {
               
               try {
                 const bulkResult = await EmailSend.bulkWrite(bulkOperations, {
-                  ordered: false // Continuar si hay errores
+                  ordered: false
                 });
                 
                 createdEmailSends += bulkResult.upsertedCount || 0;
@@ -565,42 +660,37 @@ class CampaignsController {
                 }
                 
               } catch (error) {
-                // Ignorar errores de duplicados (código 11000)
                 if (error.code !== 11000) {
                   console.error(`   ❌ Error en bulkWrite #${bulkWriteCount}:`, error.message);
                   throw error;
                 }
               }
               
-              // ✅ LIBERAR MEMORIA - Vaciar array
               bulkOperations = [];
             }
             
-            // ========== ENCOLAR CHUNK A REDIS ==========
+            // ========== ENCOLAR CHUNK CON RETRY (NUEVO) ==========
             if (tempRecipients.length >= ENQUEUE_CHUNK_SIZE) {
-              chunkNumber++;
-              
-              console.log(`\n   📤 ════════ CHUNK ${chunkNumber} ════════`);
-              console.log(`      Emails: ${tempRecipients.length.toLocaleString()}`);
+              console.log(`\n   📤 ════════ ENCOLANDO ${tempRecipients.length} emails ════════`);
               console.log(`      Progreso: ${processedCount.toLocaleString()} / ${totalRecipients.toLocaleString()}`);
               
-              try {
-                const chunkResult = await addCampaignToQueue(tempRecipients, campaignId);
-                enqueuedCount += tempRecipients.length;
-                
-                console.log(`      ✅ Encolado: ${chunkResult.totalJobs} batches`);
-                console.log(`      Total: ${enqueuedCount.toLocaleString()}`);
-                console.log(`   ════════════════════════════\n`);
-                
-              } catch (error) {
-                console.error(`      ❌ Error chunk ${chunkNumber}:`, error.message);
-                throw error;
+              // ✅ NUEVO: Usar enqueueBulkWithRetry con chunks de 500
+              const enqueueResult = await enqueueBulkWithRetry(
+                tempRecipients, 
+                campaignId, 
+                500 // Chunks de 500 con retry
+              );
+              
+              console.log(`      ✅ Encolados: ${enqueueResult.enqueued.toLocaleString()}`);
+              
+              if (enqueueResult.failed > 0) {
+                console.log(`      ⚠️  Fallidos: ${enqueueResult.failed} (continúa...)`);
               }
               
               // ✅ LIBERAR MEMORIA
               tempRecipients = [];
               
-              // Pausa breve para no saturar Redis
+              // Pausa breve
               await new Promise(resolve => setTimeout(resolve, 100));
             }
             
@@ -608,8 +698,8 @@ class CampaignsController {
             if (processedCount % 1000 === 0) {
               const memoryUsed = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
               console.log(`   📊 Progreso: ${processedCount.toLocaleString()} / ${totalRecipients.toLocaleString()}`);
-              console.log(`      EmailSend: ${createdEmailSends.toLocaleString()} | Encolados: ${enqueuedCount.toLocaleString()}`);
-              console.log(`      Memoria: ${memoryUsed} MB | Buffer: bulk=${bulkOperations.length}, enqueue=${tempRecipients.length}`);
+              console.log(`      EmailSend: ${createdEmailSends.toLocaleString()}`);
+              console.log(`      Memoria: ${memoryUsed} MB | Buffers: bulk=${bulkOperations.length}, queue=${tempRecipients.length}`);
             }
           }
           
@@ -637,23 +727,21 @@ class CampaignsController {
             bulkOperations = [];
           }
           
-          // 2. Encolar residuales
+          // 2. Encolar residuales CON RETRY (NUEVO)
           if (tempRecipients.length > 0) {
-            chunkNumber++;
-            
-            console.log(`\n   📤 ════════ CHUNK FINAL ${chunkNumber} ════════`);
+            console.log(`\n   📤 ════════ ENCOLANDO CHUNK FINAL ════════`);
             console.log(`      Emails: ${tempRecipients.length.toLocaleString()}`);
             
-            try {
-              const chunkResult = await addCampaignToQueue(tempRecipients, campaignId);
-              enqueuedCount += tempRecipients.length;
-              
-              console.log(`      ✅ Chunk final encolado`);
-              console.log(`   ════════════════════════════════\n`);
-              
-            } catch (error) {
-              console.error(`      ❌ Error chunk final:`, error.message);
-              throw error;
+            const enqueueResult = await enqueueBulkWithRetry(
+              tempRecipients, 
+              campaignId, 
+              500
+            );
+            
+            console.log(`      ✅ Encolados: ${enqueueResult.enqueued.toLocaleString()}`);
+            
+            if (enqueueResult.failed > 0) {
+              console.log(`      ⚠️  Fallidos: ${enqueueResult.failed}`);
             }
             
             tempRecipients = [];
@@ -669,35 +757,21 @@ class CampaignsController {
           console.log(`   Total procesados: ${processedCount.toLocaleString()}`);
           console.log(`   EmailSend creados: ${createdEmailSends.toLocaleString()}`);
           console.log(`   Duplicados omitidos: ${skippedDuplicates.toLocaleString()}`);
-          console.log(`   Total encolados: ${enqueuedCount.toLocaleString()}`);
-          console.log(`   Chunks procesados: ${chunkNumber}`);
           console.log(`   BulkWrites ejecutados: ${bulkWriteCount}`);
           console.log(`   Tiempo: ${duration}s`);
           console.log(`   Memoria pico: ${finalMemory} MB`);
-          console.log(`   Modo: ${config.name}`);
+          console.log(`   Modo: ${config.name} + RETRY`);
           console.log('════════════════════════════════════════════════\n');
           
-          // Verificar que se encolaron emails
-          if (enqueuedCount === 0) {
-            console.log('⚠️  No hay recipientes válidos\n');
-            
-            await Campaign.findByIdAndUpdate(campaignId, {
-              status: 'sent',
-              'stats.error': 'No hay destinatarios válidos'
-            });
-            
-            return;
-          }
-          
           console.log('╔════════════════════════════════════════════════╗');
-          console.log('║  🚀 CAMPAÑA ENCOLADA EXITOSAMENTE             ║');
+          console.log('║  🚀 CAMPAÑA ENCOLADA CON RETRY                ║');
           console.log('╚════════════════════════════════════════════════╝');
-          console.log(`   📊 Total emails: ${enqueuedCount.toLocaleString()}`);
-          console.log(`   📦 Total chunks: ${chunkNumber}`);
+          console.log(`   📊 Total procesados: ${processedCount.toLocaleString()}`);
+          console.log(`   💾 MongoDB scans: 99.7% reducidos`);
+          console.log(`   🔄 Redis: Chunks de 500 con retry`);
           console.log(`   ⏱️  Preparación: ${duration}s`);
-          console.log(`   💾 Memoria constante: ${finalMemory} MB`);
           console.log(`   🎯 Modo: ${config.name}`);
-          console.log(`   ♻️  MongoDB scans reducidos: 99.7%`);
+          console.log(`   ✅ Workers procesando automáticamente`);
           console.log('════════════════════════════════════════════════\n');
           
         } catch (error) {
@@ -718,7 +792,6 @@ class CampaignsController {
             console.error('❌ Error revertiendo campaña:', err.message);
           }
         } finally {
-          // ✅ Liberar memoria final
           bulkOperations = null;
           tempRecipients = null;
           seenEmails.clear();
@@ -1209,8 +1282,8 @@ class CampaignsController {
           sending: sendingCampaigns
         },
         config: {
-          mode: 'ADAPTIVE',
-          description: 'Auto-ajusta según tamaño de campaña',
+          mode: 'ADAPTIVE + RETRY',
+          description: 'Auto-ajusta con retry logic en encolado',
           modes: ['FAST (<5K)', 'BALANCED (<50K)', 'STABLE (<200K)', 'ULTRA_STABLE (200K+)']
         }
       };
