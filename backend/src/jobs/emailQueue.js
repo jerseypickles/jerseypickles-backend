@@ -21,15 +21,15 @@ function getAdaptiveConfig(totalEmails = 0) {
     return {
       name: 'FAST',
       BATCH_SIZE: 100,
-      RATE_LIMIT_PER_SECOND: 10,
-      CONCURRENCY: 3,
+      RATE_LIMIT_PER_SECOND: 8,  // ← Era 10, bajarlo a 8
+      CONCURRENCY: 2,            // ← Era 3, bajarlo a 2
       description: 'Velocidad máxima para campañas pequeñas'
     };
   } else if (totalEmails < 50000) {
     return {
       name: 'BALANCED',
       BATCH_SIZE: 100,
-      RATE_LIMIT_PER_SECOND: 8,
+      RATE_LIMIT_PER_SECOND: 6,  // ← Era 8, bajarlo a 6
       CONCURRENCY: 2,
       description: 'Balance velocidad/estabilidad'
     };
@@ -37,15 +37,15 @@ function getAdaptiveConfig(totalEmails = 0) {
     return {
       name: 'STABLE',
       BATCH_SIZE: 75,
-      RATE_LIMIT_PER_SECOND: 6,
-      CONCURRENCY: 2,
+      RATE_LIMIT_PER_SECOND: 5,  // ← Era 6, bajarlo a 5
+      CONCURRENCY: 1,            // ← Era 2, bajarlo a 1
       description: 'Prioridad estabilidad'
     };
   } else {
     return {
       name: 'ULTRA_STABLE',
       BATCH_SIZE: 50,
-      RATE_LIMIT_PER_SECOND: 5,
+      RATE_LIMIT_PER_SECOND: 4,  // ← Era 5, bajarlo a 4
       CONCURRENCY: 1,
       description: 'Máxima estabilidad para campañas masivas'
     };
