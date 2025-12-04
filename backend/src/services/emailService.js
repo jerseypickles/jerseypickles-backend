@@ -435,6 +435,20 @@ class EmailService {
         // No trackear links de tracking o unsubscribe
         if (url.includes('/api/track/')) return match;
         
+        // No trackear placeholders de unsubscribe
+        if (url.includes('{{unsubscribe')) return match;
+        if (url.includes('%unsubscribe')) return match;
+        if (url.includes('unsubscribe_link')) return match;
+        
+        // No trackear mailto links
+        if (url.startsWith('mailto:')) return match;
+        
+        // No trackear tel links
+        if (url.startsWith('tel:')) return match;
+        
+        // No trackear anchors
+        if (url.startsWith('#')) return match;
+        
         const encodedUrl = encodeURIComponent(url);
         const emailParam = `&email=${encodeURIComponent(email)}`;
         return `href="${trackingBaseUrl}?url=${encodedUrl}${emailParam}"`;
