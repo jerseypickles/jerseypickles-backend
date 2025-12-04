@@ -171,6 +171,29 @@ function getOptimalConfig(totalEmails) {
 
 class CampaignsController {
   
+  // ==================== CONSTRUCTOR - BIND ALL METHODS ====================
+  constructor() {
+    // Bind all methods to preserve 'this' context when used as route handlers
+    this.list = this.list.bind(this);
+    this.getOne = this.getOne.bind(this);
+    this.create = this.create.bind(this);
+    this.update = this.update.bind(this);
+    this.delete = this.delete.bind(this);
+    this.duplicate = this.duplicate.bind(this);
+    this.send = this.send.bind(this);
+    this.sendTestEmail = this.sendTestEmail.bind(this);
+    this.getStats = this.getStats.bind(this);
+    this.getEvents = this.getEvents.bind(this);
+    this.createFromTemplate = this.createFromTemplate.bind(this);
+    this.cleanupDrafts = this.cleanupDrafts.bind(this);
+    this.healthCheck = this.healthCheck.bind(this);
+    this.getQueueStatus = this.getQueueStatus.bind(this);
+    this.pauseQueue = this.pauseQueue.bind(this);
+    this.resumeQueue = this.resumeQueue.bind(this);
+    this.cleanQueue = this.cleanQueue.bind(this);
+    this.forceCheckCampaigns = this.forceCheckCampaigns.bind(this);
+  }
+  
   // ==================== CRUD BÁSICO ====================
   
   async list(req, res) {
@@ -939,6 +962,14 @@ class CampaignsController {
         .populate('customer', 'email firstName lastName')
         .sort({ eventDate: -1 });
       
+      // ========== UNSUBSCRIBE EVENTS ==========
+      const unsubscribedEvents = events.filter(e => e.eventType === 'unsubscribed');
+      const unsubscribedCustomers = unsubscribedEvents.map(event => ({
+        customer: event.customer,
+        email: event.customer?.email || event.metadata?.email,
+        createdAt: event.eventDate
+      }));
+      
       const stats = {
         total: emailSendStats.total,
         pending: emailSendStats.pending,
@@ -950,6 +981,7 @@ class CampaignsController {
         opened: events.filter(e => e.eventType === 'opened').length,
         clicked: events.filter(e => e.eventType === 'clicked').length,
         complained: events.filter(e => e.eventType === 'complained').length,
+        unsubscribed: unsubscribedEvents.length,  // ✅ FROM EVENTS
         purchased: campaign.stats.purchased || 0,
       };
       
@@ -959,6 +991,7 @@ class CampaignsController {
         openRate: totalDelivered > 0 ? ((stats.opened / totalDelivered) * 100).toFixed(1) : '0.0',
         clickRate: stats.opened > 0 ? ((stats.clicked / stats.opened) * 100).toFixed(1) : '0.0',
         bounceRate: stats.sent > 0 ? ((stats.bounced / stats.sent) * 100).toFixed(1) : '0.0',
+        unsubscribeRate: stats.sent > 0 ? ((stats.unsubscribed / stats.sent) * 100).toFixed(2) : '0.00',  // ✅ NEW
         clickToOpenRate: stats.opened > 0 ? ((stats.clicked / stats.opened) * 100).toFixed(1) : '0.0',
         conversionRate: campaign.stats.conversionRate || 0,
       };
@@ -1043,6 +1076,7 @@ class CampaignsController {
           opened: dayEvents.filter(e => e.eventType === 'opened').length,
           clicked: dayEvents.filter(e => e.eventType === 'clicked').length,
           bounced: dayEvents.filter(e => e.eventType === 'bounced').length,
+          unsubscribed: dayEvents.filter(e => e.eventType === 'unsubscribed').length,  // ✅ NEW
           purchased: dayOrders.length,
           revenue: dayRevenue,
         };
@@ -1130,7 +1164,8 @@ class CampaignsController {
         timeline,
         totalEvents: events.length,
         revenue,
-        emailSendStats
+        emailSendStats,
+        unsubscribedCustomers  // ✅ NEW - List of unsubscribed customers
       });
       
     } catch (error) {
