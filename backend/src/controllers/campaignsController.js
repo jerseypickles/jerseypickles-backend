@@ -676,6 +676,16 @@ class CampaignsController {
             // ✅ Personalizar email
             let html = htmlTemplate;
             html = emailService.personalize(html, customer);
+            
+            // ✅ Inyectar link de unsubscribe (reemplaza {{unsubscribe_link}})
+            html = emailService.injectUnsubscribeLink(
+              html,
+              customer._id.toString(),
+              normalizedEmail,
+              campaignId
+            );
+            
+            // ✅ Inyectar tracking (pixel + click tracking)
             html = emailService.injectTracking(
               html,
               campaignId,
@@ -904,6 +914,16 @@ class CampaignsController {
       
       let html = campaign.htmlContent;
       html = emailService.personalize(html, testCustomer);
+      
+      // ✅ Inyectar link de unsubscribe
+      html = emailService.injectUnsubscribeLink(
+        html,
+        testCustomer._id.toString(),
+        testEmail,
+        campaign._id.toString()
+      );
+      
+      // ✅ Inyectar tracking
       html = emailService.injectTracking(
         html,
         campaign._id.toString(),
