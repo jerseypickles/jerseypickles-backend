@@ -1,14 +1,15 @@
-// backend/src/services/emailService.js - PRODUCTION READY
+// backend/src/services/emailService.js - PRODUCTION READY CON UNSUBSCRIBE
 const { Resend } = require('resend');
 const CircuitBreaker = require('../utils/circuitBreaker');
+const { generateUnsubscribeToken } = require('../utils/unsubscribeToken');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ========== CIRCUIT BREAKER PARA RESEND API ==========
 const resendCircuitBreaker = new CircuitBreaker({
-  failureThreshold: 5,   // 5 fallos consecutivos
-  successThreshold: 2,   // 2 éxitos para cerrar
-  timeout: 60000         // 60s en estado OPEN
+  failureThreshold: 5,
+  successThreshold: 2,
+  timeout: 60000
 });
 
 class EmailService {
@@ -16,7 +17,6 @@ class EmailService {
     this.fromEmail = 'Jersey Pickles <info@jerseypickles.com>';
     this.appUrl = process.env.APP_URL || 'https://jerseypickles.com';
     
-    // Stats de servicio
     this.stats = {
       totalSent: 0,
       totalFailed: 0,
@@ -38,10 +38,10 @@ class EmailService {
     customerId = null,
     tags = null,
     retries = 0,
-    maxRetries = 3
+    maxRetries = 3,
+    includeUnsubscribe = true // 🆕 Por defecto incluir unsubscribe
   }) {
     try {
-      // Validación básica
       if (!to || !subject || !html) {
         throw new Error('Faltan campos requeridos: to, subject, html');
       }
@@ -50,7 +50,11 @@ class EmailService {
         throw new Error(`Email inválido: ${to}`);
       }
 
-      // Preparar tags
+      // 🆕 Inyectar link de unsubscribe si está habilitado
+      if (includeUnsubscribe && customerId) {
+        html = this.injectUnsubscribeLink(html, customerId, to, campaignId);
+      }
+
       let emailTags = [];
       
       if (tags && Array.isArray(tags)) {
@@ -60,7 +64,6 @@ class EmailService {
         if (customerId) emailTags.push({ name: 'customer_id', value: String(customerId) });
       }
       
-      // ✅ EJECUTAR CON CIRCUIT BREAKER
       const data = await resendCircuitBreaker.execute(async () => {
         return await resend.emails.send({
           from: from || this.fromEmail,
@@ -72,7 +75,6 @@ class EmailService {
         });
       }, `sendEmail:${to}`);
       
-      // ✅ SUCCESS
       this.stats.totalSent++;
       this.stats.lastSuccess = new Date();
       
@@ -90,7 +92,6 @@ class EmailService {
         email: to
       };
       
-      // ========== RETRY LOGIC ==========
       const errorType = this.classifyError(error);
       
       if (errorType.shouldRetry && retries < maxRetries) {
@@ -99,7 +100,6 @@ class EmailService {
         const backoffDelay = this.calculateBackoff(retries);
         
         console.warn(`⚠️  Retry ${retries + 1}/${maxRetries} para ${to} en ${backoffDelay}ms`);
-        console.warn(`   Error: ${error.message}`);
         
         await this.delay(backoffDelay);
         
@@ -113,11 +113,11 @@ class EmailService {
           customerId,
           tags,
           retries: retries + 1,
-          maxRetries
+          maxRetries,
+          includeUnsubscribe: false // Ya se inyectó en el primer intento
         });
       }
       
-      // ========== NO RETRY - RETURN ERROR ==========
       console.error(`❌ Error enviando email a ${to}:`, error.message);
       
       return {
@@ -130,13 +130,14 @@ class EmailService {
     }
   }
 
-  // ==================== BATCH SENDING CON CIRCUIT BREAKER ====================
+  // ==================== BATCH SENDING ====================
   
   async sendBatch(emailsArray, options = {}) {
     try {
       const {
         maxRetries = 3,
-        validateEmails = true
+        validateEmails = true,
+        includeUnsubscribe = true // 🆕
       } = options;
 
       if (!Array.isArray(emailsArray) || emailsArray.length === 0) {
@@ -147,7 +148,6 @@ class EmailService {
         throw new Error(`Batch máximo es 100 emails. Recibido: ${emailsArray.length}`);
       }
       
-      // Validar emails si está habilitado
       if (validateEmails) {
         for (const email of emailsArray) {
           const toArray = Array.isArray(email.to) ? email.to : [email.to];
@@ -163,18 +163,23 @@ class EmailService {
       
       const formattedEmails = emailsArray.map(email => {
         const toArray = Array.isArray(email.to) ? email.to : [email.to];
+        let htmlContent = email.html;
+        
+        // 🆕 Inyectar unsubscribe en cada email del batch
+        if (includeUnsubscribe && email.customerId) {
+          htmlContent = this.injectUnsubscribeLink(htmlContent, email.customerId, toArray[0]);
+        }
         
         return {
           from: email.from || this.fromEmail,
           to: toArray,
           subject: email.subject,
-          html: email.html,
+          html: htmlContent,
           reply_to: email.replyTo || email.reply_to || undefined,
           tags: email.tags || undefined
         };
       });
       
-      // ✅ EJECUTAR BATCH CON CIRCUIT BREAKER
       const response = await resendCircuitBreaker.execute(async () => {
         return await resend.batch.send(formattedEmails);
       }, `sendBatch:${emailsArray.length}emails`);
@@ -211,13 +216,14 @@ class EmailService {
     }
   }
 
-  // ==================== ENVÍO MASIVO (CHUNKED) ====================
+  // ==================== BULK EMAILS (CHUNKED) ====================
   
   async sendBulkEmails(emails, options = {}) {
     const {
       chunkSize = 10,
       delayBetweenChunks = 1000,
-      stopOnCircuitBreak = true
+      stopOnCircuitBreak = true,
+      includeUnsubscribe = true // 🆕
     } = options;
     
     const results = {
@@ -235,7 +241,6 @@ class EmailService {
       
       console.log(`📧 Chunk ${chunkNum}/${totalChunks} (${chunk.length} emails)`);
       
-      // Verificar estado del circuit breaker
       const cbState = resendCircuitBreaker.getState();
       if (cbState.state === 'OPEN') {
         console.error(`🔴 Circuit breaker OPEN - deteniendo envío masivo`);
@@ -246,7 +251,10 @@ class EmailService {
         }
       }
       
-      const promises = chunk.map(email => this.sendEmail(email));
+      const promises = chunk.map(email => this.sendEmail({
+        ...email,
+        includeUnsubscribe
+      }));
       const chunkResults = await Promise.allSettled(promises);
       
       chunkResults.forEach((result, index) => {
@@ -277,93 +285,137 @@ class EmailService {
     return results;
   }
 
+  // ==================== 🆕 UNSUBSCRIBE LINK GENERATION ====================
+  
+  /**
+   * Genera el link de unsubscribe para un cliente
+   * @param {string} customerId - ID del cliente
+   * @param {string} email - Email del cliente
+   * @param {string} campaignId - ID de la campaña (opcional, para tracking)
+   */
+  generateUnsubscribeLink(customerId, email, campaignId = null) {
+    const token = generateUnsubscribeToken(customerId, email, campaignId);
+    return `${this.appUrl}/api/track/unsubscribe/${token}`;
+  }
+
+  /**
+   * Genera el HTML del footer con link de unsubscribe
+   */
+  /**
+   * Genera el HTML del footer con link de unsubscribe
+   * @param {string} customerId - ID del cliente
+   * @param {string} email - Email del cliente  
+   * @param {string} campaignId - ID de la campaña (opcional, para tracking)
+   */
+  generateUnsubscribeFooter(customerId, email, campaignId = null) {
+    const unsubscribeLink = this.generateUnsubscribeLink(customerId, email, campaignId);
+    
+    return `
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin-top: 40px; border-top: 1px solid #e0e0e0;">
+      <tr>
+        <td style="padding: 24px; text-align: center;">
+          <p style="margin: 0 0 8px 0; font-size: 12px; color: #999; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+            Jersey Pickles • New Jersey's Finest Pickles
+          </p>
+          <p style="margin: 0; font-size: 11px; color: #bbb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+            You're receiving this email because you subscribed to our offers and updates.
+          </p>
+          <p style="margin: 12px 0 0 0; font-size: 11px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+            <a href="${unsubscribeLink}" style="color: #666; text-decoration: underline;">
+              Unsubscribe
+            </a>
+            &nbsp;•&nbsp;
+            <a href="https://jerseypickles.com" style="color: #666; text-decoration: underline;">
+              Visit store
+            </a>
+          </p>
+        </td>
+      </tr>
+    </table>`;
+  }
+
+  /**
+   * Inyecta el link de unsubscribe en el HTML del email
+   * Busca {{unsubscribe_link}} o lo añade al final
+   * @param {string} html - HTML del email
+   * @param {string} customerId - ID del cliente
+   * @param {string} email - Email del cliente
+   * @param {string} campaignId - ID de la campaña (opcional, para tracking)
+   */
+  injectUnsubscribeLink(html, customerId, email, campaignId = null) {
+    const unsubscribeLink = this.generateUnsubscribeLink(customerId, email, campaignId);
+    
+    // Reemplazar placeholder si existe
+    if (html.includes('{{unsubscribe_link}}')) {
+      return html.replace(/\{\{unsubscribe_link\}\}/g, unsubscribeLink);
+    }
+    
+    // Reemplazar otros placeholders comunes
+    if (html.includes('{{unsubscribe_url}}')) {
+      return html.replace(/\{\{unsubscribe_url\}\}/g, unsubscribeLink);
+    }
+    
+    if (html.includes('%unsubscribe_link%')) {
+      return html.replace(/%unsubscribe_link%/g, unsubscribeLink);
+    }
+    
+    // Si el email ya tiene un footer con unsubscribe, no añadir otro
+    if (html.toLowerCase().includes('unsubscribe')) {
+      return html;
+    }
+    
+    // Añadir footer antes del cierre de </body> o al final
+    const footer = this.generateUnsubscribeFooter(customerId, email);
+    
+    if (html.includes('</body>')) {
+      return html.replace('</body>', `${footer}</body>`);
+    } else if (html.includes('</table>')) {
+      // Buscar la última tabla y añadir después
+      const lastTableIndex = html.lastIndexOf('</table>');
+      return html.slice(0, lastTableIndex + 8) + footer + html.slice(lastTableIndex + 8);
+    } else {
+      return html + footer;
+    }
+  }
+
   // ==================== ERROR CLASSIFICATION ====================
   
   classifyError(error) {
     const message = error.message || '';
     const statusCode = error.statusCode || error.status;
     
-    // Rate Limit (429)
-    if (statusCode === 429 || message.toLowerCase().includes('rate limit') || message.toLowerCase().includes('too many requests')) {
-      return {
-        type: 'rate_limit',
-        shouldRetry: true,
-        isFatal: false,
-        backoffMultiplier: 3 // Más tiempo de espera
-      };
+    if (statusCode === 429 || message.toLowerCase().includes('rate limit')) {
+      return { type: 'rate_limit', shouldRetry: true, isFatal: false, backoffMultiplier: 3 };
     }
     
-    // Service Errors (500+)
     if (statusCode >= 500) {
-      return {
-        type: 'service_error',
-        shouldRetry: true,
-        isFatal: false,
-        backoffMultiplier: 2
-      };
+      return { type: 'service_error', shouldRetry: true, isFatal: false, backoffMultiplier: 2 };
     }
     
-    // Network Errors
-    if (message.includes('timeout') || message.includes('ECONNREFUSED') || message.includes('ENOTFOUND')) {
-      return {
-        type: 'network_error',
-        shouldRetry: true,
-        isFatal: false,
-        backoffMultiplier: 2
-      };
+    if (message.includes('timeout') || message.includes('ECONNREFUSED')) {
+      return { type: 'network_error', shouldRetry: true, isFatal: false, backoffMultiplier: 2 };
     }
     
-    // Client Errors (400-499) - NO RETRY
     if (statusCode >= 400 && statusCode < 500) {
-      return {
-        type: 'client_error',
-        shouldRetry: false,
-        isFatal: true,
-        backoffMultiplier: 0
-      };
+      return { type: 'client_error', shouldRetry: false, isFatal: true, backoffMultiplier: 0 };
     }
     
-    // Invalid Email
-    if (message.toLowerCase().includes('invalid email') || message.toLowerCase().includes('invalid recipient')) {
-      return {
-        type: 'invalid_email',
-        shouldRetry: false,
-        isFatal: true,
-        backoffMultiplier: 0
-      };
+    if (message.toLowerCase().includes('invalid email')) {
+      return { type: 'invalid_email', shouldRetry: false, isFatal: true, backoffMultiplier: 0 };
     }
     
-    // Circuit Breaker Open
     if (message.includes('Circuit breaker OPEN')) {
-      return {
-        type: 'circuit_open',
-        shouldRetry: false,
-        isFatal: false,
-        backoffMultiplier: 0
-      };
+      return { type: 'circuit_open', shouldRetry: false, isFatal: false, backoffMultiplier: 0 };
     }
     
-    // Unknown - Retry por defecto
-    return {
-      type: 'unknown',
-      shouldRetry: true,
-      isFatal: false,
-      backoffMultiplier: 2
-    };
+    return { type: 'unknown', shouldRetry: true, isFatal: false, backoffMultiplier: 2 };
   }
 
   // ==================== BACKOFF CALCULATION ====================
   
   calculateBackoff(retryCount) {
-    // Exponential backoff: 2^retry * 1000ms
-    // Retry 0: 1s
-    // Retry 1: 2s
-    // Retry 2: 4s
-    // Retry 3: 8s
     const baseDelay = 1000;
     const exponentialDelay = Math.pow(2, retryCount) * baseDelay;
-    
-    // Max 30s
     return Math.min(exponentialDelay, 30000);
   }
 
@@ -380,7 +432,7 @@ class EmailService {
     return html.replace(
       /href=["']([^"']+)["']/gi,
       (match, url) => {
-        // No trackear links internos de tracking
+        // No trackear links de tracking o unsubscribe
         if (url.includes('/api/track/')) return match;
         
         const encodedUrl = encodeURIComponent(url);
@@ -391,7 +443,6 @@ class EmailService {
   }
 
   injectTracking(html, campaignId, customerId, email) {
-    // Agregar pixel al final del body
     const pixel = this.generateTrackingPixel(campaignId, customerId, email);
     
     if (html.includes('</body>')) {
@@ -400,7 +451,6 @@ class EmailService {
       html += pixel;
     }
     
-    // Wrap links con tracking
     html = this.wrapLinksWithTracking(html, campaignId, customerId, email);
     
     return html;
@@ -457,18 +507,12 @@ class EmailService {
     try {
       const cbState = resendCircuitBreaker.getState();
       
-      const health = {
+      return {
         healthy: cbState.state !== 'OPEN',
         circuitBreaker: cbState,
         stats: this.stats,
         timestamp: new Date()
       };
-      
-      if (cbState.state === 'OPEN') {
-        health.warning = 'Circuit breaker está OPEN - servicio degradado';
-      }
-      
-      return health;
     } catch (error) {
       return {
         healthy: false,
