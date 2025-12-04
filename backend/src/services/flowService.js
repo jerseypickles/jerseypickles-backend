@@ -1,4 +1,4 @@
-// backend/src/services/flowService.js (COMPLETO Y ACTUALIZADO CON TAGS)
+// backend/src/services/flowService.js (CORREGIDO - SIN BUG DE CONDITIONS)
 const Flow = require('../models/Flow');
 const FlowExecution = require('../models/FlowExecution');
 const Customer = require('../models/Customer');
@@ -15,7 +15,7 @@ class FlowService {
     try {
       console.log(`\n🎯 ========== FLOW TRIGGER ==========`);
       console.log(`📌 Type: ${triggerType}`);
-      console.log(`📦 Data:`, data);
+      console.log(`📦 Data:`, JSON.stringify(data, null, 2));
       
       // Buscar flows activos con este trigger
       const flows = await Flow.find({
@@ -25,20 +25,26 @@ class FlowService {
       
       if (flows.length === 0) {
         console.log('⚠️  No active flows found for trigger: ' + triggerType);
-        return;
+        return { triggered: 0 };
       }
       
       console.log(`🔍 Found ${flows.length} active flows for this trigger`);
       
+      const results = [];
+      
       for (const flow of flows) {
         // Verificar si debe ejecutarse
         if (await this.shouldExecute(flow, data)) {
-          await this.startFlow(flow, data);
+          const execution = await this.startFlow(flow, data);
+          results.push({ flowId: flow._id, executionId: execution._id });
         }
       }
       
+      return { triggered: results.length, executions: results };
+      
     } catch (error) {
       console.error('❌ Flow trigger error:', error);
+      throw error;
     }
   }
   
@@ -69,7 +75,7 @@ class FlowService {
     });
     
     if (existing) {
-      console.log('⏭️  Flow already running for this customer');
+      console.log(`⏭️  Flow "${flow.name}" already running for customer ${data.customerId}`);
       return false;
     }
     
@@ -78,18 +84,31 @@ class FlowService {
   
   /**
    * Iniciar un flow
+   * ✅ CORREGIDO: Ahora copia los steps al execution
    */
-  async startFlow(flow, triggerData) {
+  async startFlow(flow, triggerData, options = {}) {
     console.log(`\n🚀 Starting flow: ${flow.name}`);
+    console.log(`   Customer: ${triggerData.customerId}`);
+    console.log(`   Test mode: ${options.testMode || false}`);
     
-    // Crear ejecución
+    // ✅ IMPORTANTE: Copiar los steps del flow a la ejecución
+    // Esto asegura que cambios futuros al flow no afecten esta ejecución
+    const stepsCopy = JSON.parse(JSON.stringify(flow.steps));
+    
+    // Crear ejecución con copia de steps
     const execution = await FlowExecution.create({
       flow: flow._id,
       customer: triggerData.customerId,
+      steps: stepsCopy, // ✅ Copia independiente
       triggerData,
       status: 'active',
       currentStep: 0,
-      startedAt: new Date()
+      startedAt: new Date(),
+      metadata: {
+        flowVersion: flow.__v || 0,
+        source: triggerData.source || 'webhook',
+        testMode: options.testMode || false
+      }
     });
     
     // Actualizar métricas
@@ -100,6 +119,8 @@ class FlowService {
       }
     });
     
+    console.log(`✅ Execution created: ${execution._id}`);
+    
     // Ejecutar primer step inmediatamente
     await this.executeNextStep(execution._id);
     
@@ -108,11 +129,12 @@ class FlowService {
   
   /**
    * Ejecutar siguiente step
+   * ✅ CORREGIDO: Usa los steps de la ejecución, no del flow
    */
   async executeNextStep(executionId) {
     try {
       const execution = await FlowExecution.findById(executionId)
-        .populate('flow')
+        .populate('flow', 'name _id metrics') // Solo campos necesarios
         .populate('customer');
       
       if (!execution) {
@@ -120,13 +142,13 @@ class FlowService {
         return;
       }
       
-      if (execution.status === 'completed' || execution.status === 'failed') {
+      if (execution.status === 'completed' || execution.status === 'failed' || execution.status === 'cancelled') {
         console.log(`⏭️  Execution already ${execution.status}`);
         return;
       }
       
-      const flow = execution.flow;
-      const currentStep = flow.steps[execution.currentStep];
+      // ✅ IMPORTANTE: Usar steps de la ejecución, no del flow
+      const currentStep = execution.steps[execution.currentStep];
       
       if (!currentStep) {
         // Flow completado
@@ -134,67 +156,88 @@ class FlowService {
         return;
       }
       
-      console.log(`⚡ Executing step ${execution.currentStep + 1}/${flow.steps.length}: ${currentStep.type}`);
+      const totalSteps = execution.steps.length;
+      console.log(`\n⚡ Executing step ${execution.currentStep + 1}/${totalSteps}: ${currentStep.type}`);
       
-      switch (currentStep.type) {
-        case 'send_email':
-          await this.executeSendEmail(execution, currentStep);
-          break;
-          
-        case 'wait':
-          await this.executeWait(execution, currentStep);
-          return; // No continuar, esperará
-          
-        case 'condition':
-          await this.executeCondition(execution, currentStep);
-          break;
-          
-        case 'add_tag':
-          await this.executeAddTag(execution, currentStep);
-          break;
-          
-        case 'create_discount':
-          await this.executeCreateDiscount(execution, currentStep);
-          break;
-          
-        default:
-          console.log(`⚠️  Unknown step type: ${currentStep.type}`);
+      const startTime = Date.now();
+      let result = { success: true };
+      let error = null;
+      
+      try {
+        switch (currentStep.type) {
+          case 'send_email':
+            result = await this.executeSendEmail(execution, currentStep);
+            break;
+            
+          case 'wait':
+            await this.executeWait(execution, currentStep);
+            return; // No continuar, esperará
+            
+          case 'condition':
+            // ✅ CORREGIDO: Ya no modifica el flow original
+            await this.executeCondition(execution, currentStep);
+            break;
+            
+          case 'add_tag':
+            result = await this.executeAddTag(execution, currentStep);
+            break;
+            
+          case 'create_discount':
+            result = await this.executeCreateDiscount(execution, currentStep);
+            break;
+            
+          default:
+            console.log(`⚠️  Unknown step type: ${currentStep.type}`);
+        }
+      } catch (stepError) {
+        error = stepError.message;
+        console.error(`❌ Step failed:`, stepError.message);
       }
       
-      // Registrar resultado exitoso
+      const duration = Date.now() - startTime;
+      
+      // Registrar resultado
       execution.stepResults.push({
         stepIndex: execution.currentStep,
+        stepType: currentStep.type,
         executedAt: new Date(),
-        result: { success: true }
+        result: error ? { success: false } : result,
+        error,
+        duration
       });
+      
+      if (error) {
+        execution.status = 'failed';
+        await execution.save();
+        
+        // Actualizar métricas del flow
+        await Flow.findByIdAndUpdate(execution.flow._id, {
+          $inc: { 'metrics.currentlyActive': -1 }
+        });
+        
+        return;
+      }
       
       // Avanzar al siguiente step
       execution.currentStep += 1;
       await execution.save();
       
-      // Ejecutar siguiente step recursivamente
-      await this.executeNextStep(executionId);
+      // Ejecutar siguiente step (con pequeño delay para evitar stack overflow)
+      setImmediate(() => this.executeNextStep(executionId));
       
     } catch (error) {
-      console.error(`❌ Step failed:`, error);
+      console.error(`❌ Execute next step error:`, error);
       
-      // Registrar error
-      const execution = await FlowExecution.findById(executionId);
-      if (execution) {
-        execution.stepResults.push({
-          stepIndex: execution.currentStep,
-          executedAt: new Date(),
-          error: error.message
-        });
-        
-        execution.status = 'failed';
-        await execution.save();
-        
-        // Actualizar métricas del flow
-        await Flow.findByIdAndUpdate(execution.flow, {
-          $inc: { 'metrics.currentlyActive': -1 }
-        });
-      }
+      // Marcar como failed
+      await FlowExecution.findByIdAndUpdate(executionId, {
+        status: 'failed',
+        $push: {
+          stepResults: {
+            executedAt: new Date(),
+            error: error.message
+          }
+        }
+      });
     }
   }
   
@@ -204,10 +247,9 @@ class FlowService {
    * Enviar email
    */
   async executeSendEmail(execution, step) {
-    const { subject, templateId, htmlContent } = step.config;
+    const { subject, templateId, htmlContent, previewText } = step.config;
     const customer = execution.customer;
     
-    // IMPORTANTE: Obtener el ID del flow correctamente
     const flowId = execution.flow._id ? execution.flow._id.toString() : execution.flow.toString();
     const executionId = execution._id.toString();
     const customerId = customer._id.toString();
@@ -215,41 +257,35 @@ class FlowService {
     console.log(`📧 Sending email to ${customer.email}`);
     console.log(`   Subject: ${subject}`);
     console.log(`   Template: ${templateId || 'custom'}`);
-    console.log(`   Flow ID: ${flowId}`);
-    console.log(`   Execution ID: ${executionId}`);
     
     let html;
     
     // Usar template si está definido
-    if (templateId) {
+    if (templateId && templateService[`get${this.capitalize(templateId)}Email`]) {
+      html = templateService[`get${this.capitalize(templateId)}Email`](
+        customer.firstName || 'Friend',
+        execution.triggerData
+      );
+    } else if (templateId) {
+      // Templates predefinidos
       switch (templateId) {
         case 'welcome':
-          html = templateService.getWelcomeEmail(customer.firstName || 'Friend');
+          html = templateService.getWelcomeEmail?.(customer.firstName || 'Friend') || htmlContent;
           break;
         case 'cart_reminder_1':
         case 'abandoned_cart':
           const cartItems = execution.triggerData?.cartItems || [];
-          html = templateService.getAbandonedCartEmail(
+          html = templateService.getAbandonedCartEmail?.(
             customer.firstName || 'Friend',
             cartItems,
             'https://jerseypickles.com/cart'
-          );
+          ) || htmlContent;
           break;
         case 'order_confirmation':
-          html = templateService.getOrderConfirmationEmail(
+          html = templateService.getOrderConfirmationEmail?.(
             customer.firstName || 'Friend',
             execution.triggerData?.orderNumber
-          );
-          break;
-        case 'products_showcase':
-          html = templateService.getProductShowcaseEmail(customer.firstName || 'Friend');
-          break;
-        case 'cart_discount':
-          html = templateService.getDiscountEmail(
-            customer.firstName || 'Friend',
-            '10%',
-            'COMEBACK10'
-          );
+          ) || htmlContent;
           break;
         default:
           html = htmlContent || '<p>Email content</p>';
@@ -270,39 +306,47 @@ class FlowService {
       customer.email
     );
     
-    // ✅ Preparar tags para Resend
+    // Tags para Resend
     const emailTags = [
       { name: 'flow_id', value: flowId },
       { name: 'execution_id', value: executionId },
       { name: 'customer_id', value: customerId }
     ];
     
-    console.log(`📋 Email tags:`, emailTags);
-    
     // Enviar con Resend
     const result = await emailService.sendEmail({
       to: customer.email,
       subject: personalizedSubject,
       html,
-      tags: emailTags  // ✅ Pasar tags directamente
+      tags: emailTags
     });
     
-    // ✅ Mejor logging del resultado
     if (result.success) {
-      console.log(`✅ Email sent successfully!`);
-      console.log(`   Resend ID: ${result.id || 'N/A'}`);
-      console.log(`   To: ${result.email}`);
+      console.log(`✅ Email sent successfully! ID: ${result.id}`);
+      
+      // Registrar email enviado en la ejecución
+      execution.emailsSent.push({
+        resendId: result.id,
+        subject: personalizedSubject,
+        sentAt: new Date()
+      });
+      
+      // Actualizar métricas del flow
+      await Flow.findByIdAndUpdate(flowId, {
+        $inc: { 'metrics.emailsSent': 1 }
+      });
     } else {
-      console.error(`❌ Email failed to send: ${result.error}`);
       throw new Error(`Failed to send email: ${result.error}`);
     }
     
-    // Actualizar métricas del flow
-    await Flow.findByIdAndUpdate(flowId, {
-      $inc: { 'metrics.emailsSent': 1 }
-    });
-    
     return result;
+  }
+  
+  /**
+   * Helper para capitalizar
+   */
+  capitalize(str) {
+    return str.charAt(0).toUpperCase() + str.slice(1).replace(/_([a-z])/g, (g) => g[1].toUpperCase());
   }
   
   /**
@@ -318,7 +362,9 @@ class FlowService {
     execution.currentStep += 1; // Preparar para siguiente step
     await execution.save();
     
-    console.log(`⏰ Waiting ${delayMinutes} minutes until ${resumeAt.toISOString()}`);
+    const hours = Math.floor(delayMinutes / 60);
+    const mins = delayMinutes % 60;
+    console.log(`⏰ Waiting ${hours}h ${mins}m until ${resumeAt.toISOString()}`);
     
     // Intentar agregar a cola
     try {
@@ -332,7 +378,6 @@ class FlowService {
         );
         console.log('✅ Flow job scheduled in Redis queue');
       } else {
-        console.log('⚠️  Flow queue not available, using setTimeout fallback');
         this.scheduleWithTimeout(execution._id.toString(), delayMinutes * 60 * 1000);
       }
     } catch (error) {
@@ -345,10 +390,18 @@ class FlowService {
    * Fallback para scheduling sin Redis
    */
   scheduleWithTimeout(executionId, delay) {
+    console.log(`📅 Scheduling resume with setTimeout in ${delay}ms`);
     setTimeout(async () => {
       try {
         console.log(`⏰ Resuming flow execution: ${executionId}`);
-        await this.executeNextStep(executionId);
+        
+        // Verificar que aún está en waiting
+        const execution = await FlowExecution.findById(executionId);
+        if (execution?.status === 'waiting') {
+          execution.status = 'active';
+          await execution.save();
+          await this.executeNextStep(executionId);
+        }
       } catch (error) {
         console.error('Error resuming flow:', error);
       }
@@ -357,6 +410,7 @@ class FlowService {
   
   /**
    * Evaluar condición
+   * ✅ CORREGIDO: Ya no modifica el flow original, solo la ejecución
    */
   async executeCondition(execution, step) {
     const { conditionType, conditionValue, ifTrue, ifFalse } = step.config;
@@ -385,21 +439,17 @@ class FlowService {
         console.log(`⚠️  Unknown condition type: ${conditionType}`);
     }
     
-    console.log(`🔀 Condition [${conditionType}]: ${conditionMet ? 'TRUE' : 'FALSE'}`);
+    console.log(`🔀 Condition [${conditionType}]: ${conditionMet ? 'TRUE ✅' : 'FALSE ❌'}`);
     
     // Ejecutar branch correspondiente
     const branch = conditionMet ? ifTrue : ifFalse;
     
     if (branch && branch.length > 0) {
-      // Insertar los steps del branch después del step actual
-      const flow = execution.flow;
-      const nextStepIndex = execution.currentStep + 1;
-      
       console.log(`   Inserting ${branch.length} steps from ${conditionMet ? 'TRUE' : 'FALSE'} branch`);
       
-      // Insertar steps del branch en el flow
-      flow.steps.splice(nextStepIndex, 0, ...branch);
-      await flow.save();
+      // ✅ CORREGIDO: Insertar steps en la EJECUCIÓN, no en el flow
+      execution.insertStepsAfterCurrent(branch);
+      // No guardamos aquí, se guarda en executeNextStep
     }
   }
   
@@ -412,7 +462,7 @@ class FlowService {
     
     if (!tagName) {
       console.log('⚠️  No tag name specified');
-      return;
+      return { success: false, error: 'No tag name' };
     }
     
     // Actualizar en Shopify si tiene ID
@@ -431,6 +481,8 @@ class FlowService {
     });
     
     console.log(`🏷️  Tag added locally: ${tagName}`);
+    
+    return { success: true, tagName };
   }
   
   /**
@@ -462,7 +514,7 @@ class FlowService {
       
       console.log(`🎫 Discount created: ${code} (${discountValue}${discountType === 'percentage' ? '%' : '$'})`);
       
-      return { code, priceRuleId: priceRule.id };
+      return { success: true, code, priceRuleId: priceRule.id };
     } catch (error) {
       console.error('❌ Error creating discount:', error.message);
       throw error;
@@ -477,23 +529,46 @@ class FlowService {
     execution.completedAt = new Date();
     await execution.save();
     
+    const flowId = execution.flow._id || execution.flow;
+    
     // Actualizar métricas
-    await Flow.findByIdAndUpdate(execution.flow._id || execution.flow, {
+    await Flow.findByIdAndUpdate(flowId, {
       $inc: { 
         'metrics.currentlyActive': -1,
         'metrics.completed': 1
       }
     });
     
-    const customer = execution.customer;
-    console.log(`✅ Flow completed for customer ${customer.email || customer._id}`);
+    const customerEmail = execution.customer?.email || execution.customer;
+    console.log(`\n✅ ========== FLOW COMPLETED ==========`);
+    console.log(`   Customer: ${customerEmail}`);
+    console.log(`   Duration: ${this.formatDuration(execution.completedAt - execution.startedAt)}`);
+    console.log(`   Steps executed: ${execution.stepResults.length}`);
+    console.log(`   Emails sent: ${execution.emailsSent?.length || 0}`);
+  }
+  
+  /**
+   * Formatear duración
+   */
+  formatDuration(ms) {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    
+    if (days > 0) return `${days}d ${hours % 24}h`;
+    if (hours > 0) return `${hours}h ${minutes % 60}m`;
+    if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+    return `${seconds}s`;
   }
   
   /**
    * Test flow con cliente específico
    */
   async testFlow(flowId, customerId) {
-    console.log(`\n🧪 Testing flow ${flowId} with customer ${customerId}`);
+    console.log(`\n🧪 ========== TEST FLOW ==========`);
+    console.log(`   Flow: ${flowId}`);
+    console.log(`   Customer: ${customerId}`);
     
     const flow = await Flow.findById(flowId);
     if (!flow) {
@@ -514,7 +589,61 @@ class FlowService {
       source: 'test'
     };
     
-    return await this.startFlow(flow, triggerData);
+    return await this.startFlow(flow, triggerData, { testMode: true });
+  }
+  
+  /**
+   * Cancelar ejecución
+   */
+  async cancelExecution(executionId) {
+    const execution = await FlowExecution.findById(executionId);
+    
+    if (!execution) {
+      throw new Error('Execution not found');
+    }
+    
+    if (execution.status === 'completed' || execution.status === 'cancelled') {
+      throw new Error(`Cannot cancel: execution is ${execution.status}`);
+    }
+    
+    execution.status = 'cancelled';
+    execution.completedAt = new Date();
+    await execution.save();
+    
+    // Actualizar métricas
+    await Flow.findByIdAndUpdate(execution.flow, {
+      $inc: { 'metrics.currentlyActive': -1 }
+    });
+    
+    console.log(`🚫 Execution cancelled: ${executionId}`);
+    
+    return execution;
+  }
+  
+  /**
+   * Procesar jobs pendientes (para recovery)
+   */
+  async processWaitingExecutions() {
+    const now = new Date();
+    
+    const readyExecutions = await FlowExecution.find({
+      status: 'waiting',
+      resumeAt: { $lte: now }
+    });
+    
+    console.log(`🔄 Found ${readyExecutions.length} waiting executions ready to resume`);
+    
+    for (const execution of readyExecutions) {
+      execution.status = 'active';
+      await execution.save();
+      
+      // Ejecutar con pequeño delay entre cada uno
+      setTimeout(() => {
+        this.executeNextStep(execution._id);
+      }, Math.random() * 1000);
+    }
+    
+    return readyExecutions.length;
   }
 }
 
