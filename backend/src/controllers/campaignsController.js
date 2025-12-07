@@ -1023,11 +1023,13 @@ class CampaignsController {
         shopify: events.filter(e => e.source === 'shopify').length,
       };
       
-      const clickEvents = events.filter(e => e.eventType === 'clicked' && e.metadata?.url);
+      const clickEvents = events.filter(e => e.eventType === 'clicked' && (e.clickedUrl || e.metadata?.url));
       const linkCounts = {};
       clickEvents.forEach(event => {
-        const url = event.metadata.url;
-        linkCounts[url] = (linkCounts[url] || 0) + 1;
+        const url = event.clickedUrl || event.metadata?.url;
+        if (url) {
+          linkCounts[url] = (linkCounts[url] || 0) + 1;
+        }
       });
       const topLinks = Object.entries(linkCounts)
         .map(([url, clicks]) => ({ url, clicks }))
