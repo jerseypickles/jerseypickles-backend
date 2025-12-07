@@ -1,4 +1,4 @@
-// backend/src/controllers/campaignsController.js - ULTRA ESCALABLE CON RETRY
+// backend/src/controllers/campaignsController.js - ULTRA ESCALABLE CON RETRY + ANALYTICS
 const Campaign = require('../models/Campaign');
 const Segment = require('../models/Segment');
 const List = require('../models/List');
@@ -184,6 +184,7 @@ class CampaignsController {
     this.sendTestEmail = this.sendTestEmail.bind(this);
     this.getStats = this.getStats.bind(this);
     this.getEvents = this.getEvents.bind(this);
+    this.getAnalytics = this.getAnalytics.bind(this);  // 🆕 NUEVO
     this.createFromTemplate = this.createFromTemplate.bind(this);
     this.cleanupDrafts = this.cleanupDrafts.bind(this);
     this.healthCheck = this.healthCheck.bind(this);
@@ -1227,6 +1228,157 @@ class CampaignsController {
       
     } catch (error) {
       console.error('Error obteniendo eventos:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // ==================== 🆕 ANALYTICS AGREGADOS ====================
+
+  /**
+   * GET /api/campaigns/analytics
+   * Obtiene métricas agregadas de todas las campañas
+   * Query params: range (7d, 30d, 90d)
+   */
+  async getAnalytics(req, res) {
+    try {
+      const { range = '30d' } = req.query;
+      
+      // Calcular fecha de inicio según el rango
+      const now = new Date();
+      let startDate = new Date();
+      let rangeDays = 30;
+      
+      switch (range) {
+        case '7d':
+          rangeDays = 7;
+          startDate.setDate(now.getDate() - 7);
+          break;
+        case '90d':
+          rangeDays = 90;
+          startDate.setDate(now.getDate() - 90);
+          break;
+        case '30d':
+        default:
+          rangeDays = 30;
+          startDate.setDate(now.getDate() - 30);
+          break;
+      }
+      
+      // Obtener campañas enviadas en el rango
+      const campaigns = await Campaign.find({
+        status: 'sent',
+        sentAt: { $gte: startDate }
+      }).sort({ sentAt: -1 });
+      
+      // Calcular métricas agregadas
+      const totalSent = campaigns.reduce((sum, c) => sum + (c.stats?.sent || 0), 0);
+      const totalDelivered = campaigns.reduce((sum, c) => sum + (c.stats?.delivered || 0), 0);
+      const totalOpened = campaigns.reduce((sum, c) => sum + (c.stats?.opened || 0), 0);
+      const totalClicked = campaigns.reduce((sum, c) => sum + (c.stats?.clicked || 0), 0);
+      const totalBounced = campaigns.reduce((sum, c) => sum + (c.stats?.bounced || 0), 0);
+      const totalUnsubs = campaigns.reduce((sum, c) => sum + (c.stats?.unsubscribed || 0), 0);
+      const totalRevenue = campaigns.reduce((sum, c) => sum + (c.stats?.totalRevenue || 0), 0);
+      const totalPurchases = campaigns.reduce((sum, c) => sum + (c.stats?.purchased || 0), 0);
+      
+      // Calcular promedios
+      const campaignCount = campaigns.length || 1;
+      const avgOpenRate = totalSent > 0 ? (totalOpened / totalSent) * 100 : 0;
+      const avgClickRate = totalOpened > 0 ? (totalClicked / totalOpened) * 100 : 0;
+      const avgBounceRate = totalSent > 0 ? (totalBounced / totalSent) * 100 : 0;
+      const avgUnsubRate = totalSent > 0 ? (totalUnsubs / totalSent) * 100 : 0;
+      
+      // Calcular cambios vs período anterior
+      const previousStartDate = new Date(startDate);
+      previousStartDate.setDate(previousStartDate.getDate() - rangeDays);
+      
+      const previousCampaigns = await Campaign.find({
+        status: 'sent',
+        sentAt: { 
+          $gte: previousStartDate,
+          $lt: startDate 
+        }
+      });
+      
+      const prevSent = previousCampaigns.reduce((sum, c) => sum + (c.stats?.sent || 0), 0);
+      const prevOpened = previousCampaigns.reduce((sum, c) => sum + (c.stats?.opened || 0), 0);
+      const prevClicked = previousCampaigns.reduce((sum, c) => sum + (c.stats?.clicked || 0), 0);
+      const prevRevenue = previousCampaigns.reduce((sum, c) => sum + (c.stats?.totalRevenue || 0), 0);
+      
+      const calcChange = (current, previous) => {
+        if (previous === 0) return current > 0 ? 100 : 0;
+        return ((current - previous) / previous) * 100;
+      };
+      
+      const prevOpenRate = prevSent > 0 ? (prevOpened / prevSent) * 100 : 0;
+      const prevClickRate = prevOpened > 0 ? (prevClicked / prevOpened) * 100 : 0;
+      
+      // Generar timeline por día
+      const timeline = [];
+      
+      for (let i = 0; i < rangeDays; i++) {
+        const date = new Date(startDate);
+        date.setDate(date.getDate() + i);
+        date.setHours(0, 0, 0, 0);
+        
+        const nextDay = new Date(date);
+        nextDay.setDate(nextDay.getDate() + 1);
+        
+        const dayCampaigns = campaigns.filter(c => {
+          const sentDate = new Date(c.sentAt);
+          return sentDate >= date && sentDate < nextDay;
+        });
+        
+        timeline.push({
+          date: date.toISOString().split('T')[0],
+          dateLabel: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+          campaigns: dayCampaigns.length,
+          sent: dayCampaigns.reduce((sum, c) => sum + (c.stats?.sent || 0), 0),
+          opened: dayCampaigns.reduce((sum, c) => sum + (c.stats?.opened || 0), 0),
+          clicked: dayCampaigns.reduce((sum, c) => sum + (c.stats?.clicked || 0), 0),
+          revenue: dayCampaigns.reduce((sum, c) => sum + (c.stats?.totalRevenue || 0), 0),
+        });
+      }
+      
+      res.json({
+        range,
+        period: {
+          start: startDate.toISOString(),
+          end: now.toISOString()
+        },
+        summary: {
+          totalCampaigns: campaigns.length,
+          totalSent,
+          totalDelivered,
+          totalOpened,
+          totalClicked,
+          totalBounced,
+          totalUnsubs,
+          totalRevenue,
+          totalPurchases,
+          avgOpenRate: parseFloat(avgOpenRate.toFixed(2)),
+          avgClickRate: parseFloat(avgClickRate.toFixed(2)),
+          avgBounceRate: parseFloat(avgBounceRate.toFixed(2)),
+          avgUnsubRate: parseFloat(avgUnsubRate.toFixed(2)),
+          // Cambios vs período anterior
+          sentChange: parseFloat(calcChange(totalSent, prevSent).toFixed(1)),
+          openRateChange: parseFloat((avgOpenRate - prevOpenRate).toFixed(1)),
+          clickRateChange: parseFloat((avgClickRate - prevClickRate).toFixed(1)),
+          revenueChange: parseFloat(calcChange(totalRevenue, prevRevenue).toFixed(1)),
+        },
+        timeline,
+        topCampaigns: campaigns
+          .sort((a, b) => (b.stats?.totalRevenue || 0) - (a.stats?.totalRevenue || 0))
+          .slice(0, 5)
+          .map(c => ({
+            _id: c._id,
+            name: c.name,
+            sentAt: c.sentAt,
+            stats: c.stats
+          }))
+      });
+      
+    } catch (error) {
+      console.error('Error obteniendo analytics:', error);
       res.status(500).json({ error: error.message });
     }
   }

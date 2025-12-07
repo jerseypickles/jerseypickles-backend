@@ -17,6 +17,9 @@ router.post('/', authorize('admin', 'manager'), campaignsController.create);
 
 // ==================== RUTAS ESPECÍFICAS (ANTES DE /:id) ====================
 
+// 🆕 Analytics agregados - DEBE IR ANTES DE /:id
+router.get('/analytics', authorize('admin', 'manager'), campaignsController.getAnalytics);
+
 // Queue management
 router.get('/queue/status', authorize('admin', 'manager'), campaignsController.getQueueStatus);
 router.post('/queue/pause', authorize('admin'), campaignsController.pauseQueue);
@@ -29,6 +32,9 @@ router.post('/from-template', authorize('admin', 'manager'), campaignsController
 
 // Limpiar campañas borrador
 router.delete('/cleanup/drafts', authorize('admin'), campaignsController.cleanupDrafts);
+
+// Health check
+router.get('/health', campaignsController.healthCheck);
 
 // ==================== RUTAS CON PARÁMETROS /:id (AL FINAL) ====================
 
