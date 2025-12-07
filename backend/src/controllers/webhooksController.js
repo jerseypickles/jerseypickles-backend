@@ -282,6 +282,16 @@ class WebhooksController {
         console.log(`   Campaign: ${campaignId}`);
         console.log(`   Revenue: $${shopifyOrder.total_price}`);
         
+        // ✅ NUEVO: Actualizar la orden con attribution
+        await Order.findByIdAndUpdate(order._id, {
+          'attribution.campaign': campaignId,
+          'attribution.source': attributionMethod === 'cookie' ? 'email_click' : 
+                                attributionMethod === 'utm' ? 'utm' : 
+                                attributionMethod === 'last_click' ? 'email_click' : 'unknown',
+          'attribution.clickedAt': new Date()
+        });
+        console.log(`   ✅ Order ${order.orderNumber} attributed to campaign`);
+        
         await EmailEvent.create({
           campaign: campaignId,
           customer: customerId,
