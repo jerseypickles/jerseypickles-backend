@@ -20,41 +20,50 @@ let isShuttingDown = false;
 // ========== CONFIGURACIÓN OPTIMIZADA PARA RESEND 10 req/s ==========
 
 function getAdaptiveConfig(totalEmails = 0) {
-  // ⚠️ IMPORTANTE: Resend = 10 req/s máximo
-  // Con CONCURRENCY, el rate real = RATE_LIMIT * CONCURRENCY
-  // Entonces: rate_limit * concurrency <= 10
+  // ═══════════════════════════════════════════════════════════════
+  // 🚀 OPTIMIZADO PARA RESEND BATCH API
+  // ═══════════════════════════════════════════════════════════════
+  // Batch API: 100 emails = 1 request
+  // Límite Resend: 10 req/s
+  // Fórmula: RATE_LIMIT × CONCURRENCY ≤ 10 (dejamos margen)
+  // Throughput: RATE_LIMIT × CONCURRENCY × 100 emails/s
+  // ═══════════════════════════════════════════════════════════════
   
   if (totalEmails < 5000) {
     return {
       name: 'FAST',
-      BATCH_SIZE: 100,
-      RATE_LIMIT_PER_SECOND: 5,   // 5 * 2 = 10 max
+      BATCH_SIZE: 100,            // Máximo de Resend Batch API
+      RATE_LIMIT_PER_SECOND: 4,   // 4 × 2 = 8 req/s (margen de 2)
       CONCURRENCY: 2,
-      description: 'Campañas pequeñas (5 req/s × 2 workers = 10 req/s)'
+      DELAY_BETWEEN_BATCHES: 100, // 100ms entre sub-batches
+      description: 'Campañas pequeñas: ~800 emails/s'
     };
   } else if (totalEmails < 20000) {
     return {
       name: 'BALANCED',
       BATCH_SIZE: 100,
-      RATE_LIMIT_PER_SECOND: 4,   // 4 * 2 = 8 (margen seguro)
+      RATE_LIMIT_PER_SECOND: 3,   // 3 × 2 = 6 req/s (margen seguro)
       CONCURRENCY: 2,
-      description: 'Campañas medianas (4 req/s × 2 workers = 8 req/s)'
+      DELAY_BETWEEN_BATCHES: 150,
+      description: 'Campañas medianas: ~600 emails/s'
     };
   } else if (totalEmails < 100000) {
     return {
       name: 'STABLE',
-      BATCH_SIZE: 75,
-      RATE_LIMIT_PER_SECOND: 8,   // 8 * 1 = 8
+      BATCH_SIZE: 100,
+      RATE_LIMIT_PER_SECOND: 6,   // 6 × 1 = 6 req/s
       CONCURRENCY: 1,             // Single worker para control
-      description: 'Campañas grandes (8 req/s × 1 worker)'
+      DELAY_BETWEEN_BATCHES: 200,
+      description: 'Campañas grandes: ~600 emails/s'
     };
   } else {
     return {
       name: 'ULTRA_STABLE',
-      BATCH_SIZE: 50,
-      RATE_LIMIT_PER_SECOND: 6,   // Conservador para mega campañas
+      BATCH_SIZE: 100,
+      RATE_LIMIT_PER_SECOND: 5,   // 5 × 1 = 5 req/s (muy conservador)
       CONCURRENCY: 1,
-      description: 'Campañas masivas (6 req/s × 1 worker)'
+      DELAY_BETWEEN_BATCHES: 250,
+      description: 'Campañas masivas: ~500 emails/s'
     };
   }
 }
@@ -185,6 +194,8 @@ async function initializeQueue() {
 
 // ========== PROCESAMIENTO OPTIMIZADO ==========
 
+// En processEmailBatchOptimized, reemplazar el loop individual por batch
+
 async function processEmailBatchOptimized(job) {
   const { campaignId, recipients, chunkIndex } = job.data;
   const workerId = `w-${process.pid}-${Date.now()}`;
@@ -221,7 +232,6 @@ async function processEmailBatchOptimized(job) {
     ]
   }).select('email emailStatus bounceInfo').lean();
   
-  // Crear Set para lookup O(1)
   const bouncedEmails = new Set();
   const complainedEmails = new Set();
   const unsubscribedEmails = new Set();
@@ -237,22 +247,20 @@ async function processEmailBatchOptimized(job) {
     }
   });
   
-  console.log(`   📋 Pre-carga: ${invalidCustomers.length} emails inválidos (1 query)`);
+  console.log(`   📋 Pre-carga: ${invalidCustomers.length} emails inválidos`);
   
   // ═══════════════════════════════════════════════════════════════
-  // 🚀 OPTIMIZACIÓN #2: Acumular eventos para bulk insert
+  // 🚀 NUEVO: Filtrar y preparar emails válidos para BATCH SEND
   // ═══════════════════════════════════════════════════════════════
-  const emailEventsToInsert = [];
   const emailSendUpdates = [];
+  const emailsToSend = [];  // Para Resend Batch API
+  const emailMetadata = []; // Para tracking post-envío
   
-  for (let i = 0; i < recipients.length; i++) {
-    const recipient = recipients[i];
+  for (const recipient of recipients) {
     const normalizedEmail = recipient.email.toLowerCase().trim();
     const jobId = generateJobId(campaignId, normalizedEmail);
     
-    // ═══════════════════════════════════════════════════════════════
-    // CHECK RÁPIDO (O(1) lookup en Sets, NO query MongoDB)
-    // ═══════════════════════════════════════════════════════════════
+    // Skip bounced/complained/unsubscribed (O(1) lookup)
     if (bouncedEmails.has(normalizedEmail)) {
       results.skippedBounced++;
       results.skipped++;
@@ -292,107 +300,136 @@ async function processEmailBatchOptimized(job) {
       continue;
     }
     
-    try {
-      // Claim (única operación individual necesaria para atomicidad)
-      const claim = await EmailSend.claimForProcessing(jobId, workerId);
-      
-      if (!claim || claim.status === 'sent' || claim.status === 'delivered') {
-        results.skipped++;
-        continue;
-      }
-      
-      // Enviar vía Resend
-      const sendResult = await emailService.sendEmail({
-        to: recipient.email,
-        subject: recipient.subject,
-        html: recipient.html,
-        from: recipient.from,
-        replyTo: recipient.replyTo,
-        tags: [
-          { name: 'campaign_id', value: campaignId },
-          { name: 'customer_id', value: recipient.customerId || 'unknown' }
-        ]
-      });
-      
-      if (sendResult.success) {
-        // Acumular para bulk update (no update individual)
-        emailSendUpdates.push({
-          updateOne: {
-            filter: { jobId, lockedBy: workerId },
-            update: {
-              $set: {
-                status: 'sent',
-                sentAt: new Date(),
-                resendId: sendResult.id,
-                lockedBy: null,
-                lockedAt: null
-              }
-            }
-          }
-        });
-        
-        // Acumular evento para bulk insert
-        emailEventsToInsert.push({
-          campaign: campaignId,
-          customer: recipient.customerId || null,
-          email: recipient.email,
-          eventType: 'sent',
-          source: 'custom',
-          resendId: sendResult.id,
-          eventDate: new Date()
-        });
-        
-        results.sent++;
-        
-      } else {
-        throw new Error(sendResult.error || 'Error desconocido');
-      }
-      
-    } catch (error) {
-      const errorType = classifyError(error);
-      
-      if (errorType === 'rate_limit') {
-        console.warn(`\n   ⚠️  RATE LIMIT - pausa 60s...`);
-        await new Promise(resolve => setTimeout(resolve, 60000));
-        
-        emailSendUpdates.push({
-          updateOne: {
-            filter: { jobId },
-            update: {
-              $set: { status: 'pending', lockedBy: null, lockedAt: null, lastError: 'Rate limit' },
-              $inc: { attempts: 1 }
-            }
-          }
-        });
-        
-        throw error; // Re-throw para que BullMQ reintente el batch
-        
-      } else {
-        emailSendUpdates.push({
-          updateOne: {
-            filter: { jobId },
-            update: {
-              $set: { status: 'failed', lastError: error.message, failedAt: new Date() }
-            }
-          }
-        });
-        
-        results.failed++;
-        results.errors.push({ email: recipient.email, error: error.message });
-      }
+    // Claim for processing
+    const claim = await EmailSend.claimForProcessing(jobId, workerId);
+    
+    if (!claim || claim.status === 'sent' || claim.status === 'delivered') {
+      results.skipped++;
+      continue;
     }
     
-    // Progress cada 20 emails
-    if (i > 0 && i % 20 === 0) {
-      await job.updateProgress(Math.round((i / recipients.length) * 100));
+    // ✅ Agregar a batch para envío
+    emailsToSend.push({
+      from: recipient.from,
+      to: recipient.email,
+      subject: recipient.subject,
+      html: recipient.html,
+      replyTo: recipient.replyTo,
+      tags: [
+        { name: 'campaign_id', value: campaignId },
+        { name: 'customer_id', value: recipient.customerId || 'unknown' }
+      ]
+    });
+    
+    emailMetadata.push({
+      jobId,
+      email: normalizedEmail,
+      customerId: recipient.customerId,
+      workerId
+    });
+  }
+  
+  console.log(`   📧 Emails válidos para envío: ${emailsToSend.length}`);
+  
+  // ═══════════════════════════════════════════════════════════════
+  // 🚀 NUEVO: Enviar con RESEND BATCH API (máximo 100 por request)
+  // ═══════════════════════════════════════════════════════════════
+  const emailEventsToInsert = [];
+  
+  if (emailsToSend.length > 0) {
+    // Dividir en sub-batches de 100 (límite de Resend Batch API)
+    const RESEND_BATCH_LIMIT = 100;
+    
+    for (let i = 0; i < emailsToSend.length; i += RESEND_BATCH_LIMIT) {
+      const subBatch = emailsToSend.slice(i, i + RESEND_BATCH_LIMIT);
+      const subMetadata = emailMetadata.slice(i, i + RESEND_BATCH_LIMIT);
+      
+      try {
+        // ✅ UNA llamada a Resend por cada 100 emails
+        const batchResult = await emailService.sendBatch(subBatch, {
+          includeUnsubscribe: false  // Ya está inyectado en el HTML
+        });
+        
+        if (batchResult.success) {
+          // Marcar todos como enviados
+          const batchIds = batchResult.data?.data || [];
+          
+          subMetadata.forEach((meta, idx) => {
+            const resendId = batchIds[idx]?.id || null;
+            
+            emailSendUpdates.push({
+              updateOne: {
+                filter: { jobId: meta.jobId, lockedBy: meta.workerId },
+                update: {
+                  $set: {
+                    status: 'sent',
+                    sentAt: new Date(),
+                    resendId: resendId,
+                    lockedBy: null,
+                    lockedAt: null
+                  }
+                }
+              }
+            });
+            
+            emailEventsToInsert.push({
+              campaign: campaignId,
+              customer: meta.customerId || null,
+              email: meta.email,
+              eventType: 'sent',
+              source: 'custom',
+              resendId: resendId,
+              eventDate: new Date()
+            });
+            
+            results.sent++;
+          });
+          
+          console.log(`   ✅ Sub-batch ${Math.floor(i/RESEND_BATCH_LIMIT) + 1}: ${subBatch.length} emails enviados`);
+          
+        } else {
+          throw new Error(batchResult.error || 'Batch send failed');
+        }
+        
+      } catch (error) {
+        const errorType = classifyError(error);
+        
+        if (errorType === 'rate_limit') {
+          console.warn(`\n   ⚠️  RATE LIMIT en batch - pausa 30s y retry...`);
+          await new Promise(resolve => setTimeout(resolve, 30000));
+          
+          // Re-throw para que BullMQ reintente el job completo
+          throw error;
+          
+        } else {
+          // Marcar sub-batch como fallido
+          subMetadata.forEach(meta => {
+            emailSendUpdates.push({
+              updateOne: {
+                filter: { jobId: meta.jobId },
+                update: {
+                  $set: { status: 'failed', lastError: error.message, failedAt: new Date() }
+                }
+              }
+            });
+            results.failed++;
+          });
+          
+          console.error(`   ❌ Sub-batch falló: ${error.message}`);
+          results.errors.push({ batch: Math.floor(i/RESEND_BATCH_LIMIT), error: error.message });
+        }
+      }
+      
+      // ⚠️ Pequeño delay entre sub-batches para evitar bursts
+      if (i + RESEND_BATCH_LIMIT < emailsToSend.length) {
+        await new Promise(resolve => setTimeout(resolve, 150));  // 150ms = ~6-7 req/s
+      }
     }
   }
   
   // ═══════════════════════════════════════════════════════════════
-  // 🚀 OPTIMIZACIÓN #3: Bulk writes al final del batch
+  // Bulk writes al final
   // ═══════════════════════════════════════════════════════════════
-  
-  // Bulk update EmailSends (1 operación vs N)
   if (emailSendUpdates.length > 0) {
     try {
       await EmailSend.bulkWrite(emailSendUpdates, { ordered: false });
@@ -402,7 +439,6 @@ async function processEmailBatchOptimized(job) {
     }
   }
   
-  // Bulk insert EmailEvents (1 operación vs N)
   if (emailEventsToInsert.length > 0) {
     try {
       await EmailEvent.insertMany(emailEventsToInsert, { ordered: false });
@@ -412,9 +448,7 @@ async function processEmailBatchOptimized(job) {
     }
   }
   
-  // ═══════════════════════════════════════════════════════════════
-  // 🚀 OPTIMIZACIÓN #4: Update Campaign stats UNA vez por batch
-  // ═══════════════════════════════════════════════════════════════
+  // Update Campaign stats
   if (results.sent > 0 || results.failed > 0 || results.skipped > 0) {
     await Campaign.findByIdAndUpdate(campaignId, {
       $inc: {
@@ -423,18 +457,13 @@ async function processEmailBatchOptimized(job) {
         'stats.skipped': results.skipped
       }
     });
-    console.log(`   📊 Campaign stats: +${results.sent} sent, +${results.skipped} skip`);
   }
   
   const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-  const throughput = results.sent > 0 ? (results.sent / duration).toFixed(1) : '0.0';
+  const throughput = results.sent > 0 ? (results.sent / parseFloat(duration)).toFixed(1) : '0.0';
   
-  console.log(`\n   ✅ Batch ${chunkIndex} completado en ${duration}s (${throughput}/s)`);
+  console.log(`\n   ✅ Batch ${chunkIndex} completado en ${duration}s (${throughput} emails/s)`);
   console.log(`      Sent: ${results.sent} | Skip: ${results.skipped} | Fail: ${results.failed}`);
-  
-  if (results.skippedBounced || results.skippedComplained || results.skippedUnsubscribed) {
-    console.log(`      Detalle skip: bounce=${results.skippedBounced}, complaint=${results.skippedComplained}, unsub=${results.skippedUnsubscribed}`);
-  }
   console.log(`════════════════════════════════════════════\n`);
   
   return results;
