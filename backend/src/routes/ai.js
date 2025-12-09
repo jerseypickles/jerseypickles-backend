@@ -89,6 +89,72 @@ router.get('/insights/quick', authorize('admin', 'manager'), async (req, res) =>
   }
 });
 
+// ==================== 🆕 CLAUDE AI INSIGHTS ====================
+
+/**
+ * GET /api/ai/claude
+ * Obtener insights generados por Claude (lee de MongoDB)
+ */
+router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
+  try {
+    const insight = await AIInsight.getLatest('ai_generated_insights', 30);
+    
+    if (!insight) {
+      return res.json({
+        success: false,
+        message: 'Insights de Claude pendientes. El sistema los generará automáticamente.',
+        status: 'pending',
+        insights: [],
+        summary: '',
+        recommendations: []
+      });
+    }
+    
+    res.json({
+      success: true,
+      insights: insight.data?.insights || [],
+      summary: insight.data?.summary || '',
+      recommendations: insight.data?.recommendations || [],
+      model: insight.data?.model || 'unknown',
+      tokensUsed: insight.data?.tokensUsed || { input: 0, output: 0 },
+      _meta: {
+        generatedAt: insight.data?.generatedAt || insight.createdAt,
+        calculatedAt: insight.createdAt,
+        ageHours: Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60)),
+        nextCalculation: insight.nextCalculationAt
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error obteniendo Claude insights:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ai/claude/status
+ * Estado del servicio de Claude
+ */
+router.get('/claude/status', authorize('admin', 'manager'), async (req, res) => {
+  try {
+    const claudeService = require('../services/claudeService');
+    
+    const latestInsight = await AIInsight.getLatest('ai_generated_insights', 30);
+    
+    res.json({
+      enabled: claudeService.isAvailable(),
+      model: claudeService.model,
+      lastGenerated: latestInsight?.createdAt || null,
+      lastTokensUsed: latestInsight?.data?.tokensUsed || null,
+      insightsCount: latestInsight?.data?.insights?.length || 0
+    });
+    
+  } catch (error) {
+    console.error('Error obteniendo estado de Claude:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== SUBJECT LINE ANALYSIS ====================
 
 /**

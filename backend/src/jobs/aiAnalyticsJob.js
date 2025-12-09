@@ -1,13 +1,15 @@
 // backend/src/jobs/aiAnalyticsJob.js
-// 🧠 AI Analytics Cron Job - Calcula insights periódicamente
+// 🧠 AI Analytics Cron Job - Calcula insights y genera análisis con Claude
 const cron = require('node-cron');
 const AIInsight = require('../models/AIInsight');
 const aiCalculator = require('../services/aiCalculator');
+const claudeService = require('../services/claudeService');
 
 /**
  * AI Analytics Job
  * 
  * Ejecuta análisis de IA en segundo plano y guarda resultados en MongoDB.
+ * NUEVO: Integra Claude API para generar insights inteligentes.
  * Los endpoints solo leen de la DB, nunca calculan en tiempo real.
  */
 
@@ -16,6 +18,7 @@ class AIAnalyticsJob {
     this.isRunning = false;
     this.lastRun = null;
     this.schedule = null;
+    this.claudeEnabled = false;
   }
 
   /**
@@ -25,6 +28,16 @@ class AIAnalyticsJob {
   init(cronExpression = '0 */6 * * *') {
     console.log('🧠 AI Analytics Job inicializado');
     console.log(`   Schedule: ${cronExpression}`);
+    
+    // Inicializar Claude Service
+    claudeService.init();
+    this.claudeEnabled = claudeService.isAvailable();
+    
+    if (this.claudeEnabled) {
+      console.log('   🤖 Claude API: ✅ Habilitado');
+    } else {
+      console.log('   🤖 Claude API: ⚠️  No configurado (usando análisis básico)');
+    }
     
     // Schedule regular
     this.schedule = cron.schedule(cronExpression, () => {
@@ -81,48 +94,75 @@ class AIAnalyticsJob {
     console.log('\n╔════════════════════════════════════════════════╗');
     console.log('║  🧠 AI ANALYTICS - CALCULANDO INSIGHTS          ║');
     console.log('╚════════════════════════════════════════════════╝');
-    console.log(`   Inicio: ${this.lastRun.toISOString()}\n`);
+    console.log(`   Inicio: ${this.lastRun.toISOString()}`);
+    console.log(`   Claude API: ${this.claudeEnabled ? '✅' : '❌'}\n`);
 
     const startTime = Date.now();
     const results = {
       success: [],
       failed: []
     };
+    
+    // Guardar resultados de análisis para Claude
+    const analysisResults = {
+      healthCheck: null,
+      subjectAnalysis: null,
+      sendTiming: null,
+      listPerformance: null
+    };
 
     try {
+      // ==================== FASE 1: CALCULAR MÉTRICAS ====================
+      
       // 1. Health Check (siempre primero)
-      await this.runAnalysis('health_check', 7, async () => {
+      analysisResults.healthCheck = await this.runAnalysis('health_check', 7, async () => {
         return await aiCalculator.calculateHealthCheck();
       }, results);
 
       // 2. Subject Analysis (30 días)
-      await this.runAnalysis('subject_analysis', 30, async () => {
+      analysisResults.subjectAnalysis = await this.runAnalysis('subject_analysis', 30, async () => {
         return await aiCalculator.calculateSubjectAnalysis({ days: 30 });
       }, results);
 
-      // 3. Subject Analysis (90 días)
+      // 3. Subject Analysis (90 días) - solo guardar, no usar para Claude
       await this.runAnalysis('subject_analysis', 90, async () => {
         return await aiCalculator.calculateSubjectAnalysis({ days: 90 });
       }, results);
 
       // 4. Send Timing (90 días - más data mejor)
-      await this.runAnalysis('send_timing', 90, async () => {
+      analysisResults.sendTiming = await this.runAnalysis('send_timing', 90, async () => {
         return await aiCalculator.calculateSendTiming({ days: 90 });
       }, results);
 
       // 5. List Performance (30 días)
-      await this.runAnalysis('list_performance', 30, async () => {
+      analysisResults.listPerformance = await this.runAnalysis('list_performance', 30, async () => {
         return await aiCalculator.calculateListPerformance({ days: 30 });
       }, results);
 
-      // 6. List Performance (90 días)
+      // 6. List Performance (90 días) - solo guardar
       await this.runAnalysis('list_performance', 90, async () => {
         return await aiCalculator.calculateListPerformance({ days: 90 });
       }, results);
 
-      // 7. Comprehensive Report (30 días)
+      // ==================== FASE 2: GENERAR INSIGHTS CON CLAUDE ====================
+      
+      await this.generateClaudeInsights(analysisResults, results);
+
+      // ==================== FASE 3: COMPREHENSIVE REPORT ====================
+      
+      // 7. Comprehensive Report (incluye insights de Claude si están disponibles)
       await this.runAnalysis('comprehensive_report', 30, async () => {
-        return await aiCalculator.calculateComprehensiveReport({ days: 30 });
+        const report = await aiCalculator.calculateComprehensiveReport({ days: 30 });
+        
+        // Agregar insights de Claude al reporte si existen
+        const claudeInsight = await AIInsight.getLatest('ai_generated_insights', 30);
+        if (claudeInsight?.data?.insights) {
+          report.aiInsights = claudeInsight.data.insights;
+          report.aiSummary = claudeInsight.data.summary;
+          report.aiRecommendations = claudeInsight.data.recommendations;
+        }
+        
+        return report;
       }, results);
 
       // Cleanup old insights
@@ -151,16 +191,66 @@ class AIAnalyticsJob {
   }
 
   /**
+   * Generar insights usando Claude API
+   */
+  async generateClaudeInsights(analysisResults, results) {
+    console.log('\n   🤖 Generando insights con Claude...');
+    
+    try {
+      // Preparar datos compactos para Claude
+      const dataForClaude = aiCalculator.prepareDataForClaude(analysisResults);
+      
+      console.log(`      📦 Datos preparados: ${JSON.stringify(dataForClaude).length} bytes`);
+      
+      // Llamar a Claude
+      const claudeResponse = await claudeService.generateEmailInsights(dataForClaude);
+      
+      if (claudeResponse.success) {
+        // Guardar insights generados por Claude
+        await AIInsight.saveAnalysis('ai_generated_insights', 30, {
+          success: true,
+          insights: claudeResponse.insights,
+          summary: claudeResponse.summary,
+          recommendations: claudeResponse.recommendations,
+          model: claudeResponse.model,
+          tokensUsed: claudeResponse.tokensUsed,
+          generatedAt: claudeResponse.generatedAt,
+          inputData: dataForClaude // Guardar para referencia
+        }, {
+          recalculateHours: 6
+        });
+        
+        results.success.push('ai_generated_insights (Claude)');
+        console.log(`      ✅ Claude generó ${claudeResponse.insights?.length || 0} insights`);
+        console.log(`      📊 Tokens: ${claudeResponse.tokensUsed?.input || 0} in / ${claudeResponse.tokensUsed?.output || 0} out`);
+        
+        if (claudeResponse.summary) {
+          console.log(`      📝 Resumen: ${claudeResponse.summary.substring(0, 100)}...`);
+        }
+      } else {
+        console.log('      ⚠️  Claude no disponible, usando insights básicos');
+        results.success.push('ai_generated_insights (fallback)');
+      }
+      
+    } catch (error) {
+      console.error(`      ❌ Error generando insights con Claude: ${error.message}`);
+      results.failed.push('ai_generated_insights');
+    }
+  }
+
+  /**
    * Ejecutar un análisis específico
+   * @returns {Object} El resultado del análisis para usar en Claude
    */
   async runAnalysis(type, periodDays, calculator, results) {
     const label = `${type} (${periodDays}d)`;
     console.log(`   📊 Calculando: ${label}...`);
     
     const startTime = new Date();
+    let analysisResult = null;
     
     try {
-      const analysisResult = await calculator();
+      analysisResult = await calculator();
       
       if (analysisResult && analysisResult.success !== false) {
         await AIInsight.saveAnalysis(type, periodDays, analysisResult, {
@@ -190,6 +280,9 @@ class AIAnalyticsJob {
       console.error(`      ❌ ${label}: ${error.message}`);
       results.failed.push(label);
     }
+    
+    // Retornar resultado para usar en Claude
+    return analysisResult;
   }
 
   /**
@@ -247,6 +340,11 @@ class AIAnalyticsJob {
           return await aiCalculator.calculateComprehensiveReport({ days: 30 });
         }, results);
         break;
+        
+      case 'ai_generated_insights':
+        // Para regenerar insights de Claude, necesitamos recalcular todo
+        await this.runAllAnalyses();
+        break;
     }
     
     return results;
@@ -260,7 +358,9 @@ class AIAnalyticsJob {
       isRunning: this.isRunning,
       lastRun: this.lastRun,
       nextScheduledRun: this.getNextRun(),
-      schedule: '0 */6 * * *' // Cada 6 horas
+      schedule: '0 */6 * * *', // Cada 6 horas
+      claudeEnabled: this.claudeEnabled,
+      claudeModel: claudeService.model
     };
   }
 

@@ -855,6 +855,105 @@ class AICalculator {
       recommendations
     };
   }
+
+  // ==================== 7. PREPARE DATA FOR CLAUDE ====================
+
+  /**
+   * Prepara un resumen compacto de todas las métricas para enviar a Claude
+   * Esto minimiza tokens mientras mantiene la información relevante
+   */
+  prepareDataForClaude(analysisResults) {
+    const { healthCheck, subjectAnalysis, sendTiming, listPerformance } = analysisResults;
+
+    // === HEALTH ===
+    const health = {
+      openRate: healthCheck?.metrics?.rates?.openRate || 0,
+      clickRate: healthCheck?.metrics?.rates?.clickRate || 0,
+      bounceRate: healthCheck?.metrics?.rates?.bounceRate || 0,
+      unsubRate: healthCheck?.metrics?.rates?.unsubRate || 0,
+      deliveryRate: healthCheck?.metrics?.rates?.deliveryRate || 0,
+      campaignsSent: healthCheck?.metrics?.campaigns?.sent || 0,
+      totalSent: healthCheck?.metrics?.totals?.sent || 0,
+      healthScore: healthCheck?.health?.score || 0,
+      status: healthCheck?.health?.status || 'unknown'
+    };
+
+    // === SUBJECTS ===
+    const subjects = {
+      top: subjectAnalysis?.topPerformers?.[0] ? {
+        subject: subjectAnalysis.topPerformers[0].subject,
+        openRate: subjectAnalysis.topPerformers[0].openRate
+      } : null,
+      bottom: subjectAnalysis?.lowPerformers?.[0] ? {
+        subject: subjectAnalysis.lowPerformers[0].subject,
+        openRate: subjectAnalysis.lowPerformers[0].openRate
+      } : null,
+      patterns: {}
+    };
+
+    // Extraer patrones de subjects
+    if (subjectAnalysis?.insights) {
+      const ins = subjectAnalysis.insights;
+      if (ins.hasEmoji) subjects.patterns.emoji = `${ins.hasEmoji.lift}% lift`;
+      if (ins.hasNumber) subjects.patterns.numbers = `${ins.hasNumber.lift}% lift`;
+      if (ins.hasUrgency) subjects.patterns.urgency = `${ins.hasUrgency.lift}% lift`;
+      if (ins.hasQuestion) subjects.patterns.questions = `${ins.hasQuestion.lift}% lift`;
+    }
+
+    // === LISTS ===
+    const lists = (listPerformance?.lists || []).slice(0, 5).map(list => ({
+      name: list.name,
+      openRate: list.rates?.openRate || 0,
+      clickRate: list.rates?.clickRate || 0,
+      revenue: list.revenue?.total || 0,
+      unsubRate: list.rates?.unsubRate || 0,
+      campaigns: list.campaigns || 0
+    }));
+
+    // === TIMING ===
+    const timing = {
+      best: sendTiming?.bestTimes?.[0] ? 
+        `${sendTiming.bestTimes[0].day} ${sendTiming.bestTimes[0].hour}` : null,
+      worst: sendTiming?.bestTimes?.length > 4 ?
+        `${sendTiming.bestTimes[4].day} ${sendTiming.bestTimes[4].hour}` : null,
+      topHours: (sendTiming?.bestTimes || []).slice(0, 3).map(t => ({
+        day: t.day,
+        hour: t.hour,
+        score: t.score
+      }))
+    };
+
+    // === REVENUE ===
+    const revenue = {
+      total: listPerformance?.summary?.totalRevenue || 0,
+      perEmail: listPerformance?.summary?.avgRevenuePerEmail || 0,
+      orders: 0 // Se puede calcular si hay datos
+    };
+
+    // Calcular órdenes totales de las listas
+    if (listPerformance?.lists) {
+      revenue.orders = listPerformance.lists.reduce((sum, l) => 
+        sum + (l.metrics?.purchased || 0), 0
+      );
+    }
+
+    // === ALERTAS ===
+    const alerts = (healthCheck?.alerts || []).map(a => ({
+      severity: a.severity,
+      message: a.message
+    }));
+
+    return {
+      period: `últimos ${subjectAnalysis?.period?.days || 30} días`,
+      generatedAt: new Date().toISOString(),
+      health,
+      subjects,
+      lists,
+      timing,
+      revenue,
+      alerts
+    };
+  }
 }
 
 module.exports = new AICalculator();

@@ -21,7 +21,8 @@ const aiInsightSchema = new mongoose.Schema({
       'send_timing',           // Mejores horarios
       'list_performance',      // Performance por lista
       'health_check',          // Estado de salud
-      'comprehensive_report'   // Reporte completo
+      'comprehensive_report',  // Reporte completo
+      'ai_generated_insights'  // 🆕 Insights generados por Claude
     ],
     required: true,
     index: true
@@ -337,7 +338,8 @@ aiInsightSchema.statics.getDashboardSummary = async function() {
     'subject_analysis',
     'send_timing', 
     'list_performance',
-    'health_check'
+    'health_check',
+    'ai_generated_insights'  // 🆕 Incluir insights de Claude
   ];
   
   const summary = {};
