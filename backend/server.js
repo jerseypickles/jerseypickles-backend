@@ -1,4 +1,4 @@
-// backend/server.js (ACTUALIZADO CON FLOWS & MANEJO DE ERRORES)
+// backend/server.js (ACTUALIZADO CON FLOWS, AI ANALYTICS & MANEJO DE ERRORES)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -119,14 +119,15 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({ 
     message: '🥒 Jersey Pickles Email Marketing API',
-    version: '2.0.0',
+    version: '2.1.0',
     status: 'running',
     features: {
       campaigns: '✅ Email Campaigns',
       flows: '✅ Automation Flows',
       segmentation: '✅ Dynamic Segments',
       revenue_tracking: '✅ Revenue Attribution',
-      shopify_integration: '✅ Shopify Webhooks'
+      shopify_integration: '✅ Shopify Webhooks',
+      ai_analytics: '✅ AI-Powered Insights'  // 🆕
     },
     endpoints: {
       health: '/health',
@@ -140,7 +141,8 @@ app.get('/', (req, res) => {
       webhooks: '/api/webhooks',
       tracking: '/api/track',
       analytics: '/api/analytics',
-      popup: '/api/popup'
+      popup: '/api/popup',
+      ai: '/api/ai'  // 🆕
     }
   });
 });
@@ -169,6 +171,20 @@ try {
   });
 }
 
+// 🆕 AI ANALYTICS ROUTES - con manejo de errores
+try {
+  const aiRoutes = require('./src/routes/ai');
+  app.use('/api/ai', aiRoutes);
+} catch (error) {
+  console.log('⚠️  AI Analytics routes not available:', error.message);
+  app.use('/api/ai', (req, res) => {
+    res.status(503).json({ 
+      error: 'AI Analytics feature is currently unavailable',
+      message: 'Please check system configuration'
+    });
+  });
+}
+
 app.use('/api/lists', require('./src/routes/lists'));
 app.use('/api/track', require('./src/routes/tracking'));
 app.use('/api/analytics', require('./src/routes/analytics'));
@@ -189,12 +205,13 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 
-// Variable para tracking de features disponibles
+// Variables para tracking de features disponibles
 let flowEngineAvailable = false;
+let aiAnalyticsAvailable = false;  // 🆕
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║   🥒 Jersey Pickles Email Marketing v2.0      ║');
+  console.log('║   🥒 Jersey Pickles Email Marketing v2.1      ║');
   console.log('╚════════════════════════════════════════════════╝');
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -204,7 +221,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`📧 Email Queue: ${process.env.REDIS_URL ? '✅ Redis Connected' : '⚠️  Direct Send Mode'}`);
   console.log(`✅ Server ready - Payload limit: 10MB`);
   
-  // 🆕 Inicializar Flow Queue con manejo de errores mejorado
+  // Inicializar Flow Queue con manejo de errores mejorado
   setTimeout(() => {
     console.log('\n🔄 Inicializando Flow Engine...');
     try {
@@ -215,9 +232,29 @@ const server = app.listen(PORT, '0.0.0.0', () => {
       flowEngineAvailable = false;
       console.log('⚠️  Flow Engine no disponible:', error.message);
       console.log('   El sistema continuará funcionando sin automatizaciones');
-      console.log('   Para habilitar flows, instale las dependencias necesarias');
     }
-  }, 2000); // Delay de 2 segundos para evitar conflictos de inicialización
+  }, 2000);
+  
+  // 🆕 Inicializar AI Analytics Job
+  setTimeout(() => {
+    console.log('\n🧠 Inicializando AI Analytics Engine...');
+    try {
+      const aiAnalyticsJob = require('./src/jobs/aiAnalyticsJob');
+      
+      // Inicializar con cron cada 6 horas
+      aiAnalyticsJob.init('0 */6 * * *');
+      
+      aiAnalyticsAvailable = true;
+      console.log('✅ AI Analytics Engine listo');
+      console.log('   Schedule: Cada 6 horas (0 */6 * * *)');
+      console.log('   Primer análisis: En 30 segundos');
+    } catch (error) {
+      aiAnalyticsAvailable = false;
+      console.log('⚠️  AI Analytics no disponible:', error.message);
+      console.log('   El sistema continuará funcionando sin AI insights');
+      console.log('   Para habilitar, instale: npm install node-cron');
+    }
+  }, 3000); // Delay de 3 segundos (después del Flow Engine)
 });
 
 // ==================== GRACEFUL SHUTDOWN ====================
@@ -236,7 +273,7 @@ const gracefulShutdown = async (signal) => {
       console.error('⚠️  Error closing email queue:', err.message);
     }
     
-    // CERRAR FLOW QUEUE - con mejor manejo de errores
+    // CERRAR FLOW QUEUE
     if (flowEngineAvailable) {
       try {
         const flowQueueModule = require('./src/jobs/flowQueue');
@@ -246,6 +283,19 @@ const gracefulShutdown = async (signal) => {
         }
       } catch (err) {
         console.log('⚠️  Flow queue not closed:', err.message);
+      }
+    }
+    
+    // 🆕 CERRAR AI ANALYTICS JOB
+    if (aiAnalyticsAvailable) {
+      try {
+        const aiAnalyticsJob = require('./src/jobs/aiAnalyticsJob');
+        if (aiAnalyticsJob && typeof aiAnalyticsJob.stop === 'function') {
+          aiAnalyticsJob.stop();
+          console.log('✅ AI Analytics job stopped');
+        }
+      } catch (err) {
+        console.log('⚠️  AI Analytics job not stopped:', err.message);
       }
     }
     
