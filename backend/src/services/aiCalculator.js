@@ -484,9 +484,9 @@ class AICalculator {
     };
   }
 
-  // ==================== 4. SEGMENT PERFORMANCE ====================
+  // ==================== 4. LIST PERFORMANCE ====================
 
-  async calculateSegmentPerformance(options = {}) {
+  async calculateListPerformance(options = {}) {
     const { days = 90 } = options;
     
     const { start } = this.getDateRange(days);
@@ -496,23 +496,24 @@ class AICalculator {
         $match: {
           status: 'sent',
           sentAt: { $gte: start },
-          segment: { $exists: true, $ne: null }
+          targetType: 'list',
+          list: { $exists: true, $ne: null }
         }
       },
       {
         $lookup: {
-          from: 'segments',
-          localField: 'segment',
+          from: 'lists',
+          localField: 'list',
           foreignField: '_id',
-          as: 'segmentData'
+          as: 'listData'
         }
       },
-      { $unwind: '$segmentData' },
+      { $unwind: '$listData' },
       {
         $group: {
-          _id: '$segment',
-          segmentName: { $first: '$segmentData.name' },
-          segmentCategory: { $first: '$segmentData.category' },
+          _id: '$list',
+          listName: { $first: '$listData.name' },
+          listMemberCount: { $first: '$listData.memberCount' },
           campaigns: { $sum: 1 },
           totalSent: { $sum: '$stats.sent' },
           totalOpened: { $sum: '$stats.opened' },
@@ -529,31 +530,31 @@ class AICalculator {
     if (campaignData.length === 0) {
       return {
         success: false,
-        message: 'No hay suficientes datos de campañas por segmento',
+        message: 'No hay suficientes datos de campañas por lista',
         summary: { status: 'insufficient_data' }
       };
     }
 
-    const segments = campaignData.map(seg => {
-      const openRate = seg.totalSent > 0 ? (seg.totalOpened / seg.totalSent) * 100 : 0;
-      const clickRate = seg.totalSent > 0 ? (seg.totalClicked / seg.totalSent) * 100 : 0;
-      const conversionRate = seg.totalSent > 0 ? (seg.totalPurchased / seg.totalSent) * 100 : 0;
-      const revenuePerEmail = seg.totalSent > 0 ? seg.totalRevenue / seg.totalSent : 0;
-      const bounceRate = seg.totalSent > 0 ? (seg.totalBounced / seg.totalSent) * 100 : 0;
-      const unsubRate = seg.totalSent > 0 ? (seg.totalUnsubscribed / seg.totalSent) * 100 : 0;
+    const lists = campaignData.map(list => {
+      const openRate = list.totalSent > 0 ? (list.totalOpened / list.totalSent) * 100 : 0;
+      const clickRate = list.totalSent > 0 ? (list.totalClicked / list.totalSent) * 100 : 0;
+      const conversionRate = list.totalSent > 0 ? (list.totalPurchased / list.totalSent) * 100 : 0;
+      const revenuePerEmail = list.totalSent > 0 ? list.totalRevenue / list.totalSent : 0;
+      const bounceRate = list.totalSent > 0 ? (list.totalBounced / list.totalSent) * 100 : 0;
+      const unsubRate = list.totalSent > 0 ? (list.totalUnsubscribed / list.totalSent) * 100 : 0;
 
       return {
-        segmentId: seg._id,
-        name: seg.segmentName,
-        category: seg.segmentCategory,
-        campaigns: seg.campaigns,
+        listId: list._id,
+        name: list.listName,
+        memberCount: list.listMemberCount,
+        campaigns: list.campaigns,
         metrics: {
-          sent: seg.totalSent,
-          opened: seg.totalOpened,
-          clicked: seg.totalClicked,
-          purchased: seg.totalPurchased,
-          bounced: seg.totalBounced,
-          unsubscribed: seg.totalUnsubscribed
+          sent: list.totalSent,
+          opened: list.totalOpened,
+          clicked: list.totalClicked,
+          purchased: list.totalPurchased,
+          bounced: list.totalBounced,
+          unsubscribed: list.totalUnsubscribed
         },
         rates: {
           openRate: parseFloat(openRate.toFixed(2)),
@@ -563,59 +564,59 @@ class AICalculator {
           unsubRate: parseFloat(unsubRate.toFixed(2))
         },
         revenue: {
-          total: parseFloat(seg.totalRevenue.toFixed(2)),
+          total: parseFloat((list.totalRevenue || 0).toFixed(2)),
           perEmail: parseFloat(revenuePerEmail.toFixed(3)),
-          avgOrderValue: seg.totalPurchased > 0 
-            ? parseFloat((seg.totalRevenue / seg.totalPurchased).toFixed(2))
+          avgOrderValue: list.totalPurchased > 0 
+            ? parseFloat((list.totalRevenue / list.totalPurchased).toFixed(2))
             : 0
         },
         score: parseFloat((openRate * 0.3 + clickRate * 0.3 + conversionRate * 10 + revenuePerEmail * 2).toFixed(2))
       };
     });
 
-    segments.sort((a, b) => b.score - a.score);
+    lists.sort((a, b) => b.score - a.score);
 
-    const avgOpenRate = segments.reduce((sum, s) => sum + s.rates.openRate, 0) / segments.length;
-    const avgClickRate = segments.reduce((sum, s) => sum + s.rates.clickRate, 0) / segments.length;
-    const avgRevenue = segments.reduce((sum, s) => sum + s.revenue.perEmail, 0) / segments.length;
-    const totalRevenue = segments.reduce((sum, s) => sum + s.revenue.total, 0);
+    const avgOpenRate = lists.reduce((sum, l) => sum + l.rates.openRate, 0) / lists.length;
+    const avgClickRate = lists.reduce((sum, l) => sum + l.rates.clickRate, 0) / lists.length;
+    const avgRevenue = lists.reduce((sum, l) => sum + l.revenue.perEmail, 0) / lists.length;
+    const totalRevenue = lists.reduce((sum, l) => sum + l.revenue.total, 0);
 
     // Generar insights
     const topInsights = [];
 
-    if (segments[0]) {
+    if (lists[0]) {
       topInsights.push({
-        category: 'Segments',
+        category: 'Lists',
         priority: 'high',
-        segment: segments[0].name,
-        insight: `"${segments[0].name}" es tu segmento más valioso con $${segments[0].revenue.perEmail.toFixed(3)}/email`,
-        action: 'Prioriza este segmento para campañas importantes'
+        list: lists[0].name,
+        insight: `"${lists[0].name}" es tu lista más valiosa con $${lists[0].revenue.perEmail.toFixed(3)}/email`,
+        action: 'Prioriza esta lista para campañas importantes'
       });
     }
 
     // High engagement, low conversion
-    const opportunity = segments.find(s => 
-      s.rates.openRate > avgOpenRate * 1.2 && s.rates.conversionRate < 0.1
+    const opportunity = lists.find(l => 
+      l.rates.openRate > avgOpenRate * 1.2 && l.rates.conversionRate < 0.1
     );
     if (opportunity) {
       topInsights.push({
-        category: 'Segments',
+        category: 'Lists',
         priority: 'high',
-        segment: opportunity.name,
+        list: opportunity.name,
         insight: `"${opportunity.name}" tiene alto engagement (${opportunity.rates.openRate}%) pero baja conversión`,
-        action: 'Prueba ofertas más agresivas para este segmento'
+        action: 'Prueba ofertas más agresivas para esta lista'
       });
     }
 
     // High unsub
-    const highUnsub = segments.find(s => s.rates.unsubRate > 1);
+    const highUnsub = lists.find(l => l.rates.unsubRate > 1);
     if (highUnsub) {
       topInsights.push({
-        category: 'Segments',
+        category: 'Lists',
         priority: 'medium',
-        segment: highUnsub.name,
+        list: highUnsub.name,
         insight: `"${highUnsub.name}" tiene ${highUnsub.rates.unsubRate}% unsubscribe rate`,
-        action: 'Reduce frecuencia de envío para este segmento'
+        action: 'Reduce frecuencia de envío para esta lista'
       });
     }
 
@@ -623,21 +624,21 @@ class AICalculator {
       success: true,
       period: { days, start, end: new Date() },
       summary: {
-        totalSegments: segments.length,
+        totalLists: lists.length,
         avgOpenRate: parseFloat(avgOpenRate.toFixed(2)),
         avgClickRate: parseFloat(avgClickRate.toFixed(2)),
         avgRevenuePerEmail: parseFloat(avgRevenue.toFixed(3)),
         totalRevenue: totalRevenue.toFixed(2),
         score: Math.round(avgOpenRate * 2 + avgRevenue * 100),
-        status: segments.length >= 3 ? 'healthy' : 'warning',
+        status: lists.length >= 2 ? 'healthy' : 'warning',
         primaryMetric: { name: 'totalRevenue', value: totalRevenue }
       },
-      segments,
+      lists,
       topInsights,
       rankings: {
-        byRevenue: segments.slice(0, 5).map(s => ({ name: s.name, value: s.revenue.total })),
-        byOpenRate: [...segments].sort((a, b) => b.rates.openRate - a.rates.openRate).slice(0, 5).map(s => ({ name: s.name, value: s.rates.openRate })),
-        byConversion: [...segments].sort((a, b) => b.rates.conversionRate - a.rates.conversionRate).slice(0, 5).map(s => ({ name: s.name, value: s.rates.conversionRate }))
+        byRevenue: lists.slice(0, 5).map(l => ({ name: l.name, value: l.revenue.total })),
+        byOpenRate: [...lists].sort((a, b) => b.rates.openRate - a.rates.openRate).slice(0, 5).map(l => ({ name: l.name, value: l.rates.openRate })),
+        byConversion: [...lists].sort((a, b) => b.rates.conversionRate - a.rates.conversionRate).slice(0, 5).map(l => ({ name: l.name, value: l.rates.conversionRate }))
       }
     };
   }
@@ -647,11 +648,11 @@ class AICalculator {
   async calculateComprehensiveReport(options = {}) {
     const { days = 30 } = options;
 
-    const [healthCheck, subjectAnalysis, sendTiming, segmentPerf] = await Promise.all([
+    const [healthCheck, subjectAnalysis, sendTiming, listPerf] = await Promise.all([
       this.calculateHealthCheck(),
       this.calculateSubjectAnalysis({ days }),
       this.calculateSendTiming({ days: 90 }), // Timing siempre con más data
-      this.calculateSegmentPerformance({ days })
+      this.calculateListPerformance({ days })
     ]);
 
     // Consolidar top insights
@@ -669,9 +670,9 @@ class AICalculator {
       });
     }
 
-    if (segmentPerf.success && segmentPerf.topInsights) {
-      segmentPerf.topInsights.slice(0, 2).forEach(i => {
-        allInsights.push({ ...i, category: 'Segments' });
+    if (listPerf.success && listPerf.topInsights) {
+      listPerf.topInsights.slice(0, 2).forEach(i => {
+        allInsights.push({ ...i, category: 'Lists' });
       });
     }
 
@@ -698,7 +699,7 @@ class AICalculator {
         healthScore: healthCheck.health?.score || 0,
         healthStatus: healthCheck.health?.status || 'unknown',
         campaignsAnalyzed: subjectAnalysis.summary?.campaignsAnalyzed || 0,
-        segmentsAnalyzed: segmentPerf.summary?.totalSegments || 0,
+        listsAnalyzed: listPerf.summary?.totalLists || 0,
         topInsightsCount: allInsights.length,
         score: healthCheck.health?.score || 0,
         status: healthCheck.health?.status || 'unknown',
@@ -716,9 +717,9 @@ class AICalculator {
           bestTime: sendTiming.bestTimes?.[0],
           recommendation: sendTiming.recommendation
         },
-        segments: {
-          topByRevenue: segmentPerf.rankings?.byRevenue?.slice(0, 3),
-          topByOpenRate: segmentPerf.rankings?.byOpenRate?.slice(0, 3)
+        lists: {
+          topByRevenue: listPerf.rankings?.byRevenue?.slice(0, 3),
+          topByOpenRate: listPerf.rankings?.byOpenRate?.slice(0, 3)
         },
         health: {
           score: healthCheck.health?.score,
@@ -732,42 +733,42 @@ class AICalculator {
   // ==================== 6. CAMPAIGN PREDICTION ====================
 
   async predictCampaignPerformance(campaignData, historicalInsights) {
-    const { subject, segmentId, sendHour, sendDay } = campaignData;
+    const { subject, listId, sendHour, sendDay } = campaignData;
 
-    if (!subject || !segmentId) {
+    if (!subject || !listId) {
       return {
         success: false,
-        message: 'Se requiere subject y segmentId para predicción'
+        message: 'Se requiere subject y listId para predicción'
       };
     }
 
-    // Buscar datos del segmento en los insights
-    const segmentPerf = historicalInsights.segment_performance;
+    // Buscar datos de la lista en los insights
+    const listPerf = historicalInsights.list_performance;
     const subjectAnalysis = historicalInsights.subject_analysis;
     const timingAnalysis = historicalInsights.send_timing;
 
-    if (!segmentPerf?.data?.segments) {
+    if (!listPerf?.data?.lists) {
       return {
         success: false,
         message: 'No hay datos históricos suficientes para predicción'
       };
     }
 
-    const segment = segmentPerf.data.segments.find(s => 
-      s.segmentId.toString() === segmentId.toString()
+    const list = listPerf.data.lists.find(l => 
+      l.listId.toString() === listId.toString()
     );
 
-    if (!segment) {
+    if (!list) {
       return {
         success: false,
-        message: 'Segmento no encontrado en datos históricos'
+        message: 'Lista no encontrada en datos históricos'
       };
     }
 
     // Base prediction
-    let predictedOpenRate = segment.rates.openRate;
-    let predictedClickRate = segment.rates.clickRate;
-    let predictedConversionRate = segment.rates.conversionRate;
+    let predictedOpenRate = list.rates.openRate;
+    let predictedClickRate = list.rates.clickRate;
+    let predictedConversionRate = list.rates.conversionRate;
 
     // Ajustes por subject patterns
     const hasEmoji = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]/u.test(subject);
@@ -787,13 +788,13 @@ class AICalculator {
     }
 
     // Calcular revenue estimado
-    const segmentSize = segment.metrics.sent / segment.campaigns;
-    const predictedRevenue = (predictedConversionRate / 100) * segmentSize * segment.revenue.avgOrderValue;
+    const listSize = list.metrics.sent / list.campaigns;
+    const predictedRevenue = (predictedConversionRate / 100) * listSize * list.revenue.avgOrderValue;
 
     // Confidence
     let confidence = 'low';
-    if (segment.campaigns >= 5 && segment.metrics.sent >= 1000) confidence = 'high';
-    else if (segment.campaigns >= 3 && segment.metrics.sent >= 500) confidence = 'medium';
+    if (list.campaigns >= 5 && list.metrics.sent >= 1000) confidence = 'high';
+    else if (list.campaigns >= 3 && list.metrics.sent >= 500) confidence = 'medium';
 
     // Recommendations
     const recommendations = [];
@@ -822,7 +823,7 @@ class AICalculator {
       prediction: {
         openRate: {
           predicted: parseFloat(predictedOpenRate.toFixed(2)),
-          segmentAvg: segment.rates.openRate,
+          listAvg: list.rates.openRate,
           range: {
             low: parseFloat((predictedOpenRate * 0.8).toFixed(2)),
             high: parseFloat((predictedOpenRate * 1.2).toFixed(2))
@@ -830,21 +831,21 @@ class AICalculator {
         },
         clickRate: {
           predicted: parseFloat(predictedClickRate.toFixed(2)),
-          segmentAvg: segment.rates.clickRate
+          listAvg: list.rates.clickRate
         },
         conversionRate: {
           predicted: parseFloat(predictedConversionRate.toFixed(3)),
-          segmentAvg: segment.rates.conversionRate
+          listAvg: list.rates.conversionRate
         },
         estimatedRevenue: {
           predicted: parseFloat(predictedRevenue.toFixed(2)),
-          perEmail: parseFloat((predictedRevenue / segmentSize).toFixed(3))
+          perEmail: parseFloat((predictedRevenue / listSize).toFixed(3))
         }
       },
       confidence,
       basedOn: {
-        segmentCampaigns: segment.campaigns,
-        segmentEmails: segment.metrics.sent
+        listCampaigns: list.campaigns,
+        listEmails: list.metrics.sent
       },
       subjectAnalysis: {
         length: subjectLength,

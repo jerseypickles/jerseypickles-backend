@@ -110,14 +110,14 @@ class AIAnalyticsJob {
         return await aiCalculator.calculateSendTiming({ days: 90 });
       }, results);
 
-      // 5. Segment Performance (30 días)
-      await this.runAnalysis('segment_performance', 30, async () => {
-        return await aiCalculator.calculateSegmentPerformance({ days: 30 });
+      // 5. List Performance (30 días)
+      await this.runAnalysis('list_performance', 30, async () => {
+        return await aiCalculator.calculateListPerformance({ days: 30 });
       }, results);
 
-      // 6. Segment Performance (90 días)
-      await this.runAnalysis('segment_performance', 90, async () => {
-        return await aiCalculator.calculateSegmentPerformance({ days: 90 });
+      // 6. List Performance (90 días)
+      await this.runAnalysis('list_performance', 90, async () => {
+        return await aiCalculator.calculateListPerformance({ days: 90 });
       }, results);
 
       // 7. Comprehensive Report (30 días)
@@ -233,12 +233,12 @@ class AIAnalyticsJob {
         }, results);
         break;
         
-      case 'segment_performance':
-        await this.runAnalysis('segment_performance', 30, async () => {
-          return await aiCalculator.calculateSegmentPerformance({ days: 30 });
+      case 'list_performance':
+        await this.runAnalysis('list_performance', 30, async () => {
+          return await aiCalculator.calculateListPerformance({ days: 30 });
         }, results);
-        await this.runAnalysis('segment_performance', 90, async () => {
-          return await aiCalculator.calculateSegmentPerformance({ days: 90 });
+        await this.runAnalysis('list_performance', 90, async () => {
+          return await aiCalculator.calculateListPerformance({ days: 90 });
         }, results);
         break;
         

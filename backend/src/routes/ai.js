@@ -282,26 +282,26 @@ router.get('/timing/heatmap', authorize('admin', 'manager'), async (req, res) =>
   }
 });
 
-// ==================== SEGMENT PERFORMANCE ====================
+// ==================== LIST PERFORMANCE ====================
 
 /**
- * GET /api/ai/segments/performance
- * Performance por segmento (lee de MongoDB)
+ * GET /api/ai/lists/performance
+ * Performance por lista (lee de MongoDB)
  */
-router.get('/segments/performance', authorize('admin', 'manager'), async (req, res) => {
+router.get('/lists/performance', authorize('admin', 'manager'), async (req, res) => {
   try {
     const { days = 30 } = req.query;
     
-    let insight = await AIInsight.getLatest('segment_performance', parseInt(days));
+    let insight = await AIInsight.getLatest('list_performance', parseInt(days));
     
     if (!insight) {
-      insight = await AIInsight.getLatest('segment_performance', 90);
+      insight = await AIInsight.getLatest('list_performance', 90);
     }
     
     if (!insight) {
       return res.json({
         success: false,
-        message: 'Análisis de segmentos pendiente',
+        message: 'Análisis de listas pendiente',
         status: 'pending'
       });
     }
@@ -316,7 +316,7 @@ router.get('/segments/performance', authorize('admin', 'manager'), async (req, r
     });
     
   } catch (error) {
-    console.error('Error en análisis de segmentos:', error);
+    console.error('Error en análisis de listas:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -388,22 +388,22 @@ router.get('/health/alerts', authorize('admin', 'manager'), async (req, res) => 
  */
 router.post('/campaigns/predict', authorize('admin', 'manager'), async (req, res) => {
   try {
-    const { subject, segmentId, sendHour, sendDay } = req.body;
+    const { subject, listId, sendHour, sendDay } = req.body;
     
-    if (!subject || !segmentId) {
+    if (!subject || !listId) {
       return res.status(400).json({
-        error: 'Se requiere subject y segmentId'
+        error: 'Se requiere subject y listId'
       });
     }
     
     // Obtener insights históricos de MongoDB
-    const [segmentInsight, subjectInsight, timingInsight] = await Promise.all([
-      AIInsight.getLatest('segment_performance', 90),
+    const [listInsight, subjectInsight, timingInsight] = await Promise.all([
+      AIInsight.getLatest('list_performance', 90),
       AIInsight.getLatest('subject_analysis', 90),
       AIInsight.getLatest('send_timing', 90)
     ]);
     
-    if (!segmentInsight) {
+    if (!listInsight) {
       return res.json({
         success: false,
         message: 'No hay datos históricos suficientes para predicción'
@@ -412,9 +412,9 @@ router.post('/campaigns/predict', authorize('admin', 'manager'), async (req, res
     
     // Usar el calculator con los datos históricos
     const prediction = await aiCalculator.predictCampaignPerformance(
-      { subject, segmentId, sendHour, sendDay },
+      { subject, listId, sendHour, sendDay },
       {
-        segment_performance: segmentInsight,
+        list_performance: listInsight,
         subject_analysis: subjectInsight,
         send_timing: timingInsight
       }

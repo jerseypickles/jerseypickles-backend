@@ -19,7 +19,7 @@ const aiInsightSchema = new mongoose.Schema({
     enum: [
       'subject_analysis',      // Análisis de subject lines
       'send_timing',           // Mejores horarios
-      'segment_performance',   // Performance por segmento
+      'list_performance',      // Performance por lista
       'health_check',          // Estado de salud
       'comprehensive_report'   // Reporte completo
     ],
@@ -336,7 +336,7 @@ aiInsightSchema.statics.getDashboardSummary = async function() {
   const types = [
     'subject_analysis',
     'send_timing', 
-    'segment_performance',
+    'list_performance',
     'health_check'
   ];
   
