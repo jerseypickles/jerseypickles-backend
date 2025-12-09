@@ -1,18 +1,85 @@
-// backend/src/models/Segment.js
+// backend/src/models/Segment.js - ACTUALIZADO
 const mongoose = require('mongoose');
 
-// Función helper para crear slug desde el nombre
-function slugify(text) {
-  return text
-    .toString()
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, '-')           // Reemplazar espacios con -
-    .replace(/[^\w\-]+/g, '')       // Remover caracteres no alfanuméricos
-    .replace(/\-\-+/g, '-')         // Reemplazar múltiples - con uno solo
-    .replace(/^-+/, '')             // Remover - del inicio
-    .replace(/-+$/, '');            // Remover - del final
-}
+const conditionSchema = new mongoose.Schema({
+  field: {
+    type: String,
+    required: true,
+    enum: [
+      // === Datos de compra ===
+      'totalSpent',
+      'ordersCount', 
+      'averageOrderValue',
+      'lastOrderDate',
+      
+      // === Datos básicos ===
+      'createdAt',
+      'acceptsMarketing',
+      'tags',
+      
+      // === Ubicación ===
+      'city',
+      'province', 
+      'country',
+      
+      // === EMAIL ENGAGEMENT (NUEVO) ===
+      'emailStats.sent',
+      'emailStats.opened',
+      'emailStats.clicked',
+      'emailStats.bounced',
+      'emailStats.purchased',
+      'emailStats.totalRevenue',
+      
+      // === POPUP/SOURCE (NUEVO) ===
+      'popupDiscountCode',  // exists/not_exists para saber si vino de popup
+      'source',             // shopify, website-popup-*, csv-import, etc.
+      'emailStatus',        // active, bounced, unsubscribed, complained
+      
+      // === BOUNCE INFO (NUEVO) ===
+      'bounceInfo.isBounced',
+      'bounceInfo.bounceType',
+      'bounceInfo.bounceCount'
+    ]
+  },
+  operator: {
+    type: String,
+    required: true,
+    enum: [
+      'equals',
+      'not_equals',
+      'greater_than',
+      'less_than',
+      'greater_than_or_equals',
+      'less_than_or_equals',
+      'contains',
+      'not_contains',
+      'starts_with',
+      'ends_with',
+      'in_last_days',
+      'not_in_last_days',
+      'before_date',
+      'after_date',
+      'is_empty',
+      'is_not_empty',
+      'exists',        // Para popupDiscountCode
+      'not_exists',    // Para popupDiscountCode
+      'in',            // Para source: ['website-popup-v3', 'website-popup-christmas-2025']
+      'not_in'
+    ]
+  },
+  value: {
+    type: mongoose.Schema.Types.Mixed,
+    required: function() {
+      // No requerido para operadores exists/is_empty
+      return !['exists', 'not_exists', 'is_empty', 'is_not_empty'].includes(this.operator);
+    }
+  },
+  logicalOperator: {
+    type: String,
+    enum: ['AND', 'OR'],
+    default: 'AND'
+  }
+}, { _id: false });
 
 const segmentSchema = new mongoose.Schema({
   name: {
@@ -23,141 +90,105 @@ const segmentSchema = new mongoose.Schema({
   slug: {
     type: String,
     unique: true,
-    index: true
+    lowercase: true
   },
-  description: String,
+  description: {
+    type: String,
+    trim: true
+  },
+  conditions: [conditionSchema],
   
-  // Condiciones del segmento
-  conditions: [{
-    field: {
-      type: String,
-      required: true,
-      enum: [
-        'totalSpent', 'ordersCount', 'averageOrderValue',
-        'lastOrderDate', 'createdAt', 'acceptsMarketing',
-        'tags', 'city', 'province', 'country'
-      ]
-    },
-    operator: {
-      type: String,
-      required: true,
-      enum: [
-        'equals', 'not_equals', 'greater_than', 'less_than',
-        'greater_or_equal', 'less_or_equal', 'contains',
-        'not_contains', 'in_last_days', 'not_in_last_days'
-      ]
-    },
-    value: mongoose.Schema.Types.Mixed,
-    logicalOperator: {
-      type: String,
-      enum: ['AND', 'OR'],
-      default: 'AND'
-    }
-  }],
+  // Tipo de segmento
+  type: {
+    type: String,
+    enum: ['custom', 'predefined'],
+    default: 'custom'
+  },
   
-  // Estadísticas
+  // Categoría para agrupar en UI
+  category: {
+    type: String,
+    enum: ['purchase', 'engagement', 'popup', 'lifecycle', 'cleanup', 'custom'],
+    default: 'custom'
+  },
+  
+  // Stats calculados
   customerCount: {
     type: Number,
     default: 0
   },
-  lastCalculated: Date,
+  lastCalculated: {
+    type: Date
+  },
   
+  // Metadata
   isActive: {
     type: Boolean,
     default: true
   },
+  isPredefined: {
+    type: Boolean,
+    default: false
+  },
   
-  // Cache de IDs de clientes (opcional para segmentos grandes)
-  cachedCustomerIds: [String]
-  
+  // Para tracking
+  usedInCampaigns: {
+    type: Number,
+    default: 0
+  },
+  lastUsedAt: {
+    type: Date
+  }
 }, {
-  timestamps: true,
-  collection: 'segments'
+  timestamps: true
 });
 
-// Middleware: Generar slug automáticamente antes de guardar
-segmentSchema.pre('save', async function(next) {
-  // Solo generar slug si es nuevo o cambió el nombre
-  if (this.isNew || this.isModified('name')) {
-    const baseSlug = slugify(this.name);
-    let slug = baseSlug;
-    let counter = 1;
-    
-    // Verificar si el slug ya existe y agregar contador si es necesario
-    while (await this.constructor.findOne({ slug, _id: { $ne: this._id } })) {
-      slug = `${baseSlug}-${counter}`;
-      counter++;
-    }
-    
-    this.slug = slug;
+// Índices
+segmentSchema.index({ slug: 1 }, { unique: true });
+segmentSchema.index({ type: 1 });
+segmentSchema.index({ category: 1 });
+segmentSchema.index({ isActive: 1 });
+
+// Pre-save: generar slug
+segmentSchema.pre('save', function(next) {
+  if (!this.slug && this.name) {
+    this.slug = this.name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/(^-|-$)/g, '');
   }
   next();
 });
 
-// Método para recalcular clientes del segmento
+// Método para recalcular count
 segmentSchema.methods.recalculate = async function() {
-  const Customer = mongoose.model('Customer');
-  const query = this.buildQuery();
-  
-  const customers = await Customer.find(query).select('_id');
-  this.customerCount = customers.length;
-  this.cachedCustomerIds = customers.map(c => c._id.toString());
+  const segmentationService = require('../services/segmentationService');
+  const count = await segmentationService.getSegmentCustomerCount(this);
+  this.customerCount = count;
   this.lastCalculated = new Date();
-  
   await this.save();
-  return this.customerCount;
+  return count;
 };
 
-// Método para construir query de MongoDB
+// Método para obtener query de MongoDB
 segmentSchema.methods.buildQuery = function() {
-  const query = {}; // ✅ CAMBIO: Ya no filtra por acceptsMarketing automáticamente
-  
-  this.conditions.forEach((condition, index) => {
-    const { field, operator, value } = condition;
-    
-    let fieldQuery;
-    
-    switch (operator) {
-      case 'equals':
-        fieldQuery = value;
-        break;
-      case 'not_equals':
-        fieldQuery = { $ne: value };
-        break;
-      case 'greater_than':
-        fieldQuery = { $gt: parseFloat(value) };
-        break;
-      case 'less_than':
-        fieldQuery = { $lt: parseFloat(value) };
-        break;
-      case 'greater_or_equal':
-        fieldQuery = { $gte: parseFloat(value) };
-        break;
-      case 'less_or_equal':
-        fieldQuery = { $lte: parseFloat(value) };
-        break;
-      case 'contains':
-        fieldQuery = { $regex: value, $options: 'i' };
-        break;
-      case 'not_contains':
-        fieldQuery = { $not: { $regex: value, $options: 'i' } };
-        break;
-      case 'in_last_days':
-        const daysAgo = new Date();
-        daysAgo.setDate(daysAgo.getDate() - parseInt(value));
-        fieldQuery = { $gte: daysAgo };
-        break;
-      case 'not_in_last_days':
-        const notDaysAgo = new Date();
-        notDaysAgo.setDate(notDaysAgo.getDate() - parseInt(value));
-        fieldQuery = { $lt: notDaysAgo };
-        break;
-    }
-    
-    query[field] = fieldQuery;
-  });
-  
-  return query;
+  const segmentationService = require('../services/segmentationService');
+  return segmentationService.buildQuery(this.conditions);
+};
+
+// Static: obtener segmentos activos
+segmentSchema.statics.getActive = function() {
+  return this.find({ isActive: true }).sort({ category: 1, name: 1 });
+};
+
+// Static: obtener por categoría
+segmentSchema.statics.getByCategory = function(category) {
+  return this.find({ category, isActive: true }).sort({ name: 1 });
+};
+
+// Static: obtener predefinidos
+segmentSchema.statics.getPredefined = function() {
+  return this.find({ isPredefined: true, isActive: true }).sort({ category: 1, name: 1 });
 };
 
 module.exports = mongoose.model('Segment', segmentSchema);

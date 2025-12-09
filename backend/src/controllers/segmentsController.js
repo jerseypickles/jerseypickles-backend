@@ -1,379 +1,461 @@
-// backend/src/controllers/segmentsController.js
+// backend/src/controllers/segmentsController.js - ACTUALIZADO
 const Segment = require('../models/Segment');
+const Customer = require('../models/Customer');
 const segmentationService = require('../services/segmentationService');
 
-class SegmentsController {
-  
-  // Listar todos los segmentos
-  async list(req, res) {
-    try {
-      const segments = await Segment.find()
-        .sort({ createdAt: -1 });
-      
-      res.json({
-        segments,
-        total: segments.length
+/**
+ * Listar todos los segmentos
+ */
+exports.list = async (req, res) => {
+  try {
+    const { category, type, active } = req.query;
+    
+    const filter = {};
+    if (category) filter.category = category;
+    if (type) filter.type = type;
+    if (active !== undefined) filter.isActive = active === 'true';
+    
+    const segments = await Segment.find(filter)
+      .sort({ category: 1, name: 1 });
+    
+    res.json({
+      success: true,
+      segments,
+      count: segments.length
+    });
+  } catch (error) {
+    console.error('Error listing segments:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al listar segmentos',
+      error: error.message 
+    });
+  }
+};
+
+/**
+ * Obtener un segmento por ID
+ */
+exports.getOne = async (req, res) => {
+  try {
+    const segment = await Segment.findById(req.params.id);
+    
+    if (!segment) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Segmento no encontrado' 
       });
-      
-    } catch (error) {
-      console.error('Error listando segmentos:', error);
-      res.status(500).json({ error: error.message });
     }
+    
+    res.json({ success: true, segment });
+  } catch (error) {
+    console.error('Error getting segment:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al obtener segmento',
+      error: error.message 
+    });
   }
+};
 
-  // Obtener un segmento
-  async getOne(req, res) {
-    try {
-      const segment = await Segment.findById(req.params.id);
-      
-      if (!segment) {
-        return res.status(404).json({ error: 'Segmento no encontrado' });
-      }
-      
-      res.json(segment);
-      
-    } catch (error) {
-      console.error('Error obteniendo segmento:', error);
-      res.status(500).json({ error: error.message });
-    }
-  }
-
-  // Crear segmento
-  async create(req, res) {
-    try {
-      const { name, description, conditions } = req.body;
-      
-      // Validar que tenga al menos una condición
-      if (!conditions || conditions.length === 0) {
-        return res.status(400).json({ 
-          error: 'El segmento debe tener al menos una condición' 
-        });
-      }
-      
-      // Calcular cantidad de clientes
-      const customerCount = await segmentationService.countSegment(conditions);
-      
-      const segment = await Segment.create({
-        name,
-        description,
-        conditions,
-        customerCount,
-        lastCalculated: new Date()
+/**
+ * Crear un nuevo segmento
+ */
+exports.create = async (req, res) => {
+  try {
+    const { name, description, conditions, category } = req.body;
+    
+    if (!name || !conditions || conditions.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Nombre y condiciones son requeridos' 
       });
-      
-      console.log(`✅ Segmento creado: ${name} (${customerCount} clientes)`);
-      
-      res.status(201).json(segment);
-      
-    } catch (error) {
-      console.error('Error creando segmento:', error);
-      res.status(500).json({ error: error.message });
     }
+    
+    const segment = new Segment({
+      name,
+      description,
+      conditions,
+      category: category || 'custom',
+      type: 'custom',
+      isPredefined: false
+    });
+    
+    await segment.save();
+    
+    // Calcular count inicial
+    await segment.recalculate();
+    
+    res.status(201).json({ success: true, segment });
+  } catch (error) {
+    console.error('Error creating segment:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al crear segmento',
+      error: error.message 
+    });
   }
+};
 
-  // Actualizar segmento
-  async update(req, res) {
-    try {
-      const { name, description, conditions, isActive } = req.body;
-      
-      const segment = await Segment.findById(req.params.id);
-      
-      if (!segment) {
-        return res.status(404).json({ error: 'Segmento no encontrado' });
-      }
-      
-      // Si cambiaron las condiciones, recalcular
-      if (conditions && JSON.stringify(conditions) !== JSON.stringify(segment.conditions)) {
-        const customerCount = await segmentationService.countSegment(conditions);
-        segment.customerCount = customerCount;
-        segment.conditions = conditions;
-        segment.lastCalculated = new Date();
-      }
-      
-      if (name) segment.name = name;
-      if (description !== undefined) segment.description = description;
-      if (isActive !== undefined) segment.isActive = isActive;
-      
-      await segment.save();
-      
-      console.log(`✅ Segmento actualizado: ${segment.name}`);
-      
-      res.json(segment);
-      
-    } catch (error) {
-      console.error('Error actualizando segmento:', error);
-      res.status(500).json({ error: error.message });
+/**
+ * Actualizar un segmento
+ */
+exports.update = async (req, res) => {
+  try {
+    const { name, description, conditions, category, isActive } = req.body;
+    
+    const segment = await Segment.findById(req.params.id);
+    
+    if (!segment) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Segmento no encontrado' 
+      });
     }
-  }
-
-  // Eliminar segmento
-  async delete(req, res) {
-    try {
-      const segment = await Segment.findByIdAndDelete(req.params.id);
-      
-      if (!segment) {
-        return res.status(404).json({ error: 'Segmento no encontrado' });
+    
+    // No permitir editar segmentos predefinidos (solo activar/desactivar)
+    if (segment.isPredefined && (name || description || conditions)) {
+      // Solo actualizar isActive para predefinidos
+      if (isActive !== undefined) {
+        segment.isActive = isActive;
+        await segment.save();
       }
-      
-      console.log(`🗑️  Segmento eliminado: ${segment.name}`);
-      
-      res.json({ 
+      return res.json({ 
         success: true, 
-        message: 'Segmento eliminado correctamente' 
+        segment,
+        message: 'Los segmentos predefinidos solo pueden activarse/desactivarse'
       });
-      
-    } catch (error) {
-      console.error('Error eliminando segmento:', error);
-      res.status(500).json({ error: error.message });
     }
+    
+    if (name) segment.name = name;
+    if (description !== undefined) segment.description = description;
+    if (conditions) segment.conditions = conditions;
+    if (category) segment.category = category;
+    if (isActive !== undefined) segment.isActive = isActive;
+    
+    await segment.save();
+    
+    // Recalcular si cambiaron las condiciones
+    if (conditions) {
+      await segment.recalculate();
+    }
+    
+    res.json({ success: true, segment });
+  } catch (error) {
+    console.error('Error updating segment:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al actualizar segmento',
+      error: error.message 
+    });
   }
+};
 
-  // Preview de segmento (ver clientes que coinciden)
-  async preview(req, res) {
-    try {
-      const { conditions, limit = 10 } = req.body;
-      
-      if (!conditions || conditions.length === 0) {
-        return res.status(400).json({ 
-          error: 'Debes proporcionar condiciones' 
+/**
+ * Eliminar un segmento
+ */
+exports.delete = async (req, res) => {
+  try {
+    const segment = await Segment.findById(req.params.id);
+    
+    if (!segment) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Segmento no encontrado' 
+      });
+    }
+    
+    // No permitir eliminar segmentos predefinidos
+    if (segment.isPredefined) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No se pueden eliminar segmentos predefinidos. Puedes desactivarlos.' 
+      });
+    }
+    
+    await segment.deleteOne();
+    
+    res.json({ 
+      success: true, 
+      message: 'Segmento eliminado correctamente' 
+    });
+  } catch (error) {
+    console.error('Error deleting segment:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al eliminar segmento',
+      error: error.message 
+    });
+  }
+};
+
+/**
+ * Preview de un segmento (antes de guardar)
+ */
+exports.preview = async (req, res) => {
+  try {
+    const { conditions, onlyMarketing } = req.body;
+    
+    if (!conditions || conditions.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Las condiciones son requeridas' 
+      });
+    }
+    
+    const result = await segmentationService.previewSegment(conditions, {
+      limit: 10,
+      onlyMarketing: onlyMarketing || false
+    });
+    
+    res.json({
+      success: true,
+      count: result.count,
+      preview: result.customers
+    });
+  } catch (error) {
+    console.error('Error previewing segment:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error en preview',
+      error: error.message 
+    });
+  }
+};
+
+/**
+ * Obtener clientes de un segmento
+ */
+exports.getCustomers = async (req, res) => {
+  try {
+    const segment = await Segment.findById(req.params.id);
+    
+    if (!segment) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Segmento no encontrado' 
+      });
+    }
+    
+    const { page = 1, limit = 50, onlyMarketing } = req.query;
+    
+    const result = await segmentationService.getSegmentCustomers(segment, {
+      page: parseInt(page),
+      limit: parseInt(limit),
+      onlyMarketing: onlyMarketing === 'true'
+    });
+    
+    res.json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    console.error('Error getting segment customers:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al obtener clientes',
+      error: error.message 
+    });
+  }
+};
+
+/**
+ * Recalcular conteo de un segmento
+ */
+exports.recalculate = async (req, res) => {
+  try {
+    const segment = await Segment.findById(req.params.id);
+    
+    if (!segment) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Segmento no encontrado' 
+      });
+    }
+    
+    const count = await segment.recalculate();
+    
+    res.json({
+      success: true,
+      segment,
+      customerCount: count
+    });
+  } catch (error) {
+    console.error('Error recalculating segment:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al recalcular',
+      error: error.message 
+    });
+  }
+};
+
+/**
+ * Obtener segmentos predefinidos por categoría
+ */
+exports.getPredefined = async (req, res) => {
+  try {
+    const { type } = req.params;
+    
+    let segments;
+    if (type === 'all') {
+      segments = segmentationService.getAllPredefinedSegments();
+    } else {
+      segments = segmentationService.getPredefinedByCategory(type);
+    }
+    
+    res.json({
+      success: true,
+      segments,
+      categories: ['purchase', 'engagement', 'popup', 'lifecycle', 'cleanup']
+    });
+  } catch (error) {
+    console.error('Error getting predefined segments:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al obtener segmentos predefinidos',
+      error: error.message 
+    });
+  }
+};
+
+/**
+ * Crear todos los segmentos predefinidos en la BD
+ */
+exports.createPredefinedSegments = async (req, res) => {
+  try {
+    const results = await segmentationService.createAllPredefinedSegments();
+    
+    const created = results.filter(r => r.action === 'created').length;
+    const updated = results.filter(r => r.action === 'updated').length;
+    const errors = results.filter(r => r.action === 'error').length;
+    
+    res.json({
+      success: true,
+      message: `Segmentos predefinidos: ${created} creados, ${updated} actualizados, ${errors} errores`,
+      results,
+      summary: { created, updated, errors }
+    });
+  } catch (error) {
+    console.error('Error creating predefined segments:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al crear segmentos predefinidos',
+      error: error.message 
+    });
+  }
+};
+
+/**
+ * Recalcular TODOS los segmentos
+ */
+exports.recalculateAll = async (req, res) => {
+  try {
+    const segments = await Segment.find({ isActive: true });
+    const results = [];
+    
+    for (const segment of segments) {
+      try {
+        const count = await segment.recalculate();
+        results.push({ 
+          id: segment._id, 
+          name: segment.name, 
+          count,
+          success: true 
+        });
+      } catch (error) {
+        results.push({ 
+          id: segment._id, 
+          name: segment.name, 
+          error: error.message,
+          success: false 
         });
       }
-      
-      const customers = await segmentationService.evaluateSegment(conditions, {
-        limit: parseInt(limit),
-        select: 'email firstName lastName totalSpent ordersCount lastOrderDate'
-      });
-      
-      const totalCount = await segmentationService.countSegment(conditions);
-      
-      res.json({
-        preview: customers,
-        totalCount,
-        showing: customers.length
-      });
-      
-    } catch (error) {
-      console.error('Error en preview de segmento:', error);
-      res.status(500).json({ error: error.message });
     }
+    
+    res.json({
+      success: true,
+      message: `${results.filter(r => r.success).length} de ${segments.length} segmentos recalculados`,
+      results
+    });
+  } catch (error) {
+    console.error('Error recalculating all segments:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al recalcular segmentos',
+      error: error.message 
+    });
   }
+};
 
-  // Recalcular segmento
-  async recalculate(req, res) {
-    try {
-      const segment = await Segment.findById(req.params.id);
-      
-      if (!segment) {
-        return res.status(404).json({ error: 'Segmento no encontrado' });
-      }
-      
-      console.log(`🔄 Recalculando segmento: ${segment.name}`);
-      
-      const customerCount = await segmentationService.countSegment(segment.conditions);
-      
-      segment.customerCount = customerCount;
-      segment.lastCalculated = new Date();
-      await segment.save();
-      
-      console.log(`✅ Recalculado: ${customerCount} clientes`);
-      
-      res.json({
-        success: true,
-        segment,
-        message: `Segmento recalculado: ${customerCount} clientes`
-      });
-      
-    } catch (error) {
-      console.error('Error recalculando segmento:', error);
-      res.status(500).json({ error: error.message });
-    }
+/**
+ * Diagnóstico de datos para segmentación
+ */
+exports.diagnose = async (req, res) => {
+  try {
+    const results = {};
+    
+    // Total customers
+    results.totalCustomers = await Customer.countDocuments();
+    results.acceptsMarketing = await Customer.countDocuments({ acceptsMarketing: true });
+    
+    // Compradores
+    results.withOrders = await Customer.countDocuments({ ordersCount: { $gt: 0 } });
+    results.withoutOrders = await Customer.countDocuments({ ordersCount: 0 });
+    results.repeatBuyers = await Customer.countDocuments({ ordersCount: { $gte: 2 } });
+    results.vipBuyers = await Customer.countDocuments({ totalSpent: { $gte: 200 } });
+    
+    // Popup
+    results.fromPopup = await Customer.countDocuments({ 
+      popupDiscountCode: { $exists: true, $ne: null, $ne: '' } 
+    });
+    results.popupNoOrder = await Customer.countDocuments({ 
+      popupDiscountCode: { $exists: true, $ne: null, $ne: '' },
+      ordersCount: 0
+    });
+    
+    // Email engagement
+    results.opened = await Customer.countDocuments({ 'emailStats.opened': { $gt: 0 } });
+    results.openedNoOrder = await Customer.countDocuments({ 
+      'emailStats.opened': { $gt: 0 },
+      ordersCount: 0
+    });
+    results.clicked = await Customer.countDocuments({ 'emailStats.clicked': { $gt: 0 } });
+    results.clickedNoOrder = await Customer.countDocuments({ 
+      'emailStats.clicked': { $gt: 0 },
+      ordersCount: 0
+    });
+    
+    // Bounces
+    results.bounced = await Customer.countDocuments({ 'bounceInfo.isBounced': true });
+    results.hardBounce = await Customer.countDocuments({ 'bounceInfo.bounceType': 'hard' });
+    
+    // Por source
+    results.bySource = await Customer.aggregate([
+      { $group: { _id: '$source', count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 10 }
+    ]);
+    
+    res.json({
+      success: true,
+      diagnosis: results,
+      suggestedSegments: [
+        { name: 'Compradores', count: results.withOrders },
+        { name: 'No han comprado', count: results.withoutOrders },
+        { name: 'Popup sin convertir', count: results.popupNoOrder },
+        { name: 'Engaged sin compra', count: results.openedNoOrder },
+        { name: 'Clickers sin compra', count: results.clickedNoOrder },
+        { name: 'VIP ($200+)', count: results.vipBuyers },
+        { name: 'Bounced', count: results.bounced }
+      ]
+    });
+  } catch (error) {
+    console.error('Error in diagnose:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error en diagnóstico',
+      error: error.message 
+    });
   }
-
-  // Obtener clientes de un segmento
-  async getCustomers(req, res) {
-    try {
-      const { page = 1, limit = 50 } = req.query;
-      
-      const segment = await Segment.findById(req.params.id);
-      
-      if (!segment) {
-        return res.status(404).json({ error: 'Segmento no encontrado' });
-      }
-      
-      const customers = await segmentationService.evaluateSegment(segment.conditions, {
-        limit: parseInt(limit),
-        skip: (page - 1) * limit
-      });
-      
-      res.json({
-        customers,
-        total: segment.customerCount,
-        page: parseInt(page),
-        pages: Math.ceil(segment.customerCount / limit)
-      });
-      
-    } catch (error) {
-      console.error('Error obteniendo clientes del segmento:', error);
-      res.status(500).json({ error: error.message });
-    }
-  }
-
-  // ==================== SEGMENTOS PREDEFINIDOS ====================
-  
-  async getPredefined(req, res) {
-    try {
-      const { type } = req.params;
-      
-      let customers;
-      let name;
-      
-      switch (type) {
-        case 'vip':
-          customers = await segmentationService.getVIPCustomers();
-          name = 'Clientes VIP';
-          break;
-          
-        case 'new-subscribers':
-          customers = await segmentationService.getNewSubscribers();
-          name = 'Nuevos Suscriptores';
-          break;
-          
-        case 'inactive':
-          customers = await segmentationService.getInactiveCustomers();
-          name = 'Clientes Inactivos';
-          break;
-          
-        case 'one-time-buyers':
-          customers = await segmentationService.getOneTimeBuyers();
-          name = 'Compradores de Una Vez';
-          break;
-          
-        case 'repeat-customers':
-          customers = await segmentationService.getRepeatCustomers();
-          name = 'Clientes Recurrentes';
-          break;
-          
-        case 'high-aov':
-          customers = await segmentationService.getHighAOVCustomers();
-          name = 'Alto Valor Promedio';
-          break;
-          
-        default:
-          return res.status(400).json({ 
-            error: 'Tipo de segmento no válido',
-            validTypes: ['vip', 'new-subscribers', 'inactive', 'one-time-buyers', 'repeat-customers', 'high-aov']
-          });
-      }
-      
-      res.json({
-        type,
-        name,
-        customers,
-        count: customers.length
-      });
-      
-    } catch (error) {
-      console.error('Error obteniendo segmento predefinido:', error);
-      res.status(500).json({ error: error.message });
-    }
-  }
-
-  // Crear segmentos predefinidos en la BD
-  async createPredefinedSegments(req, res) {
-    try {
-      console.log('📋 Creando segmentos predefinidos...\n');
-      
-      const predefinedSegments = [
-        {
-          name: '💎 Clientes VIP',
-          description: 'Clientes de alto valor (más de $500 gastados y 3+ órdenes)',
-          conditions: [
-            { field: 'totalSpent', operator: 'greater_or_equal', value: '500', logicalOperator: 'AND' },
-            { field: 'ordersCount', operator: 'greater_or_equal', value: '3', logicalOperator: 'AND' }
-          ]
-        },
-        {
-          name: '🆕 Nuevos Suscriptores',
-          description: 'Suscriptores de los últimos 30 días sin compras',
-          conditions: [
-            { field: 'createdAt', operator: 'in_last_days', value: '30', logicalOperator: 'AND' },
-            { field: 'ordersCount', operator: 'equals', value: '0', logicalOperator: 'AND' }
-          ]
-        },
-        {
-          name: '😴 Clientes Inactivos',
-          description: 'No han comprado en los últimos 90 días',
-          conditions: [
-            { field: 'ordersCount', operator: 'greater_than', value: '0', logicalOperator: 'AND' },
-            { field: 'lastOrderDate', operator: 'not_in_last_days', value: '90', logicalOperator: 'AND' }
-          ]
-        },
-        {
-          name: '🎯 One-Time Buyers',
-          description: 'Clientes con exactamente 1 compra',
-          conditions: [
-            { field: 'ordersCount', operator: 'equals', value: '1', logicalOperator: 'AND' }
-          ]
-        },
-        {
-          name: '🔄 Clientes Recurrentes',
-          description: 'Clientes con 2 o más compras',
-          conditions: [
-            { field: 'ordersCount', operator: 'greater_or_equal', value: '2', logicalOperator: 'AND' }
-          ]
-        },
-        {
-          name: '💰 Alto Valor Promedio',
-          description: 'AOV mayor a $100',
-          conditions: [
-            { field: 'averageOrderValue', operator: 'greater_or_equal', value: '100', logicalOperator: 'AND' },
-            { field: 'ordersCount', operator: 'greater_or_equal', value: '2', logicalOperator: 'AND' }
-          ]
-        }
-      ];
-      
-      const results = [];
-      
-      for (const segmentData of predefinedSegments) {
-        try {
-          // Verificar si ya existe
-          const existing = await Segment.findOne({ name: segmentData.name });
-          
-          if (existing) {
-            console.log(`⏭️  ${segmentData.name} ya existe, recalculando...`);
-            const count = await segmentationService.countSegment(segmentData.conditions);
-            existing.customerCount = count;
-            existing.lastCalculated = new Date();
-            await existing.save();
-            results.push({ ...existing.toObject(), status: 'updated' });
-          } else {
-            const count = await segmentationService.countSegment(segmentData.conditions);
-            const segment = await Segment.create({
-              ...segmentData,
-              customerCount: count,
-              lastCalculated: new Date()
-            });
-            console.log(`✅ ${segmentData.name} creado (${count} clientes)`);
-            results.push({ ...segment.toObject(), status: 'created' });
-          }
-        } catch (error) {
-          console.error(`❌ Error con ${segmentData.name}:`, error.message);
-          results.push({ name: segmentData.name, status: 'error', error: error.message });
-        }
-      }
-      
-      console.log('\n🎉 Segmentos predefinidos listos!\n');
-      
-      res.json({
-        success: true,
-        segments: results
-      });
-      
-    } catch (error) {
-      console.error('Error creando segmentos predefinidos:', error);
-      res.status(500).json({ error: error.message });
-    }
-  }
-}
-
-module.exports = new SegmentsController();
+};
