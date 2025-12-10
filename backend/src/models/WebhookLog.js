@@ -8,12 +8,12 @@ const webhookLogSchema = new mongoose.Schema({
     type: String,
     required: true,
     index: true
-    // e.g., 'customers/create', 'checkouts/create', 'orders/create', 'carts/update'
+    // e.g., 'customers/create', 'checkouts/create', 'orders/create', 'carts/update', 'resend/email.delivered'
   },
   
   source: {
     type: String,
-    enum: ['shopify', 'klaviyo', 'manual', 'test', 'other'],
+    enum: ['shopify', 'klaviyo', 'resend', 'manual', 'test', 'other'],
     default: 'shopify'
   },
   
@@ -121,7 +121,8 @@ webhookLogSchema.statics.logWebhook = async function(data) {
     email: data.email,
     payload: data.payload,
     headers: data.headers,
-    metadata: data.metadata
+    metadata: data.metadata,
+    cartDetails: data.cartDetails
   });
   
   await log.save();
