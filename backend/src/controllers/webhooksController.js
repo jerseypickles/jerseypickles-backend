@@ -1,4 +1,4 @@
-// backend/src/controllers/webhooksController.js - COMPLETO (Shopify + Resend)
+// backend/src/controllers/webhooksController.js - FIXED URL PARSING
 const Customer = require('../models/Customer');
 const Order = require('../models/Order');
 const EmailEvent = require('../models/EmailEvent');
@@ -221,73 +221,113 @@ class WebhooksController {
       let customerId = customer._id;
       let attributionMethod = 'none';
       
+      // Método 1: Cookie (raro que funcione con webhooks, pero por si acaso)
       if (attribution) {
         campaignId = attribution.campaignId;
         customerId = attribution.customerId;
         attributionMethod = 'cookie';
         console.log(`🍪 Attribution found via cookie: Campaign ${campaignId}`);
-      } else if (shopifyOrder.landing_site) {
-        const urlParams = new URLSearchParams(shopifyOrder.landing_site);
-        const utmCampaign = urlParams.get('utm_campaign');
-        
-        if (utmCampaign && utmCampaign.startsWith('email_')) {
-          campaignId = utmCampaign.replace('email_', '');
-          attributionMethod = 'utm';
-          console.log(`🔗 Attribution found via UTM: Campaign ${campaignId}`);
-        } else if (utmCampaign && utmCampaign.startsWith('flow_')) {
-          flowId = utmCampaign.replace('flow_', '');
-          attributionMethod = 'utm_flow';
-          console.log(`🔗 Attribution found via UTM for Flow: ${flowId}`);
+      }
+      
+      // Método 2: UTM Parameters en landing_site
+      // ✅ FIX: Usar new URL() en lugar de URLSearchParams directo
+      if (!campaignId && !flowId && shopifyOrder.landing_site) {
+        try {
+          // landing_site puede ser URL completa o path relativo
+          const url = new URL(shopifyOrder.landing_site, 'https://jerseypickles.com');
+          const utmCampaign = url.searchParams.get('utm_campaign');
+          
+          console.log(`🔍 Parsing landing_site: ${shopifyOrder.landing_site}`);
+          console.log(`   utm_campaign: ${utmCampaign || 'not found'}`);
+          
+          if (utmCampaign && utmCampaign.startsWith('email_')) {
+            campaignId = utmCampaign.replace('email_', '');
+            attributionMethod = 'utm';
+            console.log(`🔗 Attribution found via UTM: Campaign ${campaignId}`);
+          } else if (utmCampaign && utmCampaign.startsWith('flow_')) {
+            flowId = utmCampaign.replace('flow_', '');
+            attributionMethod = 'utm_flow';
+            console.log(`🔗 Attribution found via UTM for Flow: ${flowId}`);
+          }
+        } catch (e) {
+          console.log(`⚠️ Could not parse landing_site: ${shopifyOrder.landing_site}`);
         }
       }
       
+      // Método 3: Discount code attribution
+      if (!campaignId && !flowId && shopifyOrder.discount_codes?.length > 0) {
+        for (const discount of shopifyOrder.discount_codes) {
+          const campaignWithCode = await Campaign.findOne({
+            discountCode: discount.code,
+            status: 'sent'
+          }).select('_id');
+          
+          if (campaignWithCode) {
+            campaignId = campaignWithCode._id;
+            attributionMethod = 'discount_code';
+            console.log(`🏷️ Attribution found via discount code: ${discount.code} → Campaign ${campaignId}`);
+            break;
+          }
+        }
+      }
+      
+      // Método 4: Last click por EMAIL (más confiable que por customer._id)
       if (!campaignId && !flowId) {
         const sevenDaysAgo = new Date();
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
         
-        let lastClickEvent = await EmailEvent.findOne({
-          $or: [
-            { customer: customer._id },
-            { customer: customer._id.toString() }
-          ],
-          eventType: 'clicked',
-          eventDate: { $gte: sevenDaysAgo }
-        }).sort({ eventDate: -1 });
-        
-        if (!lastClickEvent && customer.email) {
-          console.log(`🔍 No click found by customer ID, trying by email: ${customer.email}`);
-          
-          lastClickEvent = await EmailEvent.findOne({
-            email: customer.email,
+        // Primero intentar por email (MÁS CONFIABLE)
+        if (customer.email) {
+          const lastClickEvent = await EmailEvent.findOne({
+            email: { $regex: new RegExp(`^${customer.email}$`, 'i') },
             eventType: 'clicked',
-            eventDate: { $gte: sevenDaysAgo }
+            eventDate: { $gte: sevenDaysAgo },
+            campaign: { $exists: true, $ne: null }
           }).sort({ eventDate: -1 });
           
           if (lastClickEvent) {
-            console.log(`📧 Found click by email match!`);
+            campaignId = lastClickEvent.campaign;
+            attributionMethod = 'last_click_email';
+            console.log(`📧 Attribution found via email click: ${customer.email} → Campaign ${campaignId}`);
           }
         }
         
-        if (lastClickEvent) {
-          campaignId = lastClickEvent.campaign;
-          attributionMethod = 'last_click';
-          console.log(`🔙 Attribution found via last click: Campaign ${campaignId}`);
+        // Si no encontró por email, intentar por customer ID (ambos formatos)
+        if (!campaignId) {
+          const lastClickEvent = await EmailEvent.findOne({
+            $or: [
+              { customer: customer._id },
+              { customer: customer._id.toString() }
+            ],
+            eventType: 'clicked',
+            eventDate: { $gte: sevenDaysAgo },
+            campaign: { $exists: true, $ne: null }
+          }).sort({ eventDate: -1 });
+          
+          if (lastClickEvent) {
+            campaignId = lastClickEvent.campaign;
+            attributionMethod = 'last_click_id';
+            console.log(`🔙 Attribution found via customer ID click: Campaign ${campaignId}`);
+          }
         }
       }
       
-      // Revenue tracking para campaigns
+      // Log final de attribution
       if (campaignId) {
-        console.log(`\n💰 ATTRIBUTING REVENUE TO CAMPAIGN`);
+        console.log(`\n💰 ═══════════════════════════════════════════`);
+        console.log(`   ATTRIBUTING REVENUE TO CAMPAIGN`);
         console.log(`   Method: ${attributionMethod}`);
         console.log(`   Campaign: ${campaignId}`);
         console.log(`   Revenue: $${shopifyOrder.total_price}`);
+        console.log(`═══════════════════════════════════════════════`);
         
-        // ✅ NUEVO: Actualizar la orden con attribution
+        // Actualizar la orden con attribution
         await Order.findByIdAndUpdate(order._id, {
           'attribution.campaign': campaignId,
           'attribution.source': attributionMethod === 'cookie' ? 'email_click' : 
                                 attributionMethod === 'utm' ? 'utm' : 
-                                attributionMethod === 'last_click' ? 'email_click' : 'unknown',
+                                attributionMethod === 'discount_code' ? 'discount_code' :
+                                attributionMethod.startsWith('last_click') ? 'email_click' : 'unknown',
           'attribution.clickedAt': new Date()
         });
         console.log(`   ✅ Order ${order.orderNumber} attributed to campaign`);
@@ -320,6 +360,12 @@ class WebhooksController {
         await Campaign.updateStats(campaignId, 'purchased', parseFloat(shopifyOrder.total_price));
         
         console.log(`✅ Revenue tracked successfully!`);
+      } else if (flowId) {
+        console.log(`\n💰 ATTRIBUTING REVENUE TO FLOW: ${flowId}`);
+      } else {
+        console.log(`\n⚠️ NO ATTRIBUTION FOUND for order #${shopifyOrder.order_number}`);
+        console.log(`   Customer: ${customer.email}`);
+        console.log(`   Landing site: ${shopifyOrder.landing_site || 'N/A'}`);
       }
       
       // Revenue tracking para flows
@@ -631,20 +677,8 @@ class WebhooksController {
     }
   }
 
-  // ==================== RESEND WEBHOOKS (NUEVO - IDEMPOTENTE) ====================
+  // ==================== RESEND WEBHOOKS ====================
   
-  /**
-   * Handler para webhooks de Resend
-   * IDEMPOTENCIA: Usa eventId único para prevenir procesamiento duplicado
-   * 
-   * Eventos soportados:
-   * - email.sent
-   * - email.delivered ← IMPORTANTE: Incrementa delivered aquí (NO en worker)
-   * - email.opened
-   * - email.clicked
-   * - email.bounced
-   * - email.complained
-   */
   async handleResendWebhook(req, res) {
     try {
       const { type, data, created_at } = req.body;
@@ -655,13 +689,11 @@ class WebhooksController {
       
       console.log(`\n📬 Webhook Resend: ${type} → ${data.to || data.email || 'unknown'}`);
       
-      // ========== PASO 1: Generar eventId ÚNICO ==========
       const eventId = this.generateEventId(data.email_id, type);
       
-      // ========== PASO 2: Intentar crear evento (idempotente) ==========
       try {
         await EmailEvent.create({
-          eventId,                          // Índice único - falla si ya existe
+          eventId,
           campaign: data.tags?.campaign_id || null,
           customer: data.tags?.customer_id || null,
           email: data.to || data.email,
@@ -680,7 +712,6 @@ class WebhooksController {
         
       } catch (error) {
         if (error.code === 11000) {
-          // Duplicate key - evento ya procesado
           console.log(`   ℹ️  Evento ${eventId} ya procesado (duplicado ignorado)`);
           return res.status(200).json({ 
             success: true, 
@@ -690,17 +721,14 @@ class WebhooksController {
         throw error;
       }
       
-      // ========== PASO 3: Actualizar EmailSend status ==========
       if (data.email_id) {
         await this.updateEmailSendStatus(data.email_id, type, data);
       }
       
-      // ========== PASO 4: Actualizar stats de campaña ==========
       if (data.tags?.campaign_id) {
         await this.updateCampaignStats(data.tags.campaign_id, type);
       }
       
-      // ========== PASO 5: Verificar si campaña terminó ==========
       if (data.tags?.campaign_id && type === 'email.delivered') {
         const { checkAndFinalizeCampaign } = require('../jobs/emailQueue');
         
@@ -715,13 +743,11 @@ class WebhooksController {
       
       console.log(`   ✅ Webhook procesado exitosamente\n`);
       
-      // CRÍTICO: Siempre responder 200 para que Resend no reintente
       res.status(200).json({ success: true });
       
     } catch (error) {
       console.error('❌ Error procesando webhook Resend:', error);
       
-      // Aún así responder 200 para evitar reintentos infinitos
       res.status(200).json({ 
         success: false, 
         error: error.message 
@@ -729,9 +755,6 @@ class WebhooksController {
     }
   }
   
-  /**
-   * Actualiza el estado de EmailSend basado en el webhook
-   */
   async updateEmailSendStatus(resendEmailId, eventType, data) {
     try {
       const emailSend = await EmailSend.findOne({ 
@@ -747,7 +770,6 @@ class WebhooksController {
       
       switch (eventType) {
         case 'email.sent':
-          // Ya está marcado como 'sent' desde el worker
           break;
           
         case 'email.delivered':
@@ -769,7 +791,6 @@ class WebhooksController {
           break;
           
         default:
-          // Eventos de tracking (opened, clicked) no cambian status
           break;
       }
       
@@ -785,10 +806,6 @@ class WebhooksController {
     }
   }
   
-  /**
-   * Actualiza stats de campaña basado en el webhook
-   * IMPORTANTE: delivered se incrementa AQUÍ, no en el worker
-   */
   async updateCampaignStats(campaignId, eventType) {
     try {
       const campaign = await Campaign.findById(campaignId);
@@ -802,7 +819,6 @@ class WebhooksController {
       
       switch (eventType) {
         case 'email.delivered':
-          // ✅ CRÍTICO: delivered se incrementa SOLO aquí (NO en worker)
           updates['stats.delivered'] = 1;
           console.log(`   📊 Campaign ${campaign.name}: delivered +1`);
           break;
@@ -829,7 +845,6 @@ class WebhooksController {
           $inc: updates
         });
         
-        // Actualizar rates
         if (eventType === 'email.delivered' || eventType === 'email.opened' || eventType === 'email.clicked') {
           const refreshedCampaign = await Campaign.findById(campaignId);
           refreshedCampaign.updateRates();
@@ -842,9 +857,6 @@ class WebhooksController {
     }
   }
   
-  /**
-   * Genera un eventId único para idempotencia
-   */
   generateEventId(emailId, eventType) {
     const normalized = `${emailId}:${eventType}`;
     return crypto
@@ -854,9 +866,6 @@ class WebhooksController {
       .slice(0, 32);
   }
   
-  /**
-   * Mapea tipos de eventos de Resend a nuestros tipos
-   */
   mapResendEventType(resendType) {
     const mapping = {
       'email.sent': 'sent',
@@ -871,9 +880,6 @@ class WebhooksController {
     return mapping[resendType] || 'unknown';
   }
   
-  /**
-   * Extrae metadata relevante según tipo de evento
-   */
   extractEventMetadata(eventType, data) {
     const metadata = {};
     

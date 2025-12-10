@@ -1,4 +1,4 @@
-// backend/src/services/emailService.js - PRODUCTION READY CON UNSUBSCRIBE
+// backend/src/services/emailService.js - CON UTM PARAMETERS PARA ATRIBUCIÓN
 const { Resend } = require('resend');
 const CircuitBreaker = require('../utils/circuitBreaker');
 const { generateUnsubscribeToken } = require('../utils/unsubscribeToken');
@@ -39,7 +39,7 @@ class EmailService {
     tags = null,
     retries = 0,
     maxRetries = 3,
-    includeUnsubscribe = true // 🆕 Por defecto incluir unsubscribe
+    includeUnsubscribe = true
   }) {
     try {
       if (!to || !subject || !html) {
@@ -50,7 +50,6 @@ class EmailService {
         throw new Error(`Email inválido: ${to}`);
       }
 
-      // 🆕 Inyectar link de unsubscribe si está habilitado
       if (includeUnsubscribe && customerId) {
         html = this.injectUnsubscribeLink(html, customerId, to, campaignId);
       }
@@ -114,7 +113,7 @@ class EmailService {
           tags,
           retries: retries + 1,
           maxRetries,
-          includeUnsubscribe: false // Ya se inyectó en el primer intento
+          includeUnsubscribe: false
         });
       }
       
@@ -137,7 +136,7 @@ class EmailService {
       const {
         maxRetries = 3,
         validateEmails = true,
-        includeUnsubscribe = true // 🆕
+        includeUnsubscribe = true
       } = options;
 
       if (!Array.isArray(emailsArray) || emailsArray.length === 0) {
@@ -165,7 +164,6 @@ class EmailService {
         const toArray = Array.isArray(email.to) ? email.to : [email.to];
         let htmlContent = email.html;
         
-        // 🆕 Inyectar unsubscribe en cada email del batch
         if (includeUnsubscribe && email.customerId) {
           htmlContent = this.injectUnsubscribeLink(htmlContent, email.customerId, toArray[0]);
         }
@@ -223,7 +221,7 @@ class EmailService {
       chunkSize = 10,
       delayBetweenChunks = 1000,
       stopOnCircuitBreak = true,
-      includeUnsubscribe = true // 🆕
+      includeUnsubscribe = true
     } = options;
     
     const results = {
@@ -285,28 +283,13 @@ class EmailService {
     return results;
   }
 
-  // ==================== 🆕 UNSUBSCRIBE LINK GENERATION ====================
+  // ==================== UNSUBSCRIBE LINK GENERATION ====================
   
-  /**
-   * Genera el link de unsubscribe para un cliente
-   * @param {string} customerId - ID del cliente
-   * @param {string} email - Email del cliente
-   * @param {string} campaignId - ID de la campaña (opcional, para tracking)
-   */
   generateUnsubscribeLink(customerId, email, campaignId = null) {
     const token = generateUnsubscribeToken(customerId, email, campaignId);
     return `${this.appUrl}/api/track/unsubscribe/${token}`;
   }
 
-  /**
-   * Genera el HTML del footer con link de unsubscribe
-   */
-  /**
-   * Genera el HTML del footer con link de unsubscribe
-   * @param {string} customerId - ID del cliente
-   * @param {string} email - Email del cliente  
-   * @param {string} campaignId - ID de la campaña (opcional, para tracking)
-   */
   generateUnsubscribeFooter(customerId, email, campaignId = null) {
     const unsubscribeLink = this.generateUnsubscribeLink(customerId, email, campaignId);
     
@@ -334,23 +317,13 @@ class EmailService {
     </table>`;
   }
 
-  /**
-   * Inyecta el link de unsubscribe en el HTML del email
-   * Busca {{unsubscribe_link}} o lo añade al final
-   * @param {string} html - HTML del email
-   * @param {string} customerId - ID del cliente
-   * @param {string} email - Email del cliente
-   * @param {string} campaignId - ID de la campaña (opcional, para tracking)
-   */
   injectUnsubscribeLink(html, customerId, email, campaignId = null) {
     const unsubscribeLink = this.generateUnsubscribeLink(customerId, email, campaignId);
     
-    // Reemplazar placeholder si existe
     if (html.includes('{{unsubscribe_link}}')) {
       return html.replace(/\{\{unsubscribe_link\}\}/g, unsubscribeLink);
     }
     
-    // Reemplazar otros placeholders comunes
     if (html.includes('{{unsubscribe_url}}')) {
       return html.replace(/\{\{unsubscribe_url\}\}/g, unsubscribeLink);
     }
@@ -359,18 +332,15 @@ class EmailService {
       return html.replace(/%unsubscribe_link%/g, unsubscribeLink);
     }
     
-    // Si el email ya tiene un footer con unsubscribe, no añadir otro
     if (html.toLowerCase().includes('unsubscribe')) {
       return html;
     }
     
-    // Añadir footer antes del cierre de </body> o al final
     const footer = this.generateUnsubscribeFooter(customerId, email);
     
     if (html.includes('</body>')) {
       return html.replace('</body>', `${footer}</body>`);
     } else if (html.includes('</table>')) {
-      // Buscar la última tabla y añadir después
       const lastTableIndex = html.lastIndexOf('</table>');
       return html.slice(0, lastTableIndex + 8) + footer + html.slice(lastTableIndex + 8);
     } else {
@@ -426,6 +396,10 @@ class EmailService {
     return `<img src="${trackingUrl}" width="1" height="1" alt="" style="display:block" />`;
   }
 
+  /**
+   * 🆕 ACTUALIZADO: Envuelve links con tracking Y añade UTM parameters
+   * Los UTMs permiten que Shopify capture la campaña en landing_site
+   */
   wrapLinksWithTracking(html, campaignId, customerId, email) {
     const trackingBaseUrl = `${this.appUrl}/api/track/click/${campaignId}/${customerId}`;
     
@@ -449,8 +423,48 @@ class EmailService {
         // No trackear anchors
         if (url.startsWith('#')) return match;
         
-        const encodedUrl = encodeURIComponent(url);
+        // ═══════════════════════════════════════════════════════════════
+        // 🆕 AÑADIR UTM PARAMETERS A LA URL DESTINO
+        // Esto es CRÍTICO para la atribución - Shopify guarda landing_site
+        // con estos parámetros, permitiendo atribuir la orden a la campaña
+        // ═══════════════════════════════════════════════════════════════
+        
+        let destinationUrl = url;
+        
+        // Solo añadir UTMs a links de tu tienda
+        if (url.includes('jerseypickles.com') || url.startsWith('/')) {
+          try {
+            // Normalizar URL
+            const baseUrl = url.startsWith('/') 
+              ? `https://jerseypickles.com${url}` 
+              : url;
+            
+            const urlObj = new URL(baseUrl);
+            
+            // Añadir UTM parameters si no existen
+            if (!urlObj.searchParams.has('utm_source')) {
+              urlObj.searchParams.set('utm_source', 'email');
+            }
+            if (!urlObj.searchParams.has('utm_medium')) {
+              urlObj.searchParams.set('utm_medium', 'campaign');
+            }
+            if (!urlObj.searchParams.has('utm_campaign')) {
+              // ✅ CRÍTICO: Este formato permite extraer el campaignId en el webhook
+              urlObj.searchParams.set('utm_campaign', `email_${campaignId}`);
+            }
+            
+            destinationUrl = urlObj.toString();
+            
+          } catch (e) {
+            // Si falla el parsing, usar URL original
+            console.warn(`⚠️ No se pudieron añadir UTMs a: ${url}`);
+          }
+        }
+        
+        // Crear URL de tracking con la URL destino (que ahora tiene UTMs)
+        const encodedUrl = encodeURIComponent(destinationUrl);
         const emailParam = `&email=${encodeURIComponent(email)}`;
+        
         return `href="${trackingBaseUrl}?url=${encodedUrl}${emailParam}"`;
       }
     );
