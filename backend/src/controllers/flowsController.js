@@ -1,1063 +1,1079 @@
-// backend/src/controllers/flowsController.js (ACTUALIZADO CON VALIDACIÓN)
+// backend/src/controllers/flowsController.js (ACTUALIZADO CON AI)
 const Flow = require('../models/Flow');
 const FlowExecution = require('../models/FlowExecution');
+const Customer = require('../models/Customer');
 const flowService = require('../services/flowService');
+const aiFlowService = require('../services/aiFlowService');
 
-class FlowsController {
-  
-  /**
-   * Validar datos del flow
-   */
-  validateFlowData(data) {
+// ==================== CRUD BÁSICO ====================
+
+exports.getAll = async (req, res) => {
+  try {
+    const { status, page = 1, limit = 20 } = req.query;
+    
+    const query = {};
+    if (status) query.status = status;
+    
+    const flows = await Flow.find(query)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit))
+      .lean();
+    
+    // Enriquecer con tasas calculadas
+    const enrichedFlows = flows.map(flow => ({
+      ...flow,
+      rates: {
+        openRate: flow.metrics?.emailsSent > 0 
+          ? ((flow.metrics.opens / flow.metrics.emailsSent) * 100).toFixed(1)
+          : 0,
+        clickRate: flow.metrics?.emailsSent > 0 
+          ? ((flow.metrics.clicks / flow.metrics.emailsSent) * 100).toFixed(1)
+          : 0,
+        conversionRate: flow.metrics?.totalTriggered > 0
+          ? ((flow.metrics.totalOrders / flow.metrics.totalTriggered) * 100).toFixed(1)
+          : 0
+      }
+    }));
+    
+    const total = await Flow.countDocuments(query);
+    
+    res.json({
+      flows: enrichedFlows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching flows:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.getOne = async (req, res) => {
+  try {
+    const flow = await Flow.findById(req.params.id);
+    
+    if (!flow) {
+      return res.status(404).json({ error: 'Flow not found' });
+    }
+    
+    // Agregar métricas calculadas
+    const rates = flow.calculateRates ? flow.calculateRates() : {};
+    
+    res.json({ 
+      flow: {
+        ...flow.toObject(),
+        rates
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching flow:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.create = async (req, res) => {
+  try {
+    const { name, description, trigger, steps, status } = req.body;
+    
+    // Validaciones
     const errors = [];
+    if (!name?.trim()) errors.push('Flow name is required');
+    if (!trigger?.type) errors.push('Trigger type is required');
     
-    if (!data.name || !data.name.trim()) {
-      errors.push('Flow name is required');
+    if (errors.length > 0) {
+      return res.status(400).json({ errors });
     }
     
-    if (!data.trigger?.type) {
-      errors.push('Trigger type is required');
+    // Ordenar steps
+    const orderedSteps = (steps || []).map((step, index) => ({
+      ...step,
+      order: index
+    }));
+    
+    const flow = await Flow.create({
+      name,
+      description,
+      trigger,
+      steps: orderedSteps,
+      status: status || 'draft'
+    });
+    
+    console.log(`✅ Flow created: ${flow.name} (${flow._id})`);
+    
+    res.status(201).json({ flow });
+    
+  } catch (error) {
+    console.error('Error creating flow:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.update = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+    
+    // Si actualizan steps, reordenar
+    if (updates.steps) {
+      updates.steps = updates.steps.map((step, index) => ({
+        ...step,
+        order: index
+      }));
     }
     
-    const validTriggers = [
-      'customer_created', 'order_placed', 'cart_abandoned',
-      'popup_signup', 'customer_tag_added', 'segment_entry',
-      'custom_event', 'order_fulfilled', 'order_cancelled',
-      'order_refunded', 'product_back_in_stock'
+    const flow = await Flow.findByIdAndUpdate(
+      id,
+      { $set: updates },
+      { new: true, runValidators: true }
+    );
+    
+    if (!flow) {
+      return res.status(404).json({ error: 'Flow not found' });
+    }
+    
+    console.log(`✅ Flow updated: ${flow.name}`);
+    
+    res.json({ flow });
+    
+  } catch (error) {
+    console.error('Error updating flow:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.delete = async (req, res) => {
+  try {
+    const flow = await Flow.findByIdAndDelete(req.params.id);
+    
+    if (!flow) {
+      return res.status(404).json({ error: 'Flow not found' });
+    }
+    
+    // Cancelar ejecuciones activas
+    await FlowExecution.updateMany(
+      { flow: req.params.id, status: { $in: ['active', 'waiting'] } },
+      { status: 'cancelled', completedAt: new Date() }
+    );
+    
+    console.log(`🗑️  Flow deleted: ${flow.name}`);
+    
+    res.json({ message: 'Flow deleted successfully' });
+    
+  } catch (error) {
+    console.error('Error deleting flow:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ==================== ACCIONES ====================
+
+exports.toggleStatus = async (req, res) => {
+  try {
+    const flow = await Flow.findById(req.params.id);
+    
+    if (!flow) {
+      return res.status(404).json({ error: 'Flow not found' });
+    }
+    
+    // Toggle entre active y paused (o draft)
+    if (flow.status === 'active') {
+      flow.status = 'paused';
+    } else {
+      // Validar antes de activar
+      const errors = validateFlowForActivation(flow);
+      if (errors.length > 0) {
+        return res.status(400).json({ errors });
+      }
+      flow.status = 'active';
+    }
+    
+    await flow.save();
+    
+    console.log(`🔄 Flow ${flow.status}: ${flow.name}`);
+    
+    res.json({ flow });
+    
+  } catch (error) {
+    console.error('Error toggling flow:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.pauseFlow = async (req, res) => {
+  try {
+    const flow = await Flow.findByIdAndUpdate(
+      req.params.id,
+      { status: 'paused' },
+      { new: true }
+    );
+    
+    if (!flow) {
+      return res.status(404).json({ error: 'Flow not found' });
+    }
+    
+    res.json({ flow, message: 'Flow paused' });
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.resumeFlow = async (req, res) => {
+  try {
+    const flow = await Flow.findById(req.params.id);
+    
+    if (!flow) {
+      return res.status(404).json({ error: 'Flow not found' });
+    }
+    
+    const errors = validateFlowForActivation(flow);
+    if (errors.length > 0) {
+      return res.status(400).json({ errors });
+    }
+    
+    flow.status = 'active';
+    await flow.save();
+    
+    res.json({ flow, message: 'Flow resumed' });
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.testFlow = async (req, res) => {
+  try {
+    const { customerId } = req.body;
+    
+    if (!customerId) {
+      return res.status(400).json({ error: 'Customer ID required for testing' });
+    }
+    
+    const execution = await flowService.testFlow(req.params.id, customerId);
+    
+    res.json({ 
+      message: 'Test flow started',
+      execution: {
+        _id: execution._id,
+        status: execution.status,
+        startedAt: execution.startedAt
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error testing flow:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ==================== STATS & EXECUTIONS ====================
+
+exports.getStats = async (req, res) => {
+  try {
+    const flow = await Flow.findById(req.params.id);
+    
+    if (!flow) {
+      return res.status(404).json({ error: 'Flow not found' });
+    }
+    
+    // Obtener execuciones para stats detallados
+    const executions = await FlowExecution.find({ flow: req.params.id })
+      .sort({ createdAt: -1 })
+      .limit(1000)
+      .lean();
+    
+    // Stats por step
+    const stepMetrics = flow.steps.map((step, index) => {
+      const stepExecutions = executions.filter(e => 
+        e.stepResults?.some(sr => sr.stepIndex === index)
+      );
+      
+      return {
+        stepIndex: index,
+        type: step.type,
+        completed: stepExecutions.filter(e => 
+          e.stepResults?.find(sr => sr.stepIndex === index && !sr.error)
+        ).length,
+        failed: stepExecutions.filter(e => 
+          e.stepResults?.find(sr => sr.stepIndex === index && sr.error)
+        ).length
+      };
+    });
+    
+    // Timeline de últimos 7 días
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    
+    const timeline = [];
+    for (let i = 0; i < 7; i++) {
+      const date = new Date();
+      date.setDate(date.getDate() - i);
+      const dayStr = date.toISOString().split('T')[0];
+      
+      const dayExecutions = executions.filter(e => 
+        e.startedAt && e.startedAt.toISOString().startsWith(dayStr)
+      );
+      
+      timeline.unshift({
+        date: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][date.getDay()],
+        triggered: dayExecutions.length,
+        completed: dayExecutions.filter(e => e.status === 'completed').length,
+        revenue: dayExecutions.reduce((sum, e) => sum + (e.attributedRevenue || 0), 0)
+      });
+    }
+    
+    res.json({
+      flowId: flow._id,
+      name: flow.name,
+      status: flow.status,
+      
+      // Métricas generales
+      emailsSent: flow.metrics.emailsSent,
+      opens: flow.metrics.opens,
+      clicks: flow.metrics.clicks,
+      conversions: flow.metrics.totalOrders,
+      totalRevenue: flow.metrics.totalRevenue,
+      
+      // Tasas
+      openRate: flow.metrics.emailsSent > 0 
+        ? ((flow.metrics.opens / flow.metrics.emailsSent) * 100).toFixed(1)
+        : 0,
+      clickRate: flow.metrics.emailsSent > 0 
+        ? ((flow.metrics.clicks / flow.metrics.emailsSent) * 100).toFixed(1)
+        : 0,
+      
+      // Ejecuciones
+      activeExecutions: executions.filter(e => 
+        e.status === 'active' || e.status === 'waiting'
+      ).length,
+      
+      // Por step
+      stepMetrics,
+      
+      // Timeline
+      timeline
+    });
+    
+  } catch (error) {
+    console.error('Error fetching flow stats:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.getExecutions = async (req, res) => {
+  try {
+    const { status, page = 1, limit = 50 } = req.query;
+    
+    const query = { flow: req.params.id };
+    if (status) query.status = status;
+    
+    const executions = await FlowExecution.find(query)
+      .populate('customer', 'email firstName lastName')
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit))
+      .lean();
+    
+    const total = await FlowExecution.countDocuments(query);
+    
+    res.json({
+      executions,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching executions:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.cancelExecution = async (req, res) => {
+  try {
+    const execution = await flowService.cancelExecution(req.params.executionId);
+    res.json({ execution, message: 'Execution cancelled' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ==================== TEMPLATES ====================
+
+exports.getTemplates = async (req, res) => {
+  try {
+    const templates = [
+      {
+        id: 'welcome-series',
+        name: 'Welcome Series',
+        emoji: '🎉',
+        description: 'Welcome new customers with a series of personalized emails',
+        trigger: 'customer_created',
+        estimatedRevenue: '+15% conversion',
+        steps: 5,
+        emails: 3,
+        popular: true,
+        tags: ['Onboarding', 'New Customer'],
+        preview: {
+          day1: 'Welcome email with brand story',
+          day3: 'Product highlights and bestsellers',
+          day7: 'First purchase incentive (10% off)'
+        }
+      },
+      {
+        id: 'abandoned-cart',
+        name: 'Abandoned Cart Recovery',
+        emoji: '🛒',
+        description: 'Recover lost sales with timely cart reminders',
+        trigger: 'cart_abandoned',
+        estimatedRevenue: '+20% recovery rate',
+        steps: 4,
+        emails: 3,
+        popular: true,
+        tags: ['Recovery', 'Revenue'],
+        preview: {
+          hour1: 'Gentle reminder with cart contents',
+          hour24: 'Social proof and urgency',
+          hour72: 'Final reminder with discount'
+        }
+      },
+      {
+        id: 'post-purchase',
+        name: 'Post-Purchase Flow',
+        emoji: '📦',
+        description: 'Build loyalty and get reviews after purchase',
+        trigger: 'order_placed',
+        estimatedRevenue: '+25% repeat purchases',
+        steps: 4,
+        emails: 3,
+        popular: true,
+        tags: ['Retention', 'Reviews'],
+        preview: {
+          immediate: 'Thank you and order confirmation',
+          day7: 'Product tips and usage ideas',
+          day14: 'Review request with incentive'
+        }
+      },
+      {
+        id: 'win-back',
+        name: 'Win-Back Campaign',
+        emoji: '💔',
+        description: 'Re-engage customers who haven\'t purchased recently',
+        trigger: 'customer_tag_added',
+        triggerConfig: { tagName: 'dormant' },
+        estimatedRevenue: '+10% reactivation',
+        steps: 4,
+        emails: 3,
+        popular: false,
+        tags: ['Re-engagement', 'Retention'],
+        preview: {
+          day1: 'We miss you message',
+          day7: 'What\'s new + exclusive offer',
+          day14: 'Last chance with best offer'
+        }
+      },
+      {
+        id: 'vip-program',
+        name: 'VIP Program',
+        emoji: '💎',
+        description: 'Reward and retain your best customers',
+        trigger: 'customer_tag_added',
+        triggerConfig: { tagName: 'VIP' },
+        estimatedRevenue: '+30% LTV',
+        steps: 3,
+        emails: 2,
+        popular: false,
+        tags: ['VIP', 'Loyalty'],
+        preview: {
+          immediate: 'Welcome to VIP status',
+          day30: 'Exclusive VIP-only offer'
+        }
+      },
+      {
+        id: 'review-request',
+        name: 'Review Request',
+        emoji: '⭐',
+        description: 'Request product reviews after delivery',
+        trigger: 'order_fulfilled',
+        estimatedRevenue: '+40% review rate',
+        steps: 3,
+        emails: 2,
+        popular: false,
+        tags: ['Reviews', 'Social Proof'],
+        preview: {
+          day3: 'How are you enjoying your order?',
+          day10: 'Review reminder with incentive'
+        }
+      }
     ];
     
-    if (data.trigger?.type && !validTriggers.includes(data.trigger.type)) {
-      errors.push(`Invalid trigger type: ${data.trigger.type}`);
-    }
+    res.json({ templates });
     
-    // Validar steps
-    if (data.steps && Array.isArray(data.steps)) {
-      const validStepTypes = ['send_email', 'wait', 'condition', 'add_tag', 'create_discount'];
-      
-      data.steps.forEach((step, index) => {
-        if (!step.type || !validStepTypes.includes(step.type)) {
-          errors.push(`Invalid step type at index ${index}: ${step.type}`);
-        }
-        
-        // Validar config según tipo
-        switch (step.type) {
-          case 'send_email':
-            if (!step.config?.subject) {
-              errors.push(`Step ${index + 1}: Email subject is required`);
-            }
-            break;
-          case 'wait':
-            if (!step.config?.delayMinutes || step.config.delayMinutes < 1) {
-              errors.push(`Step ${index + 1}: Wait delay must be at least 1 minute`);
-            }
-            break;
-          case 'add_tag':
-            if (!step.config?.tagName) {
-              errors.push(`Step ${index + 1}: Tag name is required`);
-            }
-            break;
-        }
-      });
-    }
-    
-    return errors;
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-  
-  /**
-   * Obtener todos los flows con métricas optimizadas
-   */
-  async getAll(req, res) {
-    try {
-      // Usar aggregation para mejor rendimiento
-      const flows = await Flow.aggregate([
-        { $sort: { createdAt: -1 } },
-        {
-          $lookup: {
-            from: 'flowexecutions',
-            let: { flowId: '$_id' },
-            pipeline: [
-              {
-                $match: {
-                  $expr: {
-                    $and: [
-                      { $eq: ['$flow', '$$flowId'] },
-                      { $eq: ['$status', 'active'] }
-                    ]
+};
+
+exports.createFromTemplate = async (req, res) => {
+  try {
+    const { templateId } = req.params;
+    
+    // Definir templates completos
+    const templateDefinitions = {
+      'welcome-series': {
+        name: 'Welcome Series',
+        description: 'Automated welcome sequence for new customers',
+        trigger: { type: 'customer_created', config: {} },
+        steps: [
+          {
+            type: 'send_email',
+            config: {
+              subject: '🥒 Welcome to Jersey Pickles, {{customer.firstName}}!',
+              previewText: 'Your journey to pickle perfection starts here',
+              htmlContent: '<!-- Welcome email HTML -->'
+            },
+            order: 0
+          },
+          {
+            type: 'wait',
+            config: { delayMinutes: 4320 }, // 3 days
+            order: 1
+          },
+          {
+            type: 'send_email',
+            config: {
+              subject: 'Our Bestsellers 🏆 (Picked just for you)',
+              previewText: 'Discover what everyone\'s crunching about',
+              htmlContent: '<!-- Bestsellers email HTML -->'
+            },
+            order: 2
+          },
+          {
+            type: 'wait',
+            config: { delayMinutes: 5760 }, // 4 days
+            order: 3
+          },
+          {
+            type: 'condition',
+            config: {
+              conditionType: 'has_purchased',
+              ifTrue: [
+                {
+                  type: 'add_tag',
+                  config: { tagName: 'welcome_converted' }
+                }
+              ],
+              ifFalse: [
+                {
+                  type: 'send_email',
+                  config: {
+                    subject: '10% off your first order 🎁',
+                    previewText: 'A little something to get you started',
+                    htmlContent: '<!-- Discount email HTML -->'
+                  }
+                },
+                {
+                  type: 'create_discount',
+                  config: {
+                    discountCode: 'WELCOME10',
+                    discountType: 'percentage',
+                    discountValue: 10,
+                    expiresInDays: 7
                   }
                 }
-              },
-              { $count: 'count' }
-            ],
-            as: 'activeExecutions'
+              ]
+            },
+            order: 4
           }
+        ]
+      },
+      
+      'abandoned-cart': {
+        name: 'Abandoned Cart Recovery',
+        description: 'Recover abandoned carts with timely reminders',
+        trigger: { 
+          type: 'cart_abandoned', 
+          config: { abandonedAfterMinutes: 60 } 
         },
-        {
-          $addFields: {
-            'metrics.activeExecutions': {
-              $ifNull: [{ $arrayElemAt: ['$activeExecutions.count', 0] }, 0]
-            }
-          }
-        },
-        { $project: { activeExecutions: 0 } }
-      ]);
-      
-      res.json({ 
-        success: true,
-        flows,
-        total: flows.length
-      });
-    } catch (error) {
-      console.error('Error fetching flows:', error);
-      res.status(500).json({ 
-        success: false,
-        error: error.message 
-      });
-    }
-  }
-
-  /**
-   * Obtener un flow por ID
-   */
-  async getOne(req, res) {
-    try {
-      const flow = await Flow.findById(req.params.id);
-      
-      if (!flow) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'Flow not found' 
-        });
-      }
-      
-      // Agregar conteo de ejecuciones activas
-      const activeExecutions = await FlowExecution.countDocuments({
-        flow: flow._id,
-        status: { $in: ['active', 'waiting'] }
-      });
-      
-      const flowObj = flow.toObject();
-      flowObj.metrics = {
-        ...flowObj.metrics,
-        activeExecutions
-      };
-      
-      res.json({ 
-        success: true,
-        flow: flowObj 
-      });
-    } catch (error) {
-      console.error('Error fetching flow:', error);
-      res.status(500).json({ 
-        success: false,
-        error: error.message 
-      });
-    }
-  }
-
-  /**
-   * Crear nuevo flow con validación
-   */
-  async create(req, res) {
-    try {
-      // Validar datos
-      const errors = this.validateFlowData(req.body);
-      if (errors.length > 0) {
-        return res.status(400).json({
-          success: false,
-          errors
-        });
-      }
-      
-      // Asegurar que los steps tengan orden correcto
-      if (req.body.steps) {
-        req.body.steps = req.body.steps.map((step, index) => ({
-          ...step,
-          order: index
-        }));
-      }
-      
-      const flow = new Flow(req.body);
-      await flow.save();
-      
-      console.log(`✅ Flow created: ${flow.name} (${flow._id})`);
-      
-      res.status(201).json({ 
-        success: true,
-        flow,
-        message: 'Flow created successfully'
-      });
-    } catch (error) {
-      console.error('Error creating flow:', error);
-      res.status(500).json({ 
-        success: false,
-        error: error.message 
-      });
-    }
-  }
-
-  /**
-   * Actualizar flow
-   */
-  async update(req, res) {
-    try {
-      // No validar todo si solo se actualiza status
-      if (Object.keys(req.body).length > 1 || !req.body.status) {
-        const errors = this.validateFlowData(req.body);
-        if (errors.length > 0) {
-          return res.status(400).json({
-            success: false,
-            errors
-          });
-        }
-      }
-      
-      // Asegurar orden de steps
-      if (req.body.steps) {
-        req.body.steps = req.body.steps.map((step, index) => ({
-          ...step,
-          order: index
-        }));
-      }
-      
-      const flow = await Flow.findByIdAndUpdate(
-        req.params.id,
-        req.body,
-        { new: true, runValidators: true }
-      );
-      
-      if (!flow) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'Flow not found' 
-        });
-      }
-      
-      console.log(`✅ Flow updated: ${flow.name} (${flow._id})`);
-      
-      res.json({ 
-        success: true,
-        flow,
-        message: 'Flow updated successfully'
-      });
-    } catch (error) {
-      console.error('Error updating flow:', error);
-      res.status(500).json({ 
-        success: false,
-        error: error.message 
-      });
-    }
-  }
-
-  /**
-   * Eliminar flow
-   */
-  async delete(req, res) {
-    try {
-      const flow = await Flow.findById(req.params.id);
-      
-      if (!flow) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'Flow not found' 
-        });
-      }
-      
-      // Verificar si hay ejecuciones activas
-      const activeCount = await FlowExecution.countDocuments({
-        flow: req.params.id,
-        status: { $in: ['active', 'waiting'] }
-      });
-      
-      if (activeCount > 0) {
-        return res.status(400).json({
-          success: false,
-          error: `Cannot delete flow with ${activeCount} active executions. Please wait or cancel them first.`
-        });
-      }
-      
-      // Eliminar flow y ejecuciones
-      await Flow.findByIdAndDelete(req.params.id);
-      await FlowExecution.deleteMany({ flow: req.params.id });
-      
-      console.log(`🗑️  Flow deleted: ${flow.name} (${req.params.id})`);
-      
-      res.json({ 
-        success: true,
-        message: 'Flow deleted successfully' 
-      });
-    } catch (error) {
-      console.error('Error deleting flow:', error);
-      res.status(500).json({ 
-        success: false,
-        error: error.message 
-      });
-    }
-  }
-
-  /**
-   * Toggle status (activar/desactivar)
-   */
-  async toggleStatus(req, res) {
-    try {
-      const flow = await Flow.findById(req.params.id);
-      
-      if (!flow) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'Flow not found' 
-        });
-      }
-      
-      // Validar antes de activar
-      if (flow.status !== 'active') {
-        if (!flow.steps || flow.steps.length === 0) {
-          return res.status(400).json({
-            success: false,
-            error: 'Cannot activate flow without steps'
-          });
-        }
-        
-        // Verificar que hay al menos un email
-        const hasEmail = flow.steps.some(s => s.type === 'send_email');
-        if (!hasEmail) {
-          return res.status(400).json({
-            success: false,
-            error: 'Flow must have at least one email step'
-          });
-        }
-      }
-      
-      const newStatus = flow.status === 'active' ? 'paused' : 'active';
-      flow.status = newStatus;
-      await flow.save();
-      
-      console.log(`🔄 Flow ${newStatus}: ${flow.name}`);
-      
-      res.json({ 
-        success: true,
-        flow,
-        message: `Flow ${newStatus === 'active' ? 'activated' : 'paused'} successfully`
-      });
-    } catch (error) {
-      console.error('Error toggling flow status:', error);
-      res.status(500).json({ 
-        success: false,
-        error: error.message 
-      });
-    }
-  }
-
-  /**
-   * Obtener templates disponibles
-   */
-  async getTemplates(req, res) {
-    try {
-      const templates = [
-        {
-          id: 'welcome-series',
-          name: '🎉 Welcome Series',
-          description: 'Welcome new customers with a series of emails',
-          trigger: 'customer_created',
-          estimatedRevenue: '+15% conversion',
-          steps: 5,
-          emails: 3,
-          popular: true,
-          tags: ['Onboarding', 'New Customer']
-        },
-        {
-          id: 'abandoned-cart',
-          name: '🛒 Abandoned Cart Recovery',
-          description: 'Recover lost sales from abandoned carts',
-          trigger: 'cart_abandoned',
-          estimatedRevenue: '+20% recovery',
-          steps: 4,
-          emails: 2,
-          popular: true,
-          tags: ['Recovery', 'Revenue']
-        },
-        {
-          id: 'post-purchase',
-          name: '📦 Post-Purchase',
-          description: 'Thank customers after purchase',
-          trigger: 'order_placed',
-          estimatedRevenue: '+25% repeat',
-          steps: 6,
-          emails: 3,
-          popular: false,
-          tags: ['Retention', 'Loyalty']
-        },
-        {
-          id: 'win-back',
-          name: '💔 Win-Back Campaign',
-          description: 'Re-engage inactive customers',
-          trigger: 'customer_inactive',
-          estimatedRevenue: '+10% reactivation',
-          steps: 3,
-          emails: 2,
-          popular: false,
-          tags: ['Re-engagement']
-        },
-        {
-          id: 'vip-program',
-          name: '💎 VIP Program',
-          description: 'Reward your best customers',
-          trigger: 'customer_tag_added',
-          estimatedRevenue: '+30% LTV',
-          steps: 4,
-          emails: 2,
-          popular: true,
-          tags: ['VIP', 'Loyalty']
-        },
-        {
-          id: 'product-review',
-          name: '⭐ Review Request',
-          description: 'Ask for reviews after delivery',
-          trigger: 'order_fulfilled',
-          estimatedRevenue: '+5% trust',
-          steps: 2,
-          emails: 1,
-          popular: false,
-          tags: ['Reviews', 'Social Proof']
-        }
-      ];
-      
-      res.json({ 
-        success: true,
-        templates 
-      });
-    } catch (error) {
-      console.error('Error fetching templates:', error);
-      res.status(500).json({ 
-        success: false,
-        error: error.message 
-      });
-    }
-  }
-
-  /**
-   * Crear flow desde template
-   */
-  async createFromTemplate(req, res) {
-    try {
-      const { templateId } = req.params;
-      
-      const templates = {
-        'welcome-series': {
-          name: '🎉 Welcome Series',
-          description: 'Welcome email series for new customers',
-          trigger: { type: 'customer_created', config: {} },
-          status: 'draft',
-          steps: [
-            {
-              type: 'send_email',
-              order: 0,
-              config: {
-                subject: 'Welcome to Jersey Pickles! 🥒',
-                previewText: 'Thank you for joining our pickle family!',
-                htmlContent: this.getWelcomeEmailTemplate()
-              }
+        steps: [
+          {
+            type: 'send_email',
+            config: {
+              subject: '🛒 Forgot something? Your cart misses you!',
+              previewText: 'Your pickles are waiting...',
+              htmlContent: '<!-- Cart reminder 1 HTML -->'
             },
-            {
-              type: 'wait',
-              order: 1,
-              config: { delayMinutes: 1440 } // 24 hours
-            },
-            {
-              type: 'send_email',
-              order: 2,
-              config: {
-                subject: 'Discover Our Best Sellers ⭐',
-                previewText: 'Explore customer favorites',
-                htmlContent: this.getProductShowcaseTemplate()
-              }
-            },
-            {
-              type: 'wait',
-              order: 3,
-              config: { delayMinutes: 4320 } // 3 days
-            },
-            {
-              type: 'condition',
-              order: 4,
-              config: {
-                conditionType: 'has_purchased',
-                ifTrue: [],
-                ifFalse: [
-                  {
-                    type: 'send_email',
-                    config: {
-                      subject: 'Here\'s 15% Off Your First Order! 🎁',
-                      previewText: 'Don\'t miss this special welcome discount',
-                      htmlContent: this.getDiscountEmailTemplate('WELCOME15', '15%')
-                    }
-                  }
-                ]
-              }
-            }
-          ]
-        },
-        'abandoned-cart': {
-          name: '🛒 Abandoned Cart Recovery',
-          description: 'Recover abandoned carts',
-          trigger: { 
-            type: 'cart_abandoned',
-            config: { abandonedAfterMinutes: 60 }
+            order: 0
           },
-          status: 'draft',
-          steps: [
-            {
-              type: 'wait',
-              order: 0,
-              config: { delayMinutes: 60 } // 1 hour
+          {
+            type: 'wait',
+            config: { delayMinutes: 1440 }, // 24 hours
+            order: 1
+          },
+          {
+            type: 'condition',
+            config: {
+              conditionType: 'has_purchased',
+              ifTrue: [],
+              ifFalse: [
+                {
+                  type: 'send_email',
+                  config: {
+                    subject: '⏰ Your cart expires soon!',
+                    previewText: 'Don\'t miss out on these goodies',
+                    htmlContent: '<!-- Cart reminder 2 HTML -->'
+                  }
+                }
+              ]
             },
-            {
-              type: 'send_email',
-              order: 1,
-              config: {
-                subject: 'Did You Forget Something? 🥒',
-                previewText: 'Your cart is waiting for you',
-                htmlContent: this.getCartReminderTemplate(1)
-              }
+            order: 2
+          },
+          {
+            type: 'wait',
+            config: { delayMinutes: 2880 }, // 48 more hours
+            order: 3
+          },
+          {
+            type: 'condition',
+            config: {
+              conditionType: 'has_purchased',
+              ifTrue: [],
+              ifFalse: [
+                {
+                  type: 'send_email',
+                  config: {
+                    subject: '🎁 Final reminder + 15% off just for you',
+                    previewText: 'Last chance to grab your goodies',
+                    htmlContent: '<!-- Cart reminder 3 with discount HTML -->'
+                  }
+                },
+                {
+                  type: 'create_discount',
+                  config: {
+                    discountCode: 'COMEBACK15',
+                    discountType: 'percentage',
+                    discountValue: 15,
+                    expiresInDays: 3
+                  }
+                }
+              ]
             },
-            {
-              type: 'wait',
-              order: 2,
-              config: { delayMinutes: 1440 } // 24 hours
-            },
-            {
-              type: 'send_email',
-              order: 3,
-              config: {
-                subject: '10% OFF - Complete Your Order! 🎉',
-                previewText: 'Special discount just for you',
-                htmlContent: this.getDiscountEmailTemplate('COMEBACK10', '10%')
-              }
-            }
-          ]
-        },
-        'post-purchase': {
-          name: '📦 Post-Purchase',
-          description: 'Thank customers and encourage repeat purchases',
-          trigger: { type: 'order_placed', config: {} },
-          status: 'draft',
-          steps: [
-            {
-              type: 'send_email',
-              order: 0,
-              config: {
-                subject: 'Thank You for Your Order! 🎉',
-                previewText: 'Your order confirmation',
-                htmlContent: this.getThankYouTemplate()
-              }
-            },
-            {
-              type: 'wait',
-              order: 1,
-              config: { delayMinutes: 10080 } // 7 days
-            },
-            {
-              type: 'send_email',
-              order: 2,
-              config: {
-                subject: 'How Are You Enjoying Your Pickles? ⭐',
-                previewText: 'We\'d love to hear from you',
-                htmlContent: this.getReviewRequestTemplate()
-              }
-            }
-          ]
-        }
-      };
-      
-      const template = templates[templateId];
-      
-      if (!template) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'Template not found' 
-        });
-      }
-      
-      const flow = new Flow(template);
-      await flow.save();
-      
-      console.log(`✅ Flow created from template "${templateId}": ${flow._id}`);
-      
-      res.status(201).json({ 
-        success: true,
-        flow,
-        message: `Flow created from "${templateId}" template`
-      });
-    } catch (error) {
-      console.error('Error creating from template:', error);
-      res.status(500).json({ 
-        success: false,
-        error: error.message 
-      });
-    }
-  }
-
-  // ==================== TEMPLATE HELPERS ====================
-  
-  getWelcomeEmailTemplate() {
-    return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #333; background: #f4f4f4; margin: 0; padding: 0; }
-    .container { max-width: 600px; margin: 0 auto; background: #fff; }
-    .header { background: #2D5016; color: #fff; padding: 30px 20px; text-align: center; }
-    .content { padding: 40px 30px; }
-    .button { display: inline-block; padding: 15px 30px; background: #2D5016; color: #fff !important; text-decoration: none; border-radius: 5px; font-weight: 600; }
-    .footer { background: #f9f9f9; padding: 30px; text-align: center; font-size: 14px; color: #666; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>🥒 Welcome to Jersey Pickles!</h1>
-    </div>
-    <div class="content">
-      <p>Hi {{firstName}},</p>
-      <p>Welcome to the Jersey Pickles family! We're thrilled to have you join our community of pickle lovers.</p>
-      <p>Here's what makes us special:</p>
-      <ul>
-        <li>🥒 Handcrafted artisanal pickles</li>
-        <li>🌿 Fresh, quality ingredients</li>
-        <li>❤️ Made with love in New Jersey</li>
-      </ul>
-      <p style="text-align: center; margin: 30px 0;">
-        <a href="https://jerseypickles.com/collections/all" class="button">Start Shopping</a>
-      </p>
-      <p>Questions? Just reply to this email - we're here to help!</p>
-      <p>Best,<br><strong>The Jersey Pickles Team</strong></p>
-    </div>
-    <div class="footer">
-      <p>Jersey Pickles | Kissimmee, FL</p>
-      <p><a href="{{unsubscribeUrl}}">Unsubscribe</a></p>
-    </div>
-  </div>
-</body>
-</html>`;
-  }
-
-  getProductShowcaseTemplate() {
-    return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #333; background: #f4f4f4; margin: 0; }
-    .container { max-width: 600px; margin: 0 auto; background: #fff; }
-    .header { background: #2D5016; color: #fff; padding: 30px; text-align: center; }
-    .content { padding: 40px 30px; }
-    .product { background: #f9f9f9; padding: 20px; border-radius: 10px; margin: 20px 0; text-align: center; }
-    .button { display: inline-block; padding: 15px 30px; background: #2D5016; color: #fff !important; text-decoration: none; border-radius: 5px; }
-    .footer { background: #f9f9f9; padding: 30px; text-align: center; font-size: 14px; color: #666; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>⭐ Customer Favorites</h1>
-    </div>
-    <div class="content">
-      <p>Hi {{firstName}},</p>
-      <p>Wondering what to try first? Here are our most popular products:</p>
-      <div class="product">
-        <h3>🥒 Build Your Box</h3>
-        <p>Create your perfect pickle combination!</p>
-        <a href="https://jerseypickles.com/products/build-your-box" class="button">Build Now</a>
-      </div>
-      <div class="product">
-        <h3>🫒 Premium Olives</h3>
-        <p>Imported Mediterranean olives</p>
-        <a href="https://jerseypickles.com/collections/olives" class="button">Shop Olives</a>
-      </div>
-      <p style="text-align: center; margin-top: 30px;">
-        <a href="https://jerseypickles.com/collections/all" class="button">View All Products</a>
-      </p>
-    </div>
-    <div class="footer">
-      <p>Jersey Pickles | Kissimmee, FL</p>
-      <p><a href="{{unsubscribeUrl}}">Unsubscribe</a></p>
-    </div>
-  </div>
-</body>
-</html>`;
-  }
-
-  getDiscountEmailTemplate(code, discount) {
-    return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #333; background: #f4f4f4; margin: 0; }
-    .container { max-width: 600px; margin: 0 auto; background: #fff; }
-    .header { background: linear-gradient(135deg, #2D5016, #4a7c23); color: #fff; padding: 40px; text-align: center; }
-    .content { padding: 40px 30px; text-align: center; }
-    .discount-box { background: #fff3cd; border: 2px dashed #2D5016; padding: 20px; margin: 20px 0; border-radius: 10px; }
-    .code { font-size: 32px; font-weight: bold; color: #2D5016; letter-spacing: 2px; }
-    .button { display: inline-block; padding: 18px 40px; background: #2D5016; color: #fff !important; text-decoration: none; border-radius: 5px; font-size: 18px; }
-    .footer { background: #f9f9f9; padding: 30px; text-align: center; font-size: 14px; color: #666; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>🎁 Special Gift For You!</h1>
-      <p style="font-size: 24px; margin: 0;">${discount} OFF</p>
-    </div>
-    <div class="content">
-      <p>Hi {{firstName}},</p>
-      <p>We noticed you haven't placed an order yet, so here's a special discount just for you!</p>
-      <div class="discount-box">
-        <p style="margin: 0 0 10px 0;">Use code:</p>
-        <p class="code">${code}</p>
-      </div>
-      <p>This offer expires in 7 days, so don't wait!</p>
-      <p style="margin: 30px 0;">
-        <a href="https://jerseypickles.com" class="button">Shop Now & Save</a>
-      </p>
-    </div>
-    <div class="footer">
-      <p>Jersey Pickles | Kissimmee, FL</p>
-      <p><a href="{{unsubscribeUrl}}">Unsubscribe</a></p>
-    </div>
-  </div>
-</body>
-</html>`;
-  }
-
-  getCartReminderTemplate(reminderNumber) {
-    return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #333; background: #f4f4f4; margin: 0; }
-    .container { max-width: 600px; margin: 0 auto; background: #fff; }
-    .header { background: #2D5016; color: #fff; padding: 30px; text-align: center; }
-    .content { padding: 40px 30px; }
-    .button { display: inline-block; padding: 18px 40px; background: #2D5016; color: #fff !important; text-decoration: none; border-radius: 5px; font-size: 16px; }
-    .footer { background: #f9f9f9; padding: 30px; text-align: center; font-size: 14px; color: #666; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>🛒 Your Cart Misses You!</h1>
-    </div>
-    <div class="content">
-      <p>Hi {{firstName}},</p>
-      <p>Looks like you left some delicious items in your cart. Don't let them get away!</p>
-      <p>Your hand-selected pickles and olives are waiting to be shipped right to your door.</p>
-      <p style="text-align: center; margin: 30px 0;">
-        <a href="https://jerseypickles.com/cart" class="button">Complete Your Order</a>
-      </p>
-      <p><em>Questions about your order? Just reply to this email!</em></p>
-    </div>
-    <div class="footer">
-      <p>Jersey Pickles | Kissimmee, FL</p>
-      <p><a href="{{unsubscribeUrl}}">Unsubscribe</a></p>
-    </div>
-  </div>
-</body>
-</html>`;
-  }
-
-  getThankYouTemplate() {
-    return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #333; background: #f4f4f4; margin: 0; }
-    .container { max-width: 600px; margin: 0 auto; background: #fff; }
-    .header { background: linear-gradient(135deg, #2D5016, #4a7c23); color: #fff; padding: 40px; text-align: center; }
-    .content { padding: 40px 30px; }
-    .footer { background: #f9f9f9; padding: 30px; text-align: center; font-size: 14px; color: #666; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>🎉 Thank You!</h1>
-      <p>Your order is confirmed</p>
-    </div>
-    <div class="content">
-      <p>Hi {{firstName}},</p>
-      <p>Thank you for your order! We're already getting your pickles ready for shipment.</p>
-      <p>You'll receive a tracking email as soon as your order ships.</p>
-      <p>In the meantime, follow us on social media for recipes, tips, and special offers:</p>
-      <p style="text-align: center;">
-        📱 Instagram: @jerseypickles<br>
-        📘 Facebook: Jersey Pickles
-      </p>
-      <p>Thanks again for being part of the Jersey Pickles family!</p>
-      <p>Best,<br><strong>The Jersey Pickles Team</strong></p>
-    </div>
-    <div class="footer">
-      <p>Jersey Pickles | Kissimmee, FL</p>
-      <p><a href="{{unsubscribeUrl}}">Unsubscribe</a></p>
-    </div>
-  </div>
-</body>
-</html>`;
-  }
-
-  getReviewRequestTemplate() {
-    return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #333; background: #f4f4f4; margin: 0; }
-    .container { max-width: 600px; margin: 0 auto; background: #fff; }
-    .header { background: #2D5016; color: #fff; padding: 30px; text-align: center; }
-    .content { padding: 40px 30px; text-align: center; }
-    .stars { font-size: 48px; margin: 20px 0; }
-    .button { display: inline-block; padding: 15px 30px; background: #2D5016; color: #fff !important; text-decoration: none; border-radius: 5px; }
-    .footer { background: #f9f9f9; padding: 30px; text-align: center; font-size: 14px; color: #666; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>⭐ How Did We Do?</h1>
-    </div>
-    <div class="content">
-      <p>Hi {{firstName}},</p>
-      <p>We hope you're loving your pickles! Your feedback helps us improve and helps other pickle lovers discover us.</p>
-      <div class="stars">⭐⭐⭐⭐⭐</div>
-      <p>Would you mind taking a minute to leave a review?</p>
-      <p style="margin: 30px 0;">
-        <a href="https://jerseypickles.com/pages/reviews" class="button">Leave a Review</a>
-      </p>
-      <p><em>Thank you for being part of our pickle family!</em></p>
-    </div>
-    <div class="footer">
-      <p>Jersey Pickles | Kissimmee, FL</p>
-      <p><a href="{{unsubscribeUrl}}">Unsubscribe</a></p>
-    </div>
-  </div>
-</body>
-</html>`;
-  }
-
-  /**
-   * Obtener estadísticas del flow
-   */
-  async getStats(req, res) {
-    try {
-      const flowId = req.params.id;
-      
-      // Usar aggregation para mejor rendimiento
-      const [stats] = await FlowExecution.aggregate([
-        { $match: { flow: require('mongoose').Types.ObjectId(flowId) } },
-        {
-          $group: {
-            _id: null,
-            totalExecutions: { $sum: 1 },
-            activeExecutions: {
-              $sum: { $cond: [{ $in: ['$status', ['active', 'waiting']] }, 1, 0] }
-            },
-            completedExecutions: {
-              $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] }
-            },
-            failedExecutions: {
-              $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] }
-            },
-            totalRevenue: { $sum: '$attributedRevenue' }
+            order: 4
           }
-        }
-      ]);
+        ]
+      },
       
-      // Obtener métricas del flow
-      const flow = await Flow.findById(flowId);
+      'post-purchase': {
+        name: 'Post-Purchase Flow',
+        description: 'Thank customers and build loyalty after purchase',
+        trigger: { type: 'order_placed', config: {} },
+        steps: [
+          {
+            type: 'send_email',
+            config: {
+              subject: '🎉 Thanks for your order, {{customer.firstName}}!',
+              previewText: 'Your pickles are on their way',
+              htmlContent: '<!-- Thank you email HTML -->'
+            },
+            order: 0
+          },
+          {
+            type: 'add_tag',
+            config: { tagName: 'purchased' },
+            order: 1
+          },
+          {
+            type: 'wait',
+            config: { delayMinutes: 10080 }, // 7 days
+            order: 2
+          },
+          {
+            type: 'send_email',
+            config: {
+              subject: '💡 Tips for enjoying your pickles',
+              previewText: 'Get the most out of your order',
+              htmlContent: '<!-- Product tips email HTML -->'
+            },
+            order: 3
+          },
+          {
+            type: 'wait',
+            config: { delayMinutes: 10080 }, // 7 more days
+            order: 4
+          },
+          {
+            type: 'send_email',
+            config: {
+              subject: '⭐ How did we do? Leave a review!',
+              previewText: 'Your feedback helps us grow',
+              htmlContent: '<!-- Review request email HTML -->'
+            },
+            order: 5
+          }
+        ]
+      },
       
-      const result = {
-        emailsSent: flow?.metrics?.emailsSent || 0,
-        opens: flow?.metrics?.opens || 0,
-        clicks: flow?.metrics?.clicks || 0,
-        bounced: flow?.metrics?.bounced || 0,
-        delivered: flow?.metrics?.delivered || 0,
-        totalExecutions: stats?.totalExecutions || 0,
-        activeExecutions: stats?.activeExecutions || 0,
-        completedExecutions: stats?.completedExecutions || 0,
-        failedExecutions: stats?.failedExecutions || 0,
-        totalRevenue: (stats?.totalRevenue || 0) + (flow?.metrics?.totalRevenue || 0)
-      };
+      'win-back': {
+        name: 'Win-Back Campaign',
+        description: 'Re-engage dormant customers',
+        trigger: { 
+          type: 'customer_tag_added', 
+          config: { tagName: 'dormant' } 
+        },
+        steps: [
+          {
+            type: 'send_email',
+            config: {
+              subject: '💔 We miss you, {{customer.firstName}}!',
+              previewText: 'It\'s been a while...',
+              htmlContent: '<!-- Win-back email 1 HTML -->'
+            },
+            order: 0
+          },
+          {
+            type: 'wait',
+            config: { delayMinutes: 10080 }, // 7 days
+            order: 1
+          },
+          {
+            type: 'send_email',
+            config: {
+              subject: '🆕 See what\'s new + a special offer',
+              previewText: 'New products you\'ll love',
+              htmlContent: '<!-- Win-back email 2 HTML -->'
+            },
+            order: 2
+          },
+          {
+            type: 'wait',
+            config: { delayMinutes: 10080 }, // 7 days
+            order: 3
+          },
+          {
+            type: 'send_email',
+            config: {
+              subject: '🎁 20% off - Our best offer for you',
+              previewText: 'We really want you back',
+              htmlContent: '<!-- Win-back email 3 HTML -->'
+            },
+            order: 4
+          },
+          {
+            type: 'create_discount',
+            config: {
+              discountCode: 'COMEBACK20',
+              discountType: 'percentage',
+              discountValue: 20,
+              expiresInDays: 14
+            },
+            order: 5
+          }
+        ]
+      },
       
-      res.json(result);
-    } catch (error) {
-      console.error('Error fetching stats:', error);
-      res.status(500).json({ 
-        success: false,
-        error: error.message 
-      });
-    }
-  }
-
-  /**
-   * Obtener ejecuciones del flow
-   */
-  async getExecutions(req, res) {
-    try {
-      const { limit = 50, offset = 0, status } = req.query;
+      'vip-program': {
+        name: 'VIP Program',
+        description: 'Welcome and reward VIP customers',
+        trigger: { 
+          type: 'customer_tag_added', 
+          config: { tagName: 'VIP' } 
+        },
+        steps: [
+          {
+            type: 'send_email',
+            config: {
+              subject: '💎 Welcome to VIP Status, {{customer.firstName}}!',
+              previewText: 'You\'re officially a pickle VIP',
+              htmlContent: '<!-- VIP welcome email HTML -->'
+            },
+            order: 0
+          },
+          {
+            type: 'create_discount',
+            config: {
+              discountCode: 'VIP15',
+              discountType: 'percentage',
+              discountValue: 15,
+              expiresInDays: 30
+            },
+            order: 1
+          },
+          {
+            type: 'wait',
+            config: { delayMinutes: 43200 }, // 30 days
+            order: 2
+          },
+          {
+            type: 'send_email',
+            config: {
+              subject: '🎁 Your monthly VIP exclusive is here',
+              previewText: 'A special offer just for VIPs',
+              htmlContent: '<!-- VIP monthly email HTML -->'
+            },
+            order: 3
+          }
+        ]
+      },
       
-      const query = { flow: req.params.id };
-      if (status) {
-        query.status = status;
+      'review-request': {
+        name: 'Review Request',
+        description: 'Request reviews after order delivery',
+        trigger: { type: 'order_fulfilled', config: {} },
+        steps: [
+          {
+            type: 'wait',
+            config: { delayMinutes: 4320 }, // 3 days after shipping
+            order: 0
+          },
+          {
+            type: 'send_email',
+            config: {
+              subject: '📦 How\'s your order, {{customer.firstName}}?',
+              previewText: 'We\'d love to hear from you',
+              htmlContent: '<!-- Review request email 1 HTML -->'
+            },
+            order: 1
+          },
+          {
+            type: 'wait',
+            config: { delayMinutes: 10080 }, // 7 days
+            order: 2
+          },
+          {
+            type: 'send_email',
+            config: {
+              subject: '⭐ Share your experience, get 10% off',
+              previewText: 'Your review = our growth',
+              htmlContent: '<!-- Review request email 2 HTML -->'
+            },
+            order: 3
+          }
+        ]
       }
-      
-      const [executions, total] = await Promise.all([
-        FlowExecution.find(query)
-          .populate('customer', 'email firstName lastName')
-          .sort({ startedAt: -1 })
-          .limit(parseInt(limit))
-          .skip(parseInt(offset))
-          .lean(),
-        FlowExecution.countDocuments(query)
-      ]);
-      
-      res.json({ 
-        success: true,
-        executions,
-        total,
-        limit: parseInt(limit),
-        offset: parseInt(offset)
-      });
-    } catch (error) {
-      console.error('Error fetching executions:', error);
-      res.status(500).json({ 
-        success: false,
-        error: error.message 
-      });
+    };
+    
+    const template = templateDefinitions[templateId];
+    
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
     }
+    
+    // Crear flow desde template
+    const flow = await Flow.create({
+      ...template,
+      status: 'draft'
+    });
+    
+    console.log(`✅ Flow created from template: ${templateId} → ${flow._id}`);
+    
+    res.status(201).json({ flow });
+    
+  } catch (error) {
+    console.error('Error creating from template:', error);
+    res.status(500).json({ error: error.message });
   }
+};
 
-  /**
-   * Test flow con cliente específico
-   */
-  async testFlow(req, res) {
-    try {
-      const { customerId, email } = req.body;
-      
-      if (!customerId && !email) {
-        return res.status(400).json({
-          success: false,
-          error: 'Customer ID or email is required'
-        });
+// ==================== 🧠 AI ENDPOINTS ====================
+
+/**
+ * Generar subject lines con AI
+ * POST /api/flows/ai/subject-lines
+ */
+exports.generateSubjectLines = async (req, res) => {
+  try {
+    const result = await aiFlowService.generateSubjectLines(req.body);
+    
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    
+    res.json(result);
+    
+  } catch (error) {
+    console.error('Error generating subject lines:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * Generar contenido de email con AI
+ * POST /api/flows/ai/email-content
+ */
+exports.generateEmailContent = async (req, res) => {
+  try {
+    const result = await aiFlowService.generateEmailContent(req.body);
+    
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    
+    res.json(result);
+    
+  } catch (error) {
+    console.error('Error generating email content:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * Generar flow completo desde descripción
+ * POST /api/flows/ai/generate
+ */
+exports.generateFlowFromDescription = async (req, res) => {
+  try {
+    const { description } = req.body;
+    
+    if (!description) {
+      return res.status(400).json({ error: 'Description is required' });
+    }
+    
+    const result = await aiFlowService.generateFlowFromDescription(description);
+    
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    
+    res.json(result);
+    
+  } catch (error) {
+    console.error('Error generating flow:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * Sugerir siguiente step
+ * POST /api/flows/:id/ai/suggest-step
+ */
+exports.suggestNextStep = async (req, res) => {
+  try {
+    const flow = await Flow.findById(req.params.id);
+    
+    if (!flow) {
+      return res.status(404).json({ error: 'Flow not found' });
+    }
+    
+    const result = await aiFlowService.suggestNextStep(flow, flow.steps);
+    
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    
+    res.json(result);
+    
+  } catch (error) {
+    console.error('Error suggesting step:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * Analizar performance de un flow
+ * GET /api/flows/:id/ai/analyze
+ */
+exports.analyzeFlow = async (req, res) => {
+  try {
+    const result = await aiFlowService.analyzeFlowPerformance(req.params.id);
+    
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    
+    res.json(result);
+    
+  } catch (error) {
+    console.error('Error analyzing flow:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * Optimizar timing de un flow
+ * GET /api/flows/:id/ai/optimize-timing
+ */
+exports.optimizeTiming = async (req, res) => {
+  try {
+    const result = await aiFlowService.optimizeTiming(req.params.id);
+    
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    
+    res.json(result);
+    
+  } catch (error) {
+    console.error('Error optimizing timing:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * Mejorar template con AI
+ * POST /api/flows/ai/enhance-template
+ */
+exports.enhanceTemplate = async (req, res) => {
+  try {
+    const { templateId, html, options } = req.body;
+    
+    const result = await aiFlowService.enhanceTemplate(templateId, html, options);
+    
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    
+    res.json(result);
+    
+  } catch (error) {
+    console.error('Error enhancing template:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ==================== HELPERS ====================
+
+function validateFlowForActivation(flow) {
+  const errors = [];
+  
+  if (!flow.name?.trim()) {
+    errors.push('Flow must have a name');
+  }
+  
+  if (!flow.trigger?.type) {
+    errors.push('Flow must have a trigger');
+  }
+  
+  if (!flow.steps || flow.steps.length === 0) {
+    errors.push('Flow must have at least one step');
+  }
+  
+  // Validar cada email step
+  flow.steps.forEach((step, index) => {
+    if (step.type === 'send_email') {
+      if (!step.config?.subject?.trim()) {
+        errors.push(`Step ${index + 1}: Email must have a subject`);
       }
-      
-      const execution = await flowService.testFlow(req.params.id, customerId);
-      
-      res.json({ 
-        success: true,
-        execution,
-        message: 'Test flow started successfully'
-      });
-    } catch (error) {
-      console.error('Error testing flow:', error);
-      res.status(500).json({ 
-        success: false,
-        error: error.message 
-      });
-    }
-  }
-
-  /**
-   * Pausar flow
-   */
-  async pauseFlow(req, res) {
-    try {
-      const flow = await Flow.findByIdAndUpdate(
-        req.params.id,
-        { status: 'paused' },
-        { new: true }
-      );
-      
-      if (!flow) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'Flow not found' 
-        });
+      if (!step.config?.htmlContent?.trim() && !step.config?.templateId) {
+        errors.push(`Step ${index + 1}: Email must have content or template`);
       }
-      
-      res.json({ 
-        success: true,
-        flow,
-        message: 'Flow paused successfully'
-      });
-    } catch (error) {
-      console.error('Error pausing flow:', error);
-      res.status(500).json({ 
-        success: false,
-        error: error.message 
-      });
     }
-  }
-
-  /**
-   * Resumir flow
-   */
-  async resumeFlow(req, res) {
-    try {
-      const flow = await Flow.findByIdAndUpdate(
-        req.params.id,
-        { status: 'active' },
-        { new: true }
-      );
-      
-      if (!flow) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'Flow not found' 
-        });
-      }
-      
-      res.json({ 
-        success: true,
-        flow,
-        message: 'Flow resumed successfully'
-      });
-    } catch (error) {
-      console.error('Error resuming flow:', error);
-      res.status(500).json({ 
-        success: false,
-        error: error.message 
-      });
+    
+    if (step.type === 'add_tag' && !step.config?.tagName?.trim()) {
+      errors.push(`Step ${index + 1}: Tag step must have a tag name`);
     }
-  }
-
-  /**
-   * Cancelar ejecución específica
-   */
-  async cancelExecution(req, res) {
-    try {
-      const execution = await flowService.cancelExecution(req.params.executionId);
-      
-      res.json({
-        success: true,
-        execution,
-        message: 'Execution cancelled successfully'
-      });
-    } catch (error) {
-      console.error('Error cancelling execution:', error);
-      res.status(500).json({
-        success: false,
-        error: error.message
-      });
-    }
-  }
+  });
+  
+  return errors;
 }
 
-module.exports = new FlowsController();
+module.exports = exports;
