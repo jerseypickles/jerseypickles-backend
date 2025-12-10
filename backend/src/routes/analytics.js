@@ -1,4 +1,4 @@
-// backend/src/routes/analytics.js (VERSIÓN PROFESIONAL)
+// backend/src/routes/analytics.js (CORREGIDO - Solo campañas enviadas)
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -23,12 +23,36 @@ const getDateRange = (days, endDate = new Date()) => {
 };
 
 // ============================================================
-// 1. DASHBOARD PRINCIPAL (MEJORADO)
+// 🆕 HELPER: Obtener IDs de campañas COMPLETADAS en el período
+// ============================================================
+const getCompletedCampaignIds = async (start, end) => {
+  const campaigns = await Campaign.find({
+    status: 'sent',
+    sentAt: { $gte: start, $lte: end }
+  }).select('_id');
+  
+  return campaigns.map(c => c._id);
+};
+
+// ============================================================
+// 1. DASHBOARD PRINCIPAL (CORREGIDO)
 // ============================================================
 router.get('/dashboard', auth, async (req, res) => {
   try {
     const { days = 30 } = req.query;
     const { start, end } = getDateRange(parseInt(days));
+    
+    console.log(`📊 Dashboard request: ${days} days (${start.toISOString()} to ${end.toISOString()})`);
+    
+    // ========== OBTENER CAMPAÑAS COMPLETADAS ==========
+    const completedCampaigns = await Campaign.find({
+      status: 'sent',
+      sentAt: { $gte: start, $lte: end }
+    }).select('_id name stats sentAt');
+    
+    const campaignIds = completedCampaigns.map(c => c._id);
+    
+    console.log(`   Found ${completedCampaigns.length} completed campaigns in period`);
     
     // ========== CUSTOMERS ==========
     const [totalCustomers, marketingAccepted, newCustomers] = await Promise.all([
@@ -37,7 +61,7 @@ router.get('/dashboard', auth, async (req, res) => {
       Customer.countDocuments({ createdAt: { $gte: start } })
     ]);
     
-    // ========== CAMPAIGNS ==========
+    // ========== CAMPAIGNS COUNT BY STATUS ==========
     const campaignStats = await Campaign.aggregate([
       {
         $group: {
@@ -59,25 +83,63 @@ router.get('/dashboard', auth, async (req, res) => {
       campaigns.total += s.count;
     });
     
-    // ========== EMAIL STATS (período actual) ==========
-    const emailStats = await EmailEvent.aggregate([
-      { $match: { eventDate: { $gte: start, $lte: end } } },
+    // ========== EMAIL STATS - SOLO DE CAMPAÑAS COMPLETADAS ==========
+    // Opción 1: Agregar desde Campaign.stats (más preciso)
+    const emailsFromCampaigns = completedCampaigns.reduce((acc, c) => {
+      acc.sent += c.stats?.sent || 0;
+      acc.delivered += c.stats?.delivered || 0;
+      acc.opened += c.stats?.opened || 0;
+      acc.clicked += c.stats?.clicked || 0;
+      acc.bounced += c.stats?.bounced || 0;
+      acc.unsubscribed += c.stats?.unsubscribed || 0;
+      acc.totalRevenue += c.stats?.totalRevenue || 0;
+      acc.purchased += c.stats?.purchased || 0;
+      return acc;
+    }, {
+      sent: 0,
+      delivered: 0,
+      opened: 0,
+      clicked: 0,
+      bounced: 0,
+      unsubscribed: 0,
+      totalRevenue: 0,
+      purchased: 0
+    });
+    
+    // Opción 2: Si prefieres contar UNIQUE opens/clicks desde EmailEvent
+    // (descomenta si quieres unique counts en vez de total events)
+    /*
+    const uniqueStats = await EmailEvent.aggregate([
+      {
+        $match: {
+          campaign: { $in: campaignIds },
+          eventType: { $in: ['opened', 'clicked'] }
+        }
+      },
       {
         $group: {
-          _id: '$eventType',
-          count: { $sum: 1 }
+          _id: {
+            campaign: '$campaign',
+            customer: '$customer',
+            eventType: '$eventType'
+          }
+        }
+      },
+      {
+        $group: {
+          _id: '$_id.eventType',
+          uniqueCount: { $sum: 1 }
         }
       }
     ]);
     
-    const emails = {
-      sent: 0, opened: 0, clicked: 0, bounced: 0, unsubscribed: 0
-    };
-    emailStats.forEach(s => {
-      if (emails.hasOwnProperty(s._id)) {
-        emails[s._id] = s.count;
-      }
+    uniqueStats.forEach(s => {
+      if (s._id === 'opened') emailsFromCampaigns.uniqueOpened = s.uniqueCount;
+      if (s._id === 'clicked') emailsFromCampaigns.uniqueClicked = s.uniqueCount;
     });
+    */
+    
+    const emails = emailsFromCampaigns;
     
     // Calcular rates
     const openRate = emails.sent > 0 ? ((emails.opened / emails.sent) * 100).toFixed(2) : 0;
@@ -85,7 +147,7 @@ router.get('/dashboard', auth, async (req, res) => {
     const bounceRate = emails.sent > 0 ? ((emails.bounced / emails.sent) * 100).toFixed(2) : 0;
     const ctr = emails.opened > 0 ? ((emails.clicked / emails.opened) * 100).toFixed(2) : 0;
     
-    // ========== ORDERS & REVENUE ==========
+    // ========== ORDERS & REVENUE (Total) ==========
     const orderStats = await Order.aggregate([
       { $match: { orderDate: { $gte: start, $lte: end } } },
       {
@@ -98,12 +160,12 @@ router.get('/dashboard', auth, async (req, res) => {
       }
     ]);
     
-    // ========== EMAIL REVENUE (atribuido a campañas) ==========
+    // ========== EMAIL REVENUE (Solo de campañas completadas) ==========
     const emailRevenue = await Order.aggregate([
       {
         $match: {
           orderDate: { $gte: start, $lte: end },
-          'attribution.campaign': { $exists: true, $ne: null }
+          'attribution.campaign': { $in: campaignIds }
         }
       },
       {
@@ -120,23 +182,19 @@ router.get('/dashboard', auth, async (req, res) => {
     const revenuePerEmail = emails.sent > 0 ? (emailRevenueData.totalRevenue / emails.sent) : 0;
     
     // ========== PERÍODO ANTERIOR (para comparación) ==========
-    const prevRange = getDateRange(parseInt(days) * 2, start);
-    const prevEmailStats = await EmailEvent.aggregate([
-      { $match: { eventDate: { $gte: prevRange.start, $lte: start } } },
-      {
-        $group: {
-          _id: '$eventType',
-          count: { $sum: 1 }
-        }
-      }
-    ]);
+    const prevRange = getDateRange(parseInt(days), start);
     
-    const prevEmails = { sent: 0, opened: 0, clicked: 0 };
-    prevEmailStats.forEach(s => {
-      if (prevEmails.hasOwnProperty(s._id)) {
-        prevEmails[s._id] = s.count;
-      }
-    });
+    const prevCampaigns = await Campaign.find({
+      status: 'sent',
+      sentAt: { $gte: prevRange.start, $lte: prevRange.end }
+    }).select('stats');
+    
+    const prevEmails = prevCampaigns.reduce((acc, c) => {
+      acc.sent += c.stats?.sent || 0;
+      acc.opened += c.stats?.opened || 0;
+      acc.clicked += c.stats?.clicked || 0;
+      return acc;
+    }, { sent: 0, opened: 0, clicked: 0 });
     
     const prevOpenRate = prevEmails.sent > 0 ? ((prevEmails.opened / prevEmails.sent) * 100) : 0;
     const prevClickRate = prevEmails.sent > 0 ? ((prevEmails.clicked / prevEmails.sent) * 100) : 0;
@@ -144,6 +202,7 @@ router.get('/dashboard', auth, async (req, res) => {
     // ========== RESPONSE ==========
     res.json({
       period: { start, end, days: parseInt(days) },
+      campaignsInPeriod: completedCampaigns.length,
       customers: {
         total: totalCustomers,
         marketingAccepted,
@@ -156,7 +215,6 @@ router.get('/dashboard', auth, async (req, res) => {
         total: orderStats[0]?.total || 0,
         revenue: (orderStats[0]?.revenue || 0).toFixed(2),
         avgOrderValue: (orderStats[0]?.avgOrderValue || 0).toFixed(2),
-        // Email attribution
         emailRevenue: emailRevenueData.totalRevenue.toFixed(2),
         emailConversions: emailRevenueData.orderCount,
         avgEmailOrderValue: (emailRevenueData.avgOrderValue || 0).toFixed(2),
@@ -165,6 +223,7 @@ router.get('/dashboard', auth, async (req, res) => {
       campaigns,
       emails: {
         sent: emails.sent,
+        delivered: emails.delivered,
         opened: emails.opened,
         clicked: emails.clicked,
         bounced: emails.bounced,
@@ -178,6 +237,11 @@ router.get('/dashboard', auth, async (req, res) => {
         openRateChange: (parseFloat(openRate) - prevOpenRate).toFixed(2),
         clickRateChange: (parseFloat(clickRate) - prevClickRate).toFixed(2),
         sentChange: emails.sent - prevEmails.sent
+      },
+      // Debug info
+      _debug: {
+        completedCampaignsCount: completedCampaigns.length,
+        campaignNames: completedCampaigns.map(c => c.name)
       }
     });
     
@@ -188,75 +252,94 @@ router.get('/dashboard', auth, async (req, res) => {
 });
 
 // ============================================================
-// 2. FUNNEL DE CONVERSIÓN
+// 2. FUNNEL DE CONVERSIÓN (CORREGIDO)
 // ============================================================
 router.get('/funnel', auth, async (req, res) => {
   try {
     const { days = 30, campaignId } = req.query;
     const { start, end } = getDateRange(parseInt(days));
     
-    const matchStage = { eventDate: { $gte: start, $lte: end } };
+    let campaignIds = [];
+    
     if (campaignId) {
-      matchStage.campaign = new mongoose.Types.ObjectId(campaignId);
+      // Campaña específica
+      campaignIds = [new mongoose.Types.ObjectId(campaignId)];
+    } else {
+      // Solo campañas completadas en el período
+      campaignIds = await getCompletedCampaignIds(start, end);
     }
     
-    // Obtener counts por tipo de evento
-    const eventCounts = await EmailEvent.aggregate([
-      { $match: matchStage },
+    if (campaignIds.length === 0) {
+      return res.json({
+        period: { start, end, days: parseInt(days) },
+        campaignId: campaignId || 'all',
+        funnel: [],
+        summary: {
+          totalSent: 0,
+          totalPurchased: 0,
+          conversionRate: '0%',
+          totalRevenue: '0.00',
+          revenuePerEmail: '0.000'
+        },
+        message: 'No hay campañas completadas en este período'
+      });
+    }
+    
+    // Agregar stats desde las campañas (más preciso)
+    const campaigns = await Campaign.find({ _id: { $in: campaignIds } });
+    
+    const totals = campaigns.reduce((acc, c) => {
+      acc.sent += c.stats?.sent || 0;
+      acc.delivered += c.stats?.delivered || c.stats?.sent || 0;
+      acc.opened += c.stats?.opened || 0;
+      acc.clicked += c.stats?.clicked || 0;
+      acc.purchased += c.stats?.purchased || 0;
+      acc.revenue += c.stats?.totalRevenue || 0;
+      return acc;
+    }, { sent: 0, delivered: 0, opened: 0, clicked: 0, purchased: 0, revenue: 0 });
+    
+    // Si queremos unique counts, usar EmailEvent con $group
+    const uniqueCounts = await EmailEvent.aggregate([
       {
-        $group: {
-          _id: '$eventType',
-          count: { $sum: 1 },
-          uniqueCustomers: { $addToSet: '$customer' }
+        $match: {
+          campaign: { $in: campaignIds },
+          eventType: { $in: ['sent', 'opened', 'clicked'] }
         }
       },
       {
-        $project: {
-          _id: 1,
-          count: 1,
-          uniqueCount: { $size: '$uniqueCustomers' }
+        $group: {
+          _id: {
+            eventType: '$eventType',
+            customer: '$customer'
+          }
         }
-      }
-    ]);
-    
-    // Obtener conversiones (purchases atribuidas)
-    const purchaseMatch = {
-      orderDate: { $gte: start, $lte: end },
-      'attribution.campaign': { $exists: true, $ne: null }
-    };
-    if (campaignId) {
-      purchaseMatch['attribution.campaign'] = new mongoose.Types.ObjectId(campaignId);
-    }
-    
-    const purchases = await Order.aggregate([
-      { $match: purchaseMatch },
+      },
       {
         $group: {
-          _id: null,
-          count: { $sum: 1 },
-          revenue: { $sum: '$totalPrice' },
-          uniqueCustomers: { $addToSet: '$customer' }
+          _id: '$_id.eventType',
+          uniqueCount: { $sum: 1 }
         }
       }
     ]);
     
-    // Construir funnel
-    const getCount = (type) => eventCounts.find(e => e._id === type)?.count || 0;
-    const getUnique = (type) => eventCounts.find(e => e._id === type)?.uniqueCount || 0;
+    const unique = { sent: 0, opened: 0, clicked: 0 };
+    uniqueCounts.forEach(u => {
+      unique[u._id] = u.uniqueCount;
+    });
     
-    const sent = getCount('sent');
-    const delivered = getCount('delivered') || sent; // fallback si no trackeas delivered
-    const opened = getCount('opened');
-    const clicked = getCount('clicked');
-    const purchased = purchases[0]?.count || 0;
-    const revenue = purchases[0]?.revenue || 0;
+    const sent = totals.sent;
+    const delivered = totals.delivered || sent;
+    const opened = totals.opened;
+    const clicked = totals.clicked;
+    const purchased = totals.purchased;
+    const revenue = totals.revenue;
     
     const funnel = [
       {
         stage: 'sent',
         label: 'Emails Enviados',
         count: sent,
-        uniqueCount: getUnique('sent'),
+        uniqueCount: unique.sent || sent,
         rate: '100%',
         dropOff: 0
       },
@@ -271,7 +354,7 @@ router.get('/funnel', auth, async (req, res) => {
         stage: 'opened',
         label: 'Abiertos',
         count: opened,
-        uniqueCount: getUnique('opened'),
+        uniqueCount: unique.opened,
         rate: delivered > 0 ? ((opened / delivered) * 100).toFixed(2) + '%' : '0%',
         dropOff: delivered > 0 ? (((delivered - opened) / delivered) * 100).toFixed(2) : 0
       },
@@ -279,7 +362,7 @@ router.get('/funnel', auth, async (req, res) => {
         stage: 'clicked',
         label: 'Clicks',
         count: clicked,
-        uniqueCount: getUnique('clicked'),
+        uniqueCount: unique.clicked,
         rate: opened > 0 ? ((clicked / opened) * 100).toFixed(2) + '%' : '0%',
         dropOff: opened > 0 ? (((opened - clicked) / opened) * 100).toFixed(2) : 0
       },
@@ -287,19 +370,18 @@ router.get('/funnel', auth, async (req, res) => {
         stage: 'purchased',
         label: 'Compraron',
         count: purchased,
-        uniqueCount: purchases[0]?.uniqueCustomers?.length || 0,
         rate: clicked > 0 ? ((purchased / clicked) * 100).toFixed(2) + '%' : '0%',
         dropOff: clicked > 0 ? (((clicked - purchased) / clicked) * 100).toFixed(2) : 0,
         revenue: revenue.toFixed(2)
       }
     ];
     
-    // Calcular overall conversion rate
     const overallConversion = sent > 0 ? ((purchased / sent) * 100).toFixed(3) : 0;
     
     res.json({
       period: { start, end, days: parseInt(days) },
       campaignId: campaignId || 'all',
+      campaignsIncluded: campaignIds.length,
       funnel,
       summary: {
         totalSent: sent,
@@ -317,32 +399,30 @@ router.get('/funnel', auth, async (req, res) => {
 });
 
 // ============================================================
-// 3. TENDENCIAS TEMPORALES (para gráficos)
+// 3. TENDENCIAS TEMPORALES (CORREGIDO)
 // ============================================================
 router.get('/trends', auth, async (req, res) => {
   try {
     const { days = 30, granularity = 'day' } = req.query;
     const { start, end } = getDateRange(parseInt(days));
     
-    // Formato de fecha según granularidad
-    let dateFormat;
-    switch (granularity) {
-      case 'hour':
-        dateFormat = '%Y-%m-%d %H:00';
-        break;
-      case 'week':
-        dateFormat = '%Y-W%V';
-        break;
-      case 'month':
-        dateFormat = '%Y-%m';
-        break;
-      default:
-        dateFormat = '%Y-%m-%d';
-    }
+    // Solo campañas completadas
+    const campaignIds = await getCompletedCampaignIds(start, end);
     
-    // Email events timeline
+    // Formato de fecha según granularidad
+    let dateFormat = '%Y-%m-%d';
+    if (granularity === 'hour') dateFormat = '%Y-%m-%d %H:00';
+    if (granularity === 'week') dateFormat = '%Y-W%V';
+    if (granularity === 'month') dateFormat = '%Y-%m';
+    
+    // Email events de campañas completadas solamente
     const emailTrends = await EmailEvent.aggregate([
-      { $match: { eventDate: { $gte: start, $lte: end } } },
+      {
+        $match: {
+          campaign: { $in: campaignIds },
+          eventDate: { $gte: start, $lte: end }
+        }
+      },
       {
         $group: {
           _id: {
@@ -355,25 +435,12 @@ router.get('/trends', auth, async (req, res) => {
       { $sort: { '_id.date': 1 } }
     ]);
     
-    // Revenue timeline
+    // Revenue timeline (solo atribuido a campañas completadas)
     const revenueTrends = await Order.aggregate([
-      { $match: { orderDate: { $gte: start, $lte: end } } },
-      {
-        $group: {
-          _id: { $dateToString: { format: dateFormat, date: '$orderDate' } },
-          revenue: { $sum: '$totalPrice' },
-          orders: { $sum: 1 }
-        }
-      },
-      { $sort: { _id: 1 } }
-    ]);
-    
-    // Email revenue timeline
-    const emailRevenueTrends = await Order.aggregate([
       {
         $match: {
           orderDate: { $gte: start, $lte: end },
-          'attribution.campaign': { $exists: true, $ne: null }
+          'attribution.campaign': { $in: campaignIds }
         }
       },
       {
@@ -386,10 +453,23 @@ router.get('/trends', auth, async (req, res) => {
       { $sort: { _id: 1 } }
     ]);
     
+    // Total revenue timeline (para comparación)
+    const totalRevenueTrends = await Order.aggregate([
+      { $match: { orderDate: { $gte: start, $lte: end } } },
+      {
+        $group: {
+          _id: { $dateToString: { format: dateFormat, date: '$orderDate' } },
+          revenue: { $sum: '$totalPrice' },
+          orders: { $sum: 1 }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+    
     // Combinar datos por fecha
     const dateMap = new Map();
     
-    // Inicializar todas las fechas en el rango
+    // Inicializar todas las fechas
     const currentDate = new Date(start);
     while (currentDate <= end) {
       const dateStr = currentDate.toISOString().split('T')[0];
@@ -413,13 +493,12 @@ router.get('/trends', auth, async (req, res) => {
     emailTrends.forEach(item => {
       const date = item._id.date;
       if (dateMap.has(date)) {
-        const data = dateMap.get(date);
-        data[item._id.type] = item.count;
+        dateMap.get(date)[item._id.type] = item.count;
       }
     });
     
-    // Llenar con datos de revenue
-    revenueTrends.forEach(item => {
+    // Llenar con total revenue
+    totalRevenueTrends.forEach(item => {
       if (dateMap.has(item._id)) {
         const data = dateMap.get(item._id);
         data.revenue = parseFloat(item.revenue.toFixed(2));
@@ -428,7 +507,7 @@ router.get('/trends', auth, async (req, res) => {
     });
     
     // Llenar con email revenue
-    emailRevenueTrends.forEach(item => {
+    revenueTrends.forEach(item => {
       if (dateMap.has(item._id)) {
         const data = dateMap.get(item._id);
         data.emailRevenue = parseFloat(item.emailRevenue.toFixed(2));
@@ -436,7 +515,7 @@ router.get('/trends', auth, async (req, res) => {
       }
     });
     
-    // Calcular rates por día
+    // Calcular rates
     const trends = Array.from(dateMap.values()).map(day => ({
       ...day,
       openRate: day.sent > 0 ? parseFloat(((day.opened / day.sent) * 100).toFixed(2)) : 0,
@@ -445,6 +524,7 @@ router.get('/trends', auth, async (req, res) => {
     
     res.json({
       period: { start, end, days: parseInt(days), granularity },
+      campaignsIncluded: campaignIds.length,
       trends
     });
     
@@ -455,14 +535,14 @@ router.get('/trends', auth, async (req, res) => {
 });
 
 // ============================================================
-// 4. TOP CAMPAIGNS POR REVENUE
+// 4. TOP CAMPAIGNS POR REVENUE (sin cambios necesarios)
 // ============================================================
 router.get('/top-campaigns', auth, async (req, res) => {
   try {
     const { days = 90, limit = 10 } = req.query;
     const { start, end } = getDateRange(parseInt(days));
     
-    // Campañas con sus stats
+    // Ya filtra por status: 'sent'
     const campaigns = await Campaign.find({
       status: 'sent',
       sentAt: { $gte: start, $lte: end }
@@ -472,7 +552,6 @@ router.get('/top-campaigns', auth, async (req, res) => {
     .sort({ 'stats.totalRevenue': -1 })
     .limit(parseInt(limit));
     
-    // Enriquecer con datos de Orders
     const enrichedCampaigns = await Promise.all(
       campaigns.map(async (campaign) => {
         const orders = await Order.aggregate([
@@ -499,8 +578,10 @@ router.get('/top-campaigns', auth, async (req, res) => {
             sent: campaign.stats.sent,
             opened: campaign.stats.opened,
             clicked: campaign.stats.clicked,
-            openRate: campaign.stats.openRate,
-            clickRate: campaign.stats.clickRate
+            openRate: campaign.stats.openRate || 
+              (campaign.stats.sent > 0 ? ((campaign.stats.opened / campaign.stats.sent) * 100).toFixed(2) : 0) + '%',
+            clickRate: campaign.stats.clickRate ||
+              (campaign.stats.sent > 0 ? ((campaign.stats.clicked / campaign.stats.sent) * 100).toFixed(2) : 0) + '%'
           },
           revenue: {
             total: orderData.revenue.toFixed(2),
@@ -526,17 +607,20 @@ router.get('/top-campaigns', auth, async (req, res) => {
 });
 
 // ============================================================
-// 5. BEST SEND TIMES (HEATMAP DATA)
+// 5. BEST SEND TIMES (CORREGIDO)
 // ============================================================
 router.get('/best-times', auth, async (req, res) => {
   try {
     const { days = 90, metric = 'opened' } = req.query;
     const { start, end } = getDateRange(parseInt(days));
     
-    // Obtener eventos agrupados por día de semana y hora
+    // Solo de campañas completadas
+    const campaignIds = await getCompletedCampaignIds(start, end);
+    
     const events = await EmailEvent.aggregate([
       {
         $match: {
+          campaign: { $in: campaignIds },
           eventDate: { $gte: start, $lte: end },
           eventType: { $in: ['sent', 'opened', 'clicked'] }
         }
@@ -544,7 +628,7 @@ router.get('/best-times', auth, async (req, res) => {
       {
         $group: {
           _id: {
-            dayOfWeek: { $dayOfWeek: '$eventDate' }, // 1=Sunday, 7=Saturday
+            dayOfWeek: { $dayOfWeek: '$eventDate' },
             hour: { $hour: '$eventDate' },
             type: '$eventType'
           },
@@ -553,7 +637,7 @@ router.get('/best-times', auth, async (req, res) => {
       }
     ]);
     
-    // Crear matriz de heatmap (7 días x 24 horas)
+    // Crear matriz de heatmap
     const heatmap = [];
     const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     
@@ -575,7 +659,7 @@ router.get('/best-times', auth, async (req, res) => {
         const clickRate = sent > 0 ? (clicked / sent) * 100 : 0;
         
         heatmap.push({
-          day: day - 1, // 0-indexed para frontend
+          day: day - 1,
           dayName: dayNames[day - 1],
           hour,
           hourLabel: `${hour.toString().padStart(2, '0')}:00`,
@@ -589,9 +673,9 @@ router.get('/best-times', auth, async (req, res) => {
       }
     }
     
-    // Encontrar mejores horarios
+    // Mejores horarios
     const sortedByMetric = [...heatmap]
-      .filter(h => h.sent >= 10) // Mínimo de emails para ser significativo
+      .filter(h => h.sent >= 10)
       .sort((a, b) => b.value - a.value);
     
     const bestTimes = sortedByMetric.slice(0, 5).map(t => ({
@@ -604,6 +688,7 @@ router.get('/best-times', auth, async (req, res) => {
     res.json({
       period: { start, end, days: parseInt(days) },
       metric,
+      campaignsIncluded: campaignIds.length,
       heatmap,
       bestTimes,
       recommendation: bestTimes[0] 
@@ -618,14 +703,14 @@ router.get('/best-times', auth, async (req, res) => {
 });
 
 // ============================================================
-// 6. SEGMENT PERFORMANCE
+// 6. SEGMENT PERFORMANCE (CORREGIDO)
 // ============================================================
 router.get('/segment-performance', auth, async (req, res) => {
   try {
     const { days = 90 } = req.query;
     const { start, end } = getDateRange(parseInt(days));
     
-    // Obtener campañas con sus segmentos
+    // Solo campañas completadas con segmento
     const campaignsBySegment = await Campaign.aggregate([
       {
         $match: {
@@ -658,7 +743,6 @@ router.get('/segment-performance', auth, async (req, res) => {
       { $sort: { totalRevenue: -1 } }
     ]);
     
-    // Calcular rates
     const segments = campaignsBySegment.map(seg => ({
       segmentId: seg._id,
       name: seg.segmentName,
@@ -700,11 +784,11 @@ router.get('/segment-performance', auth, async (req, res) => {
 });
 
 // ============================================================
-// 7. CAMPAIGN COMPARISON (A/B o múltiples)
+// 7. CAMPAIGN COMPARISON (sin cambios)
 // ============================================================
 router.get('/compare-campaigns', auth, async (req, res) => {
   try {
-    const { ids } = req.query; // comma-separated campaign IDs
+    const { ids } = req.query;
     
     if (!ids) {
       return res.status(400).json({ error: 'Provide campaign IDs as ?ids=id1,id2,id3' });
@@ -716,7 +800,6 @@ router.get('/compare-campaigns', auth, async (req, res) => {
       .select('name subject sentAt stats segment')
       .populate('segment', 'name');
     
-    // Enriquecer con revenue real
     const comparison = await Promise.all(
       campaigns.map(async (campaign) => {
         const revenue = await Order.getCampaignRevenue(campaign._id);
@@ -752,7 +835,6 @@ router.get('/compare-campaigns', auth, async (req, res) => {
       })
     );
     
-    // Calcular winner (por revenue per email)
     const sorted = [...comparison].sort((a, b) => 
       parseFloat(b.revenue.revenuePerEmail) - parseFloat(a.revenue.revenuePerEmail)
     );
@@ -773,37 +855,36 @@ router.get('/compare-campaigns', auth, async (req, res) => {
 });
 
 // ============================================================
-// 8. DELIVERABILITY HEALTH
+// 8. DELIVERABILITY HEALTH (CORREGIDO)
 // ============================================================
 router.get('/deliverability', auth, async (req, res) => {
   try {
     const { days = 30 } = req.query;
     const { start, end } = getDateRange(parseInt(days));
     
-    // Stats de bounce y complaints
+    // Solo campañas completadas
+    const campaignIds = await getCompletedCampaignIds(start, end);
+    
+    // Stats de bounce desde Customer
     const bounceStats = await Customer.getBounceStats();
     
-    // Unsubscribe trend
-    const unsubscribeTrend = await EmailEvent.aggregate([
-      {
-        $match: {
-          eventDate: { $gte: start, $lte: end },
-          eventType: 'unsubscribed'
-        }
-      },
-      {
-        $group: {
-          _id: { $dateToString: { format: '%Y-%m-%d', date: '$eventDate' } },
-          count: { $sum: 1 }
-        }
-      },
-      { $sort: { _id: 1 } }
-    ]);
+    // Stats desde campañas completadas
+    const campaigns = await Campaign.find({ _id: { $in: campaignIds } });
     
-    // Bounce trend
+    const stats = campaigns.reduce((acc, c) => {
+      acc.sent += c.stats?.sent || 0;
+      acc.delivered += c.stats?.delivered || 0;
+      acc.bounced += c.stats?.bounced || 0;
+      acc.complained += c.stats?.complained || 0;
+      acc.unsubscribed += c.stats?.unsubscribed || 0;
+      return acc;
+    }, { sent: 0, delivered: 0, bounced: 0, complained: 0, unsubscribed: 0 });
+    
+    // Trends
     const bounceTrend = await EmailEvent.aggregate([
       {
         $match: {
+          campaign: { $in: campaignIds },
           eventDate: { $gte: start, $lte: end },
           eventType: 'bounced'
         }
@@ -817,33 +898,29 @@ router.get('/deliverability', auth, async (req, res) => {
       { $sort: { _id: 1 } }
     ]);
     
-    // Email stats del período
-    const periodStats = await EmailEvent.aggregate([
-      { $match: { eventDate: { $gte: start, $lte: end } } },
+    const unsubscribeTrend = await EmailEvent.aggregate([
+      {
+        $match: {
+          campaign: { $in: campaignIds },
+          eventDate: { $gte: start, $lte: end },
+          eventType: 'unsubscribed'
+        }
+      },
       {
         $group: {
-          _id: '$eventType',
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$eventDate' } },
           count: { $sum: 1 }
         }
-      }
+      },
+      { $sort: { _id: 1 } }
     ]);
     
-    const stats = {
-      sent: 0, delivered: 0, bounced: 0, complained: 0, unsubscribed: 0
-    };
-    periodStats.forEach(s => {
-      if (stats.hasOwnProperty(s._id)) {
-        stats[s._id] = s.count;
-      }
-    });
-    
-    // Calcular health score (0-100)
+    // Health score
     let healthScore = 100;
     const bounceRate = stats.sent > 0 ? (stats.bounced / stats.sent) * 100 : 0;
     const complaintRate = stats.sent > 0 ? (stats.complained / stats.sent) * 100 : 0;
     const unsubRate = stats.sent > 0 ? (stats.unsubscribed / stats.sent) * 100 : 0;
     
-    // Penalizaciones
     if (bounceRate > 5) healthScore -= 30;
     else if (bounceRate > 2) healthScore -= 15;
     else if (bounceRate > 1) healthScore -= 5;
@@ -859,6 +936,7 @@ router.get('/deliverability', auth, async (req, res) => {
     
     res.json({
       period: { start, end, days: parseInt(days) },
+      campaignsIncluded: campaignIds.length,
       health: {
         score: Math.max(0, healthScore),
         status: healthStatus,
@@ -902,7 +980,7 @@ router.get('/deliverability', auth, async (req, res) => {
 });
 
 // ============================================================
-// 9. TOP CUSTOMERS (mejorado)
+// 9. TOP CUSTOMERS (sin cambios)
 // ============================================================
 router.get('/top-customers', auth, async (req, res) => {
   try {
@@ -950,12 +1028,15 @@ router.get('/top-customers', auth, async (req, res) => {
 });
 
 // ============================================================
-// 10. REVENUE TIMELINE (original mejorado)
+// 10. REVENUE TIMELINE (CORREGIDO)
 // ============================================================
 router.get('/revenue-timeline', auth, async (req, res) => {
   try {
     const { days = 30 } = req.query;
     const { start, end } = getDateRange(parseInt(days));
+    
+    // Solo campañas completadas
+    const campaignIds = await getCompletedCampaignIds(start, end);
     
     // Revenue total
     const totalTimeline = await Order.aggregate([
@@ -971,12 +1052,12 @@ router.get('/revenue-timeline', auth, async (req, res) => {
       { $sort: { _id: 1 } }
     ]);
     
-    // Revenue de email
+    // Revenue de email (solo de campañas completadas)
     const emailTimeline = await Order.aggregate([
       {
         $match: {
           orderDate: { $gte: start, $lte: end },
-          'attribution.campaign': { $exists: true, $ne: null }
+          'attribution.campaign': { $in: campaignIds }
         }
       },
       {
@@ -989,7 +1070,6 @@ router.get('/revenue-timeline', auth, async (req, res) => {
       { $sort: { _id: 1 } }
     ]);
     
-    // Combinar
     const emailMap = new Map(emailTimeline.map(e => [e._id, e]));
     
     const timeline = totalTimeline.map(day => ({
@@ -1006,6 +1086,7 @@ router.get('/revenue-timeline', auth, async (req, res) => {
     
     res.json({
       period: { start, end, days: parseInt(days) },
+      campaignsIncluded: campaignIds.length,
       timeline
     });
     
@@ -1016,15 +1097,23 @@ router.get('/revenue-timeline', auth, async (req, res) => {
 });
 
 // ============================================================
-// 11. EMAIL TIMELINE (original)
+// 11. EMAIL TIMELINE (CORREGIDO)
 // ============================================================
 router.get('/email-timeline', auth, async (req, res) => {
   try {
     const { days = 30 } = req.query;
     const { start, end } = getDateRange(parseInt(days));
     
+    // Solo campañas completadas
+    const campaignIds = await getCompletedCampaignIds(start, end);
+    
     const timeline = await EmailEvent.aggregate([
-      { $match: { eventDate: { $gte: start, $lte: end } } },
+      {
+        $match: {
+          campaign: { $in: campaignIds },
+          eventDate: { $gte: start, $lte: end }
+        }
+      },
       {
         $group: {
           _id: {
@@ -1037,7 +1126,6 @@ router.get('/email-timeline', auth, async (req, res) => {
       { $sort: { '_id.date': 1 } }
     ]);
     
-    // Transformar
     const dateMap = new Map();
     timeline.forEach(item => {
       const date = item._id.date;
@@ -1049,6 +1137,7 @@ router.get('/email-timeline', auth, async (req, res) => {
     
     res.json({
       period: { start, end, days: parseInt(days) },
+      campaignsIncluded: campaignIds.length,
       timeline: Array.from(dateMap.values())
     });
     
@@ -1059,7 +1148,7 @@ router.get('/email-timeline', auth, async (req, res) => {
 });
 
 // ============================================================
-// 12. CAMPAIGN PERFORMANCE (original)
+// 12. CAMPAIGN PERFORMANCE (sin cambios - ya filtra por sent)
 // ============================================================
 router.get('/campaign-performance', auth, async (req, res) => {
   try {
