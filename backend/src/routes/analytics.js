@@ -1,4 +1,4 @@
-// backend/src/routes/analytics.js (CORREGIDO - Solo campañas enviadas)
+// backend/src/routes/analytics.js (CORREGIDO - String vs ObjectId fix)
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -24,6 +24,7 @@ const getDateRange = (days, endDate = new Date()) => {
 
 // ============================================================
 // 🆕 HELPER: Obtener IDs de campañas COMPLETADAS en el período
+// Retorna tanto ObjectId como String para compatibilidad
 // ============================================================
 const getCompletedCampaignIds = async (start, end) => {
   const campaigns = await Campaign.find({
@@ -31,7 +32,22 @@ const getCompletedCampaignIds = async (start, end) => {
     sentAt: { $gte: start, $lte: end }
   }).select('_id');
   
-  return campaigns.map(c => c._id);
+  return {
+    objectIds: campaigns.map(c => c._id),
+    stringIds: campaigns.map(c => c._id.toString())
+  };
+};
+
+// ============================================================
+// 🆕 HELPER: Crear match condition para campaign (ObjectId o String)
+// ============================================================
+const createCampaignMatch = (campaignData) => {
+  return {
+    $or: [
+      { campaign: { $in: campaignData.objectIds } },
+      { campaign: { $in: campaignData.stringIds } }
+    ]
+  };
 };
 
 // ============================================================
@@ -84,7 +100,6 @@ router.get('/dashboard', auth, async (req, res) => {
     });
     
     // ========== EMAIL STATS - SOLO DE CAMPAÑAS COMPLETADAS ==========
-    // Opción 1: Agregar desde Campaign.stats (más preciso)
     const emailsFromCampaigns = completedCampaigns.reduce((acc, c) => {
       acc.sent += c.stats?.sent || 0;
       acc.delivered += c.stats?.delivered || 0;
@@ -105,39 +120,6 @@ router.get('/dashboard', auth, async (req, res) => {
       totalRevenue: 0,
       purchased: 0
     });
-    
-    // Opción 2: Si prefieres contar UNIQUE opens/clicks desde EmailEvent
-    // (descomenta si quieres unique counts en vez de total events)
-    /*
-    const uniqueStats = await EmailEvent.aggregate([
-      {
-        $match: {
-          campaign: { $in: campaignIds },
-          eventType: { $in: ['opened', 'clicked'] }
-        }
-      },
-      {
-        $group: {
-          _id: {
-            campaign: '$campaign',
-            customer: '$customer',
-            eventType: '$eventType'
-          }
-        }
-      },
-      {
-        $group: {
-          _id: '$_id.eventType',
-          uniqueCount: { $sum: 1 }
-        }
-      }
-    ]);
-    
-    uniqueStats.forEach(s => {
-      if (s._id === 'opened') emailsFromCampaigns.uniqueOpened = s.uniqueCount;
-      if (s._id === 'clicked') emailsFromCampaigns.uniqueClicked = s.uniqueCount;
-    });
-    */
     
     const emails = emailsFromCampaigns;
     
@@ -238,7 +220,6 @@ router.get('/dashboard', auth, async (req, res) => {
         clickRateChange: (parseFloat(clickRate) - prevClickRate).toFixed(2),
         sentChange: emails.sent - prevEmails.sent
       },
-      // Debug info
       _debug: {
         completedCampaignsCount: completedCampaigns.length,
         campaignNames: completedCampaigns.map(c => c.name)
@@ -259,17 +240,21 @@ router.get('/funnel', auth, async (req, res) => {
     const { days = 30, campaignId } = req.query;
     const { start, end } = getDateRange(parseInt(days));
     
-    let campaignIds = [];
+    let campaignData = { objectIds: [], stringIds: [] };
     
     if (campaignId) {
       // Campaña específica
-      campaignIds = [new mongoose.Types.ObjectId(campaignId)];
+      const objId = new mongoose.Types.ObjectId(campaignId);
+      campaignData = {
+        objectIds: [objId],
+        stringIds: [campaignId]
+      };
     } else {
       // Solo campañas completadas en el período
-      campaignIds = await getCompletedCampaignIds(start, end);
+      campaignData = await getCompletedCampaignIds(start, end);
     }
     
-    if (campaignIds.length === 0) {
+    if (campaignData.objectIds.length === 0) {
       return res.json({
         period: { start, end, days: parseInt(days) },
         campaignId: campaignId || 'all',
@@ -286,7 +271,7 @@ router.get('/funnel', auth, async (req, res) => {
     }
     
     // Agregar stats desde las campañas (más preciso)
-    const campaigns = await Campaign.find({ _id: { $in: campaignIds } });
+    const campaigns = await Campaign.find({ _id: { $in: campaignData.objectIds } });
     
     const totals = campaigns.reduce((acc, c) => {
       acc.sent += c.stats?.sent || 0;
@@ -298,11 +283,11 @@ router.get('/funnel', auth, async (req, res) => {
       return acc;
     }, { sent: 0, delivered: 0, opened: 0, clicked: 0, purchased: 0, revenue: 0 });
     
-    // Si queremos unique counts, usar EmailEvent con $group
+    // 🔧 FIX: Usar $or para matchear ObjectId y String
     const uniqueCounts = await EmailEvent.aggregate([
       {
         $match: {
-          campaign: { $in: campaignIds },
+          ...createCampaignMatch(campaignData),
           eventType: { $in: ['sent', 'opened', 'clicked'] }
         }
       },
@@ -381,7 +366,7 @@ router.get('/funnel', auth, async (req, res) => {
     res.json({
       period: { start, end, days: parseInt(days) },
       campaignId: campaignId || 'all',
-      campaignsIncluded: campaignIds.length,
+      campaignsIncluded: campaignData.objectIds.length,
       funnel,
       summary: {
         totalSent: sent,
@@ -407,7 +392,7 @@ router.get('/trends', auth, async (req, res) => {
     const { start, end } = getDateRange(parseInt(days));
     
     // Solo campañas completadas
-    const campaignIds = await getCompletedCampaignIds(start, end);
+    const campaignData = await getCompletedCampaignIds(start, end);
     
     // Formato de fecha según granularidad
     let dateFormat = '%Y-%m-%d';
@@ -415,11 +400,11 @@ router.get('/trends', auth, async (req, res) => {
     if (granularity === 'week') dateFormat = '%Y-W%V';
     if (granularity === 'month') dateFormat = '%Y-%m';
     
-    // Email events de campañas completadas solamente
+    // 🔧 FIX: Email events con $or para ObjectId y String
     const emailTrends = await EmailEvent.aggregate([
       {
         $match: {
-          campaign: { $in: campaignIds },
+          ...createCampaignMatch(campaignData),
           eventDate: { $gte: start, $lte: end }
         }
       },
@@ -440,7 +425,7 @@ router.get('/trends', auth, async (req, res) => {
       {
         $match: {
           orderDate: { $gte: start, $lte: end },
-          'attribution.campaign': { $in: campaignIds }
+          'attribution.campaign': { $in: campaignData.objectIds }
         }
       },
       {
@@ -524,7 +509,7 @@ router.get('/trends', auth, async (req, res) => {
     
     res.json({
       period: { start, end, days: parseInt(days), granularity },
-      campaignsIncluded: campaignIds.length,
+      campaignsIncluded: campaignData.objectIds.length,
       trends
     });
     
@@ -607,20 +592,34 @@ router.get('/top-campaigns', auth, async (req, res) => {
 });
 
 // ============================================================
-// 5. BEST SEND TIMES (CORREGIDO)
+// 5. BEST SEND TIMES (🔧 FIXED - String vs ObjectId)
 // ============================================================
 router.get('/best-times', auth, async (req, res) => {
   try {
     const { days = 90, metric = 'opened' } = req.query;
     const { start, end } = getDateRange(parseInt(days));
     
-    // Solo de campañas completadas
-    const campaignIds = await getCompletedCampaignIds(start, end);
+    // Obtener campañas completadas (ObjectIds y Strings)
+    const campaignData = await getCompletedCampaignIds(start, end);
     
+    console.log('🔍 [best-times] Searching with', campaignData.objectIds.length, 'campaigns');
+    
+    if (campaignData.objectIds.length === 0) {
+      return res.json({
+        period: { start, end, days: parseInt(days) },
+        metric,
+        campaignsIncluded: 0,
+        heatmap: generateEmptyHeatmap(),
+        bestTimes: [],
+        recommendation: 'No completed campaigns in this period'
+      });
+    }
+    
+    // 🔧 FIX: Usar $or para matchear tanto ObjectId como String
     const events = await EmailEvent.aggregate([
       {
         $match: {
-          campaign: { $in: campaignIds },
+          ...createCampaignMatch(campaignData),
           eventDate: { $gte: start, $lte: end },
           eventType: { $in: ['sent', 'opened', 'clicked'] }
         }
@@ -636,6 +635,11 @@ router.get('/best-times', auth, async (req, res) => {
         }
       }
     ]);
+    
+    console.log('📊 [best-times] Found', events.length, 'event groups');
+    
+    // Verificar si hay eventos 'sent'
+    const hasSentEvents = events.some(e => e._id.type === 'sent');
     
     // Crear matriz de heatmap
     const heatmap = [];
@@ -655,8 +659,16 @@ router.get('/best-times', auth, async (req, res) => {
           e._id.dayOfWeek === day && e._id.hour === hour && e._id.type === 'clicked'
         )?.count || 0;
         
-        const openRate = sent > 0 ? (opened / sent) * 100 : 0;
-        const clickRate = sent > 0 ? (clicked / sent) * 100 : 0;
+        // Si no hay eventos 'sent', usar conteos absolutos como valor
+        let openRate, clickRate;
+        if (hasSentEvents && sent > 0) {
+          openRate = (opened / sent) * 100;
+          clickRate = (clicked / sent) * 100;
+        } else {
+          // Fallback: usar opens/clicks como valor absoluto
+          openRate = opened;
+          clickRate = clicked;
+        }
         
         heatmap.push({
           day: day - 1,
@@ -668,32 +680,47 @@ router.get('/best-times', auth, async (req, res) => {
           clicked,
           openRate: parseFloat(openRate.toFixed(2)),
           clickRate: parseFloat(clickRate.toFixed(2)),
-          value: metric === 'clicked' ? clickRate : openRate
+          value: metric === 'clicked' ? parseFloat(clickRate.toFixed(2)) : parseFloat(openRate.toFixed(2))
         });
       }
     }
     
-    // Mejores horarios
+    // Mejores horarios (basado en el métrico seleccionado)
+    const minSample = hasSentEvents ? 10 : 1;
     const sortedByMetric = [...heatmap]
-      .filter(h => h.sent >= 10)
+      .filter(h => hasSentEvents ? h.sent >= minSample : h.opened >= minSample)
       .sort((a, b) => b.value - a.value);
     
     const bestTimes = sortedByMetric.slice(0, 5).map(t => ({
       day: t.dayName,
       hour: t.hourLabel,
-      rate: t.value.toFixed(2) + '%',
-      sampleSize: t.sent
+      rate: hasSentEvents ? t.value.toFixed(2) + '%' : t.value.toString(),
+      sampleSize: hasSentEvents ? t.sent : t.opened
     }));
+    
+    // Debug info
+    const totalSent = heatmap.reduce((sum, h) => sum + h.sent, 0);
+    const totalOpened = heatmap.reduce((sum, h) => sum + h.opened, 0);
+    const totalClicked = heatmap.reduce((sum, h) => sum + h.clicked, 0);
+    
+    console.log('✅ [best-times] Final stats:', { totalSent, totalOpened, totalClicked, bestTimesCount: bestTimes.length });
     
     res.json({
       period: { start, end, days: parseInt(days) },
       metric,
-      campaignsIncluded: campaignIds.length,
+      campaignsIncluded: campaignData.objectIds.length,
       heatmap,
       bestTimes,
       recommendation: bestTimes[0] 
         ? `Best time: ${bestTimes[0].day} at ${bestTimes[0].hour} (${bestTimes[0].rate} ${metric} rate)`
-        : 'Not enough data for recommendation'
+        : 'Not enough data for recommendation',
+      _debug: {
+        hasSentEvents,
+        totalEventGroups: events.length,
+        totalSent,
+        totalOpened,
+        totalClicked
+      }
     });
     
   } catch (error) {
@@ -701,6 +728,31 @@ router.get('/best-times', auth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// Helper para generar heatmap vacío
+function generateEmptyHeatmap() {
+  const heatmap = [];
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  
+  for (let day = 0; day < 7; day++) {
+    for (let hour = 0; hour < 24; hour++) {
+      heatmap.push({
+        day,
+        dayName: dayNames[day],
+        hour,
+        hourLabel: `${hour.toString().padStart(2, '0')}:00`,
+        sent: 0,
+        opened: 0,
+        clicked: 0,
+        openRate: 0,
+        clickRate: 0,
+        value: 0
+      });
+    }
+  }
+  
+  return heatmap;
+}
 
 // ============================================================
 // 6. SEGMENT PERFORMANCE (CORREGIDO)
@@ -855,7 +907,7 @@ router.get('/compare-campaigns', auth, async (req, res) => {
 });
 
 // ============================================================
-// 8. DELIVERABILITY HEALTH (CORREGIDO)
+// 8. DELIVERABILITY HEALTH (🔧 FIXED)
 // ============================================================
 router.get('/deliverability', auth, async (req, res) => {
   try {
@@ -863,13 +915,13 @@ router.get('/deliverability', auth, async (req, res) => {
     const { start, end } = getDateRange(parseInt(days));
     
     // Solo campañas completadas
-    const campaignIds = await getCompletedCampaignIds(start, end);
+    const campaignData = await getCompletedCampaignIds(start, end);
     
     // Stats de bounce desde Customer
     const bounceStats = await Customer.getBounceStats();
     
     // Stats desde campañas completadas
-    const campaigns = await Campaign.find({ _id: { $in: campaignIds } });
+    const campaigns = await Campaign.find({ _id: { $in: campaignData.objectIds } });
     
     const stats = campaigns.reduce((acc, c) => {
       acc.sent += c.stats?.sent || 0;
@@ -880,11 +932,11 @@ router.get('/deliverability', auth, async (req, res) => {
       return acc;
     }, { sent: 0, delivered: 0, bounced: 0, complained: 0, unsubscribed: 0 });
     
-    // Trends
+    // 🔧 FIX: Trends con $or
     const bounceTrend = await EmailEvent.aggregate([
       {
         $match: {
-          campaign: { $in: campaignIds },
+          ...createCampaignMatch(campaignData),
           eventDate: { $gte: start, $lte: end },
           eventType: 'bounced'
         }
@@ -901,7 +953,7 @@ router.get('/deliverability', auth, async (req, res) => {
     const unsubscribeTrend = await EmailEvent.aggregate([
       {
         $match: {
-          campaign: { $in: campaignIds },
+          ...createCampaignMatch(campaignData),
           eventDate: { $gte: start, $lte: end },
           eventType: 'unsubscribed'
         }
@@ -936,7 +988,7 @@ router.get('/deliverability', auth, async (req, res) => {
     
     res.json({
       period: { start, end, days: parseInt(days) },
-      campaignsIncluded: campaignIds.length,
+      campaignsIncluded: campaignData.objectIds.length,
       health: {
         score: Math.max(0, healthScore),
         status: healthStatus,
@@ -1036,7 +1088,7 @@ router.get('/revenue-timeline', auth, async (req, res) => {
     const { start, end } = getDateRange(parseInt(days));
     
     // Solo campañas completadas
-    const campaignIds = await getCompletedCampaignIds(start, end);
+    const campaignData = await getCompletedCampaignIds(start, end);
     
     // Revenue total
     const totalTimeline = await Order.aggregate([
@@ -1057,7 +1109,7 @@ router.get('/revenue-timeline', auth, async (req, res) => {
       {
         $match: {
           orderDate: { $gte: start, $lte: end },
-          'attribution.campaign': { $in: campaignIds }
+          'attribution.campaign': { $in: campaignData.objectIds }
         }
       },
       {
@@ -1086,7 +1138,7 @@ router.get('/revenue-timeline', auth, async (req, res) => {
     
     res.json({
       period: { start, end, days: parseInt(days) },
-      campaignsIncluded: campaignIds.length,
+      campaignsIncluded: campaignData.objectIds.length,
       timeline
     });
     
@@ -1097,7 +1149,7 @@ router.get('/revenue-timeline', auth, async (req, res) => {
 });
 
 // ============================================================
-// 11. EMAIL TIMELINE (CORREGIDO)
+// 11. EMAIL TIMELINE (🔧 FIXED)
 // ============================================================
 router.get('/email-timeline', auth, async (req, res) => {
   try {
@@ -1105,12 +1157,13 @@ router.get('/email-timeline', auth, async (req, res) => {
     const { start, end } = getDateRange(parseInt(days));
     
     // Solo campañas completadas
-    const campaignIds = await getCompletedCampaignIds(start, end);
+    const campaignData = await getCompletedCampaignIds(start, end);
     
+    // 🔧 FIX: Usar $or
     const timeline = await EmailEvent.aggregate([
       {
         $match: {
-          campaign: { $in: campaignIds },
+          ...createCampaignMatch(campaignData),
           eventDate: { $gte: start, $lte: end }
         }
       },
@@ -1137,7 +1190,7 @@ router.get('/email-timeline', auth, async (req, res) => {
     
     res.json({
       period: { start, end, days: parseInt(days) },
-      campaignsIncluded: campaignIds.length,
+      campaignsIncluded: campaignData.objectIds.length,
       timeline: Array.from(dateMap.values())
     });
     
