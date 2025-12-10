@@ -1,5 +1,6 @@
 // backend/src/services/aiFlowService.js
 // 🧠 Claude AI Integration for Flow Automation
+// 🥒 Optimized for Jersey Pickles - Artisanal Style
 const Anthropic = require('@anthropic-ai/sdk');
 const Flow = require('../models/Flow');
 const FlowExecution = require('../models/FlowExecution');
@@ -11,6 +12,26 @@ class AIFlowService {
     this.client = null;
     this.model = 'claude-sonnet-4-20250514';
     this.initialized = false;
+    
+    // 🥒 Jersey Pickles Brand Guidelines
+    this.brand = {
+      name: 'Jersey Pickles',
+      logo: 'https://cdn.shopify.com/s/files/1/0812/1873/2307/files/image_1_1671a1c5-b2cf-4c8b-9755-54e56911aa6f_-_Edited.png?v=1765135259',
+      website: 'https://jerseypickles.com',
+      tagline: 'Fresh, bold, and stadium-ready',
+      colors: {
+        primary: '#2D5A27',      // Pickle green
+        secondary: '#1a3d17',    // Dark green
+        accent: '#F5A623',       // Mustard yellow
+        background: '#FFFFFF',   // White
+        lightBg: '#f8faf8',      // Light green tint
+        text: '#333333',         // Dark gray
+        textLight: '#666666'     // Medium gray
+      },
+      tone: 'Warm, friendly, artisanal, family-oriented. Not overly commercial - focus on craft and quality.',
+      products: ['Pickles', 'Olives', 'Marinated Mushrooms', 'Pickled Vegetables'],
+      features: ['Build Your Box', 'Farmers Markets', 'Local New Jersey', 'Fresh Daily']
+    };
     
     this.init();
   }
@@ -31,8 +52,6 @@ class AIFlowService {
   
   /**
    * Genera subject lines optimizados para un email de flow
-   * @param {Object} options - Configuración
-   * @returns {Promise<Object>} - Subject lines con predicciones
    */
   async generateSubjectLines(options) {
     if (!this.initialized) {
@@ -40,48 +59,61 @@ class AIFlowService {
     }
     
     const {
-      flowType,           // 'welcome', 'abandoned_cart', 'post_purchase', etc.
-      emailPosition,      // 1, 2, 3... (qué email en la secuencia)
-      productContext,     // Productos relacionados
-      customerSegment,    // 'new', 'vip', 'dormant'
-      brandVoice,         // 'friendly', 'professional', 'playful'
-      previousSubjects    // Para evitar repetición
+      flowType,
+      emailPosition,
+      productContext,
+      customerSegment,
+      brandVoice,
+      previousSubjects
     } = options;
     
-    const prompt = `You are an expert email marketer for Jersey Pickles, an artisanal pickle and gourmet food e-commerce brand.
+    const prompt = `You are an email marketing expert for ${this.brand.name}, an artisanal pickle and olive company from New Jersey.
+
+BRAND PERSONALITY:
+- Tone: ${this.brand.tone}
+- Tagline: "${this.brand.tagline}"
+- Products: ${this.brand.products.join(', ')}
+- NOT a big corporation - we're a family business at farmers markets
 
 Generate 5 compelling email subject lines for:
 - Flow type: ${flowType}
 - Email #${emailPosition} in the sequence
 - Customer segment: ${customerSegment || 'general'}
-- Brand voice: ${brandVoice || 'friendly and playful'}
 ${productContext ? `- Product context: ${productContext}` : ''}
 ${previousSubjects?.length ? `- Avoid similar to: ${previousSubjects.join(', ')}` : ''}
 
-Requirements:
+IMPORTANT GUIDELINES:
 1. Keep under 50 characters when possible
-2. Use emojis strategically (🥒 is brand signature)
-3. Create urgency without being spammy
-4. Personalization variables available: {{customer.firstName}}, {{shop.name}}
-5. Consider mobile preview (first 30 chars most important)
+2. Use pickle emoji 🥒 sparingly (not in every one)
+3. Sound personal and warm, like a friend sharing good food
+4. NO aggressive sales language like "BUY NOW", "HURRY", "LIMITED TIME"
+5. Focus on experience, flavor, craft - not discounts
+6. Variables available: {{customer.firstName}}, {{shop.name}}
+7. Think farmers market vibes, not big box store
 
-For each subject line, predict:
-- Expected open rate (as percentage)
-- Best for: (mobile/desktop/both)
-- Emotional trigger used
+GOOD EXAMPLES:
+- "Hey {{customer.firstName}}, your pickles are waiting 🥒"
+- "Fresh batch just dropped - thought of you"
+- "The secret to the perfect pickle..."
+- "From our kitchen to yours"
 
-Respond in JSON format:
+BAD EXAMPLES (too commercial):
+- "🚨 HUGE SALE - 50% OFF!!!"
+- "Don't miss out on this LIMITED offer!"
+- "Act NOW before it's gone!"
+
+Respond in JSON:
 {
   "subjectLines": [
     {
       "subject": "Subject line here",
       "predictedOpenRate": 25,
       "bestFor": "both",
-      "emotionalTrigger": "curiosity",
-      "explanation": "Why this works"
+      "emotionalTrigger": "curiosity/warmth/nostalgia/appetite",
+      "explanation": "Why this works for an artisanal brand"
     }
   ],
-  "recommendation": "Which one to use and why",
+  "recommendation": "Which one best fits the artisanal vibe",
   "abTestSuggestion": "Which 2 to A/B test"
 }`;
 
@@ -116,9 +148,7 @@ Respond in JSON format:
   }
   
   /**
-   * Genera contenido HTML completo para un email
-   * @param {Object} options - Configuración del email
-   * @returns {Promise<Object>} - HTML y metadata
+   * Genera contenido HTML completo para un email - ARTISANAL STYLE
    */
   async generateEmailContent(options) {
     if (!this.initialized) {
@@ -129,48 +159,93 @@ Respond in JSON format:
       flowType,
       emailPosition,
       subject,
-      triggerContext,     // Datos del trigger (carrito, orden, etc.)
-      customerData,       // Info del cliente
-      goal,               // 'recover_cart', 'build_loyalty', 'get_review'
-      includeDiscount,    // true/false
-      discountDetails,    // { code: 'SAVE10', value: 10, type: 'percentage' }
-      cta                 // { text: 'Shop Now', url: 'https://...' }
+      triggerContext,
+      customerData,
+      goal,
+      includeDiscount,
+      discountDetails,
+      cta
     } = options;
     
-    const prompt = `You are an expert email designer for Jersey Pickles, creating a ${flowType} email.
+    const prompt = `You are creating an email for ${this.brand.name}, an artisanal pickle and olive company.
 
-Context:
+EMAIL CONTEXT:
+- Flow type: ${flowType}
 - Email #${emailPosition} in sequence
 - Subject: "${subject}"
 - Goal: ${goal}
-- Trigger data: ${JSON.stringify(triggerContext || {})}
-${includeDiscount ? `- Discount: ${discountDetails.code} for ${discountDetails.value}${discountDetails.type === 'percentage' ? '%' : '$'} off` : ''}
-- CTA: ${cta?.text || 'Shop Now'}
+${includeDiscount ? `- Include discount: ${discountDetails?.code} for ${discountDetails?.value}${discountDetails?.type === 'percentage' ? '%' : '$'} off` : ''}
+- CTA: ${cta?.text || 'Shop Now'} → ${cta?.url || this.brand.website}
 
-Brand Guidelines:
-- Primary color: #2D5A27 (pickle green)
-- Accent color: #F5A623 (mustard yellow)
-- Tone: Friendly, playful, with pickle puns welcome
-- Logo: https://jerseypickles.com/logo.png
+BRAND REQUIREMENTS:
+- Logo URL: ${this.brand.logo}
+- Primary green: ${this.brand.colors.primary}
+- Accent yellow: ${this.brand.colors.accent}
+- Website: ${this.brand.website}
+- Tone: ${this.brand.tone}
 
-Generate a complete HTML email that:
-1. Is mobile-responsive (single column, max-width 600px)
-2. Uses inline CSS only
-3. Includes personalization: {{customer.firstName}}, {{customer.lastName}}
-4. Has clear hierarchy and scannable content
-5. Includes preheader text
-${triggerContext?.cartItems ? '6. Shows cart items in a clean grid' : ''}
+DESIGN REQUIREMENTS - CRITICAL:
+1. MUST be fully responsive (mobile-first, works on all devices)
+2. Max-width: 600px, centered
+3. Use ONLY inline CSS (no <style> blocks)
+4. White background header with logo
+5. Clean, minimal design - artisanal feel, NOT corporate
+6. Font: Georgia for headings (classic feel), Arial for body
+7. Generous white space
+8. Simple, warm imagery descriptions (we'll add real images)
 
-IMPORTANT: Use actual HTML, not placeholders. Make it production-ready.
+CONTENT TONE:
+- Write like you're talking to a friend who loves good food
+- Share the story/craft behind the products
+- NO aggressive sales language
+- Focus on flavor, freshness, family recipes
+- Can include a pickle pun, but don't overdo it
+- Sign off warmly (e.g., "Stay crunchy, The Jersey Pickles Family")
+
+EMAIL STRUCTURE:
+1. Header: White background, centered logo, simple
+2. Hero: Warm greeting, personal touch
+3. Body: Story-driven content, not just product pushing
+4. CTA: Subtle, inviting (green button, not screaming)
+5. Footer: Warm sign-off, social links, unsubscribe
+
+Generate COMPLETE, PRODUCTION-READY HTML. Use this exact structure:
+
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Email</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f5f5f5;font-family:Arial,sans-serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color:#f5f5f5;">
+    <tr>
+      <td align="center" style="padding:20px 10px;">
+        <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="max-width:600px;width:100%;background-color:#ffffff;border-radius:8px;overflow:hidden;">
+          <!-- HEADER -->
+          <tr>
+            <td align="center" style="padding:30px 20px;background-color:#ffffff;border-bottom:1px solid #eee;">
+              <img src="${this.brand.logo}" alt="Jersey Pickles" width="180" style="max-width:180px;height:auto;display:block;">
+            </td>
+          </tr>
+          <!-- CONTENT GOES HERE -->
+          ...
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
 
 Respond in JSON:
 {
-  "html": "<!DOCTYPE html>...",
-  "previewText": "Preheader text here",
+  "html": "<!DOCTYPE html>... (complete HTML)",
+  "previewText": "Preheader text (50-100 chars, warm and inviting)",
   "estimatedReadTime": "30 seconds",
-  "sections": ["header", "hero", "content", "cta", "footer"],
+  "sections": ["header", "greeting", "story", "cta", "footer"],
   "personalizationUsed": ["firstName"],
-  "tips": ["Tip for improving this email"]
+  "tips": ["Tips for this email"]
 }`;
 
     try {
@@ -203,21 +278,145 @@ Respond in JSON:
     }
   }
   
+  /**
+   * Genera un template base artesanal para Jersey Pickles
+   */
+  getBaseEmailTemplate(content = {}) {
+    const {
+      greeting = 'Hey there!',
+      body = '',
+      ctaText = 'Visit Our Shop',
+      ctaUrl = this.brand.website,
+      signOff = 'Stay crunchy,<br>The Jersey Pickles Family 🥒'
+    } = content;
+    
+    return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jersey Pickles</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f5f5f5;font-family:Arial,Helvetica,sans-serif;-webkit-font-smoothing:antialiased;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f5f5f5;">
+    <tr>
+      <td align="center" style="padding:20px 10px;">
+        <!--[if mso]>
+        <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" align="center">
+        <tr>
+        <td>
+        <![endif]-->
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="max-width:600px;width:100%;background-color:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.05);">
+          
+          <!-- HEADER WITH LOGO -->
+          <tr>
+            <td align="center" style="padding:32px 24px;background-color:#ffffff;border-bottom:1px solid #f0f0f0;">
+              <a href="${this.brand.website}" target="_blank" style="text-decoration:none;">
+                <img src="${this.brand.logo}" alt="Jersey Pickles" width="200" style="max-width:200px;height:auto;display:block;border:0;">
+              </a>
+            </td>
+          </tr>
+          
+          <!-- MAIN CONTENT -->
+          <tr>
+            <td style="padding:40px 32px;background-color:#ffffff;">
+              <!-- Greeting -->
+              <h1 style="margin:0 0 24px 0;font-family:Georgia,'Times New Roman',serif;font-size:28px;font-weight:normal;color:${this.brand.colors.primary};line-height:1.3;">
+                ${greeting}
+              </h1>
+              
+              <!-- Body Content -->
+              <div style="font-size:16px;line-height:1.7;color:${this.brand.colors.text};">
+                ${body}
+              </div>
+              
+              <!-- CTA Button -->
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:32px 0;">
+                <tr>
+                  <td align="center" style="border-radius:8px;background-color:${this.brand.colors.primary};">
+                    <a href="${ctaUrl}" target="_blank" style="display:inline-block;padding:16px 32px;font-family:Arial,Helvetica,sans-serif;font-size:16px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:8px;">
+                      ${ctaText}
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          
+          <!-- WARM SIGN-OFF -->
+          <tr>
+            <td style="padding:0 32px 40px 32px;background-color:#ffffff;">
+              <p style="margin:0;font-size:16px;line-height:1.6;color:${this.brand.colors.textLight};font-style:italic;">
+                ${signOff}
+              </p>
+            </td>
+          </tr>
+          
+          <!-- FOOTER -->
+          <tr>
+            <td style="padding:24px 32px;background-color:${this.brand.colors.lightBg};border-top:1px solid #e8e8e8;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                <tr>
+                  <td align="center" style="padding-bottom:16px;">
+                    <p style="margin:0;font-size:13px;color:${this.brand.colors.textLight};">
+                      Made with ❤️ in New Jersey
+                    </p>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="padding-bottom:16px;">
+                    <a href="${this.brand.website}" style="color:${this.brand.colors.primary};text-decoration:none;font-size:13px;margin:0 8px;">Shop</a>
+                    <span style="color:#ccc;">|</span>
+                    <a href="${this.brand.website}/pages/build-you-box" style="color:${this.brand.colors.primary};text-decoration:none;font-size:13px;margin:0 8px;">Build Your Box</a>
+                    <span style="color:#ccc;">|</span>
+                    <a href="${this.brand.website}/pages/store-locator-2" style="color:${this.brand.colors.primary};text-decoration:none;font-size:13px;margin:0 8px;">Find Us</a>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center">
+                    <p style="margin:0;font-size:11px;color:#999;">
+                      © ${new Date().getFullYear()} Jersey Pickles. All rights reserved.<br>
+                      <a href="{{unsubscribe_url}}" style="color:#999;text-decoration:underline;">Unsubscribe</a>
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          
+        </table>
+        <!--[if mso]>
+        </td>
+        </tr>
+        </table>
+        <![endif]-->
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+  }
+  
   // ==================== 🚀 FLOW BUILDER ASSISTANT ====================
   
   /**
    * Genera un flow completo basado en descripción natural
-   * @param {string} description - "Quiero recuperar carritos abandonados"
-   * @returns {Promise<Object>} - Flow structure completa
    */
   async generateFlowFromDescription(description) {
     if (!this.initialized) {
       return { success: false, error: 'AI not configured' };
     }
     
-    const prompt = `You are an email automation expert. Create a complete flow based on this request:
+    const prompt = `You are an email automation expert for ${this.brand.name}, an artisanal pickle and olive company.
 
+Create a complete automation flow based on this request:
 "${description}"
+
+BRAND CONTEXT:
+- We're a family business, not a corporation
+- Products: pickles, olives, marinated vegetables
+- Tone: warm, friendly, craft-focused
+- Feature: Build Your Box custom orders
 
 Available triggers:
 - customer_created: New customer signs up
@@ -235,16 +434,21 @@ Available step types:
 - add_tag: { tagName }
 - create_discount: { discountCode, discountType: 'percentage'|'fixed_amount', discountValue, expiresInDays }
 
-Best practices:
-1. Welcome series: 3-5 emails over 2 weeks
-2. Abandoned cart: 2-3 emails over 3 days, include discount in last
-3. Post-purchase: Thank you immediately, review request after 7 days
-4. Win-back: 3 emails over 2 weeks with escalating offers
+TIMING BEST PRACTICES for artisanal brands:
+1. Welcome series: Space out more (0, 3 days, 7 days, 14 days) - don't overwhelm
+2. Abandoned cart: Be gentle (1hr, 24hr, 72hr) - remind, don't pressure
+3. Post-purchase: Focus on experience (immediate thank you, 10 days check-in, 21 days review)
+4. Win-back: Patient approach (7 days, 21 days, 45 days)
+
+SUBJECT LINE STYLE:
+- Warm and personal, not salesy
+- Can include 🥒 emoji occasionally
+- Examples: "Your pickles are packed!", "From our brine to your table"
 
 Respond in JSON with this exact structure:
 {
   "name": "Flow name",
-  "description": "What this flow does",
+  "description": "What this flow does (warm, friendly description)",
   "trigger": {
     "type": "trigger_type",
     "config": {}
@@ -257,10 +461,8 @@ Respond in JSON with this exact structure:
     }
   ],
   "estimatedRevenue": "+X% expected improvement",
-  "tips": ["Implementation tips"]
-}
-
-For send_email steps, include actual subject lines and brief htmlContent descriptions (we'll generate full HTML separately).`;
+  "tips": ["Implementation tips specific to artisanal brands"]
+}`;
 
     try {
       const response = await this.client.messages.create({
@@ -300,16 +502,16 @@ For send_email steps, include actual subject lines and brief htmlContent descrip
       return { success: false, error: 'AI not configured' };
     }
     
-    const prompt = `Given this email automation flow:
+    const prompt = `Given this email automation flow for an artisanal pickle company:
 - Name: ${flow.name}
 - Trigger: ${flow.trigger.type}
 - Current steps: ${JSON.stringify(currentSteps, null, 2)}
 
 What should be the next step? Consider:
-1. If no emails sent yet, probably send one
-2. If just sent email, add a wait
-3. After 2-3 emails, consider a condition to branch
-4. Near the end, consider adding a tag or discount
+1. Don't send too many emails (artisanal brands should be less aggressive)
+2. Space out communications - quality over quantity
+3. Focus on relationship building, not just sales
+4. After 2-3 emails, consider a longer wait or condition
 
 Respond in JSON:
 {
@@ -318,7 +520,7 @@ Respond in JSON:
     "config": { ... },
     "order": ${currentSteps.length}
   },
-  "reasoning": "Why this step makes sense",
+  "reasoning": "Why this step makes sense for an artisanal brand",
   "alternatives": [
     { "type": "...", "description": "Alternative option" }
   ]
@@ -356,19 +558,16 @@ Respond in JSON:
     }
     
     try {
-      // Obtener flow con métricas
       const flow = await Flow.findById(flowId);
       if (!flow) {
         return { success: false, error: 'Flow not found' };
       }
       
-      // Obtener execuciones recientes
       const executions = await FlowExecution.find({ flow: flowId })
         .sort({ createdAt: -1 })
         .limit(100)
         .lean();
       
-      // Calcular métricas
       const metrics = {
         totalExecutions: executions.length,
         completed: executions.filter(e => e.status === 'completed').length,
@@ -387,7 +586,7 @@ Respond in JSON:
         }
       };
       
-      const prompt = `Analyze this email automation flow and suggest improvements:
+      const prompt = `Analyze this email automation flow for an artisanal pickle company:
 
 Flow: ${flow.name}
 Type: ${flow.trigger.type}
@@ -399,10 +598,16 @@ ${JSON.stringify(metrics, null, 2)}
 Steps breakdown:
 ${flow.steps.map((s, i) => `${i + 1}. ${s.type}: ${s.config.subject || s.config.delayMinutes + 'min' || s.config.tagName || 'config'}`).join('\n')}
 
-Industry benchmarks for ${flow.trigger.type}:
-- Welcome series: 50% open rate, 10% click rate
-- Abandoned cart: 45% open rate, 8% click rate, 10% recovery
-- Post-purchase: 40% open rate, 5% click rate
+Industry benchmarks for artisanal food brands:
+- Welcome series: 45-55% open rate, 8-12% click rate
+- Abandoned cart: 40-50% open rate, 6-10% click rate
+- Post-purchase: 50-60% open rate, 5-8% click rate
+
+IMPORTANT: This is an artisanal brand. Recommendations should focus on:
+- Building genuine relationships, not aggressive selling
+- Quality of engagement over quantity
+- Storytelling and brand connection
+- NOT suggesting more emails or faster sequences
 
 Provide actionable recommendations in JSON:
 {
@@ -415,7 +620,7 @@ Provide actionable recommendations in JSON:
       "priority": "high|medium|low",
       "area": "timing|content|structure|targeting",
       "issue": "The problem",
-      "suggestion": "What to do",
+      "suggestion": "What to do (artisanal-appropriate)",
       "expectedImpact": "+X% improvement"
     }
   ],
@@ -453,7 +658,7 @@ Provide actionable recommendations in JSON:
   }
   
   /**
-   * Sugiere el mejor timing para cada step basado en datos históricos
+   * Sugiere el mejor timing para cada step
    */
   async optimizeTiming(flowId) {
     if (!this.initialized) {
@@ -466,28 +671,27 @@ Provide actionable recommendations in JSON:
         return { success: false, error: 'Flow not found' };
       }
       
-      // Obtener datos de timing de campañas similares
       const campaigns = await Campaign.find({ status: 'sent' })
         .select('sentAt stats')
         .sort({ createdAt: -1 })
         .limit(50)
         .lean();
       
-      // Analizar mejores horas
       const hourlyPerformance = this.analyzeHourlyPerformance(campaigns);
       
       const prompt = `Based on this email performance data by hour:
 ${JSON.stringify(hourlyPerformance, null, 2)}
 
-Current flow timing:
-${flow.steps.filter(s => s.type === 'wait').map((s, i) => `Wait ${i + 1}: ${s.config.delayMinutes} minutes`).join('\n')}
+Current flow timing for ${flow.name} (${flow.trigger.type}):
+${flow.steps.filter(s => s.type === 'wait').map((s, i) => `Wait ${i + 1}: ${s.config.delayMinutes} minutes (${Math.round(s.config.delayMinutes/60)}h)`).join('\n')}
 
-Flow type: ${flow.trigger.type}
+This is an ARTISANAL pickle brand. Timing philosophy:
+- Don't rush customers - they appreciate thoughtful timing
+- Quality engagement > frequent contact
+- Best send times for food brands: typically mid-morning (10-11am) or early evening (6-7pm)
+- Avoid weekends for promotional emails, save for story-telling content
 
-Suggest optimal timing for each wait step. Consider:
-1. For abandoned cart: 1hr, 24hr, 72hr is standard
-2. For welcome: 0, 1day, 3days, 7days
-3. Best send times based on the data provided
+Suggest optimal timing that respects the artisanal approach.
 
 Respond in JSON:
 {
@@ -498,7 +702,7 @@ Respond in JSON:
       "recommendedDelay": 90,
       "bestSendHour": 10,
       "bestSendDay": "Tuesday",
-      "reasoning": "Why"
+      "reasoning": "Why (artisanal context)"
     }
   ],
   "expectedImprovement": "+X% open rate",
@@ -535,7 +739,7 @@ Respond in JSON:
       return sum + (new Date(e.completedAt) - new Date(e.startedAt));
     }, 0);
     
-    return Math.round(totalMs / completed.length / 1000 / 60); // minutes
+    return Math.round(totalMs / completed.length / 1000 / 60);
   }
   
   analyzeHourlyPerformance(campaigns) {
@@ -545,7 +749,6 @@ Respond in JSON:
       if (!c.sentAt || !c.stats) return;
       
       const hour = new Date(c.sentAt).getHours();
-      const day = new Date(c.sentAt).getDay();
       
       if (!hourlyData[hour]) {
         hourlyData[hour] = { opens: 0, sent: 0, campaigns: 0 };
@@ -556,15 +759,12 @@ Respond in JSON:
       hourlyData[hour].campaigns += 1;
     });
     
-    // Calcular open rate por hora
     return Object.entries(hourlyData).map(([hour, data]) => ({
       hour: parseInt(hour),
       openRate: data.sent > 0 ? (data.opens / data.sent * 100).toFixed(1) : 0,
       sampleSize: data.campaigns
     })).sort((a, b) => b.openRate - a.openRate);
   }
-  
-  // ==================== 🎨 TEMPLATE ENHANCEMENT ====================
   
   /**
    * Mejora un template existente con AI
@@ -575,18 +775,24 @@ Respond in JSON:
     }
     
     const { 
-      goal,           // 'increase_clicks', 'improve_readability', 'add_urgency'
-      targetAudience, // 'new_customers', 'vip', 'cart_abandoners'
-      keepBranding    // true/false
+      goal,
+      targetAudience,
+      keepBranding
     } = options;
     
-    const prompt = `Improve this email HTML for: ${goal || 'better engagement'}
-
+    const prompt = `Improve this email HTML for ${this.brand.name}, an artisanal pickle company.
+Goal: ${goal || 'better engagement'}
 Target audience: ${targetAudience || 'general'}
 ${keepBranding ? 'Keep all branding elements intact.' : ''}
 
 Current HTML (abbreviated):
 ${html.substring(0, 2000)}...
+
+IMPORTANT: We're an artisanal brand. Improvements should:
+- Enhance warmth and personal connection
+- NOT make it more aggressive or salesy
+- Focus on storytelling and craft
+- Keep mobile responsiveness
 
 Suggest improvements in JSON:
 {
@@ -595,16 +801,16 @@ Suggest improvements in JSON:
       "element": "subject/headline/cta/images/copy",
       "current": "What it is now",
       "suggested": "What it should be",
-      "reasoning": "Why this helps"
+      "reasoning": "Why this helps (artisanal context)"
     }
   ],
   "enhancedCopy": {
-    "headline": "Improved headline",
-    "cta": "Improved CTA text",
+    "headline": "Improved headline (warm, not salesy)",
+    "cta": "Improved CTA text (inviting, not pushy)",
     "preheader": "Improved preheader"
   },
-  "structuralChanges": ["Reorder sections", "Add social proof"],
-  "expectedImpact": "+X% clicks"
+  "structuralChanges": ["Suggestions that maintain artisanal feel"],
+  "expectedImpact": "+X% engagement"
 }`;
 
     try {
