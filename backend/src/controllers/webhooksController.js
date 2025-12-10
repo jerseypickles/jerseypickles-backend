@@ -1,21 +1,62 @@
-// backend/src/controllers/webhooksController.js - FIXED URL PARSING
+// backend/src/controllers/webhooksController.js
+// 📡 COMPLETE WEBHOOK CONTROLLER WITH LOGGING & MONITORING
 const Customer = require('../models/Customer');
 const Order = require('../models/Order');
 const EmailEvent = require('../models/EmailEvent');
 const EmailSend = require('../models/EmailSend');
 const Campaign = require('../models/Campaign');
+const WebhookLog = require('../models/WebhookLog');
 const AttributionService = require('../middleware/attributionTracking');
 const crypto = require('crypto');
+
+// Store for tracking abandoned carts (in production, use Redis)
+const abandonedCartTracker = new Map();
+
+// ==================== HELPER FUNCTIONS ====================
+
+const extractHeaders = (req) => ({
+  shopifyTopic: req.headers['x-shopify-topic'],
+  shopifyHmac: req.headers['x-shopify-hmac-sha256'],
+  shopifyShopDomain: req.headers['x-shopify-shop-domain'],
+  shopifyApiVersion: req.headers['x-shopify-api-version'],
+  shopifyWebhookId: req.headers['x-shopify-webhook-id']
+});
+
+const extractMetadata = (req) => ({
+  ip: req.ip || req.headers['x-forwarded-for'],
+  userAgent: req.headers['user-agent'],
+  contentLength: req.headers['content-length'],
+  receivedAt: new Date()
+});
 
 class WebhooksController {
   
   // ==================== SHOPIFY WEBHOOKS ====================
   
   async customerCreate(req, res) {
+    const topic = 'customers/create';
+    let webhookLog;
+    
     try {
       const shopifyCustomer = req.body;
       
+      // Log the webhook
+      webhookLog = await WebhookLog.logWebhook({
+        topic,
+        source: 'shopify',
+        shopifyId: shopifyCustomer.id?.toString(),
+        email: shopifyCustomer.email,
+        payload: shopifyCustomer,
+        headers: extractHeaders(req),
+        metadata: extractMetadata(req)
+      });
+      
       console.log('📥 Webhook: Customer Create', shopifyCustomer.id);
+      
+      await webhookLog.markProcessing();
+      
+      const actions = [];
+      const flowsTriggered = [];
       
       const customer = await Customer.findOneAndUpdate(
         { shopifyId: shopifyCustomer.id.toString() },
@@ -47,6 +88,12 @@ class WebhooksController {
       
       console.log('✅ Cliente creado/actualizado:', customer.email);
       
+      actions.push({
+        type: 'customer_upserted',
+        details: { customerId: customer._id, email: customer.email },
+        success: true
+      });
+      
       // FLOW TRIGGER: CUSTOMER_CREATED
       const isNewCustomer = !shopifyCustomer.created_at || 
         new Date(shopifyCustomer.created_at) > new Date(Date.now() - 60000);
@@ -56,7 +103,7 @@ class WebhooksController {
         
         try {
           const flowService = require('../services/flowService');
-          await flowService.processTrigger('customer_created', {
+          const result = await flowService.processTrigger('customer_created', {
             customerId: customer._id,
             email: customer.email,
             firstName: customer.firstName,
@@ -66,24 +113,68 @@ class WebhooksController {
             tags: customer.tags,
             address: customer.address
           });
+          
+          if (result?.flowsTriggered) {
+            result.flowsTriggered.forEach(f => {
+              flowsTriggered.push({
+                flowId: f.flowId,
+                flowName: f.flowName,
+                executionId: f.executionId
+              });
+            });
+          }
+          
+          actions.push({
+            type: 'flow_trigger_customer_created',
+            details: { flowsTriggered: flowsTriggered.length },
+            success: true
+          });
+          
         } catch (err) {
           console.log('Flow service not available:', err.message);
+          actions.push({
+            type: 'flow_trigger_customer_created',
+            details: { error: err.message },
+            success: false,
+            error: err.message
+          });
         }
       }
       
-      res.status(200).json({ success: true });
+      await webhookLog.markProcessed(actions, flowsTriggered);
+      
+      res.status(200).json({ success: true, logId: webhookLog._id });
       
     } catch (error) {
       console.error('❌ Error en customerCreate:', error);
+      if (webhookLog) await webhookLog.markFailed(error);
       res.status(500).json({ error: error.message });
     }
   }
 
   async customerUpdate(req, res) {
+    const topic = 'customers/update';
+    let webhookLog;
+    
     try {
       const shopifyCustomer = req.body;
       
+      webhookLog = await WebhookLog.logWebhook({
+        topic,
+        source: 'shopify',
+        shopifyId: shopifyCustomer.id?.toString(),
+        email: shopifyCustomer.email,
+        payload: shopifyCustomer,
+        headers: extractHeaders(req),
+        metadata: extractMetadata(req)
+      });
+      
       console.log('📥 Webhook: Customer Update', shopifyCustomer.id);
+      
+      await webhookLog.markProcessing();
+      
+      const actions = [];
+      const flowsTriggered = [];
       
       const previousCustomer = await Customer.findOne({ 
         shopifyId: shopifyCustomer.id.toString() 
@@ -115,6 +206,12 @@ class WebhooksController {
       
       console.log('✅ Cliente actualizado:', customer.email);
       
+      actions.push({
+        type: 'customer_updated',
+        details: { customerId: customer._id, email: customer.email },
+        success: true
+      });
+      
       // FLOW TRIGGER: CUSTOMER_TAG_ADDED
       const currentTags = customer.tags || [];
       const addedTags = currentTags.filter(tag => !previousTags.includes(tag));
@@ -127,34 +224,78 @@ class WebhooksController {
           
           try {
             const flowService = require('../services/flowService');
-            await flowService.processTrigger('customer_tag_added', {
+            const result = await flowService.processTrigger('customer_tag_added', {
               customerId: customer._id,
               email: customer.email,
               tag: tag,
               allTags: currentTags,
               previousTags: previousTags
             });
+            
+            if (result?.flowsTriggered) {
+              result.flowsTriggered.forEach(f => {
+                flowsTriggered.push({
+                  flowId: f.flowId,
+                  flowName: f.flowName,
+                  executionId: f.executionId
+                });
+              });
+            }
+            
+            actions.push({
+              type: 'flow_trigger_tag_added',
+              details: { tag, flowsTriggered: result?.flowsTriggered?.length || 0 },
+              success: true
+            });
+            
           } catch (err) {
             console.log('Flow service not available:', err.message);
+            actions.push({
+              type: 'flow_trigger_tag_added',
+              details: { tag, error: err.message },
+              success: false,
+              error: err.message
+            });
           }
         }
       }
       
-      res.status(200).json({ success: true });
+      await webhookLog.markProcessed(actions, flowsTriggered);
+      
+      res.status(200).json({ success: true, logId: webhookLog._id });
       
     } catch (error) {
       console.error('❌ Error en customerUpdate:', error);
+      if (webhookLog) await webhookLog.markFailed(error);
       res.status(500).json({ error: error.message });
     }
   }
 
   async orderCreate(req, res) {
+    const topic = 'orders/create';
+    let webhookLog;
+    
     try {
       const shopifyOrder = req.body;
+      
+      webhookLog = await WebhookLog.logWebhook({
+        topic,
+        source: 'shopify',
+        shopifyId: shopifyOrder.id?.toString(),
+        email: shopifyOrder.email || shopifyOrder.customer?.email,
+        payload: shopifyOrder,
+        headers: extractHeaders(req),
+        metadata: extractMetadata(req)
+      });
       
       console.log('\n💰 ==================== NEW ORDER ====================');
       console.log(`📥 Webhook: Order Create #${shopifyOrder.order_number}`);
       console.log(`💵 Order Value: $${shopifyOrder.total_price} ${shopifyOrder.currency}`);
+      
+      await webhookLog.markProcessing();
+      
+      const actions = [];
+      const flowsTriggered = [];
       
       // Buscar o crear cliente
       let customer = await Customer.findOne({ 
@@ -170,6 +311,12 @@ class WebhooksController {
           acceptsMarketing: shopifyOrder.customer.accepts_marketing || false
         });
         console.log('✅ Nuevo cliente creado:', customer.email);
+        
+        actions.push({
+          type: 'customer_created_from_order',
+          details: { email: customer.email },
+          success: true
+        });
       }
       
       // Crear orden
@@ -199,6 +346,12 @@ class WebhooksController {
         shopifyData: shopifyOrder
       });
       
+      actions.push({
+        type: 'order_created',
+        details: { orderId: order._id, orderNumber: order.orderNumber, total: order.totalPrice },
+        success: true
+      });
+      
       const previousOrdersCount = customer.ordersCount || 0;
       
       // Actualizar métricas del cliente
@@ -212,6 +365,36 @@ class WebhooksController {
       
       console.log('✅ Orden creada en DB:', order.orderNumber);
       
+      // ==================== CANCEL ABANDONED CART TRACKING ====================
+      const checkoutToken = shopifyOrder.checkout_token;
+      
+      if (checkoutToken && abandonedCartTracker.has(checkoutToken)) {
+        clearTimeout(abandonedCartTracker.get(checkoutToken).timer);
+        abandonedCartTracker.delete(checkoutToken);
+        
+        actions.push({
+          type: 'abandoned_cart_cancelled',
+          details: { checkoutToken, reason: 'order_completed' },
+          success: true
+        });
+        
+        console.log('✅ Abandoned cart tracking cancelled - order completed');
+        
+        // Mark any pending abandoned cart logs as recovered
+        await WebhookLog.updateMany(
+          { 
+            'cartDetails.token': checkoutToken,
+            'cartDetails.isRecovered': false 
+          },
+          { 
+            $set: { 
+              'cartDetails.isRecovered': true,
+              'cartDetails.recoveredAt': new Date()
+            }
+          }
+        );
+      }
+      
       // ==================== REVENUE ATTRIBUTION ====================
       
       const attribution = AttributionService.getAttribution(req);
@@ -221,7 +404,7 @@ class WebhooksController {
       let customerId = customer._id;
       let attributionMethod = 'none';
       
-      // Método 1: Cookie (raro que funcione con webhooks, pero por si acaso)
+      // Método 1: Cookie
       if (attribution) {
         campaignId = attribution.campaignId;
         customerId = attribution.customerId;
@@ -230,10 +413,8 @@ class WebhooksController {
       }
       
       // Método 2: UTM Parameters en landing_site
-      // ✅ FIX: Usar new URL() en lugar de URLSearchParams directo
       if (!campaignId && !flowId && shopifyOrder.landing_site) {
         try {
-          // landing_site puede ser URL completa o path relativo
           const url = new URL(shopifyOrder.landing_site, 'https://jerseypickles.com');
           const utmCampaign = url.searchParams.get('utm_campaign');
           
@@ -271,12 +452,11 @@ class WebhooksController {
         }
       }
       
-      // Método 4: Last click por EMAIL (más confiable que por customer._id)
+      // Método 4: Last click por EMAIL
       if (!campaignId && !flowId) {
         const sevenDaysAgo = new Date();
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
         
-        // Primero intentar por email (MÁS CONFIABLE)
         if (customer.email) {
           const lastClickEvent = await EmailEvent.findOne({
             email: { $regex: new RegExp(`^${customer.email}$`, 'i') },
@@ -292,7 +472,6 @@ class WebhooksController {
           }
         }
         
-        // Si no encontró por email, intentar por customer ID (ambos formatos)
         if (!campaignId) {
           const lastClickEvent = await EmailEvent.findOne({
             $or: [
@@ -312,7 +491,19 @@ class WebhooksController {
         }
       }
       
-      // Log final de attribution
+      // Log attribution action
+      actions.push({
+        type: 'revenue_attribution',
+        details: { 
+          method: attributionMethod, 
+          campaignId: campaignId?.toString() || null,
+          flowId: flowId || null,
+          revenue: parseFloat(shopifyOrder.total_price)
+        },
+        success: !!campaignId || !!flowId
+      });
+      
+      // Process attribution
       if (campaignId) {
         console.log(`\n💰 ═══════════════════════════════════════════`);
         console.log(`   ATTRIBUTING REVENUE TO CAMPAIGN`);
@@ -321,7 +512,6 @@ class WebhooksController {
         console.log(`   Revenue: $${shopifyOrder.total_price}`);
         console.log(`═══════════════════════════════════════════════`);
         
-        // Actualizar la orden con attribution
         await Order.findByIdAndUpdate(order._id, {
           'attribution.campaign': campaignId,
           'attribution.source': attributionMethod === 'cookie' ? 'email_click' : 
@@ -330,7 +520,6 @@ class WebhooksController {
                                 attributionMethod.startsWith('last_click') ? 'email_click' : 'unknown',
           'attribution.clickedAt': new Date()
         });
-        console.log(`   ✅ Order ${order.orderNumber} attributed to campaign`);
         
         await EmailEvent.create({
           campaign: campaignId,
@@ -360,19 +549,11 @@ class WebhooksController {
         await Campaign.updateStats(campaignId, 'purchased', parseFloat(shopifyOrder.total_price));
         
         console.log(`✅ Revenue tracked successfully!`);
-      } else if (flowId) {
-        console.log(`\n💰 ATTRIBUTING REVENUE TO FLOW: ${flowId}`);
-      } else {
-        console.log(`\n⚠️ NO ATTRIBUTION FOUND for order #${shopifyOrder.order_number}`);
-        console.log(`   Customer: ${customer.email}`);
-        console.log(`   Landing site: ${shopifyOrder.landing_site || 'N/A'}`);
       }
       
-      // Revenue tracking para flows
+      // Flow revenue tracking
       if (flowId) {
-        console.log(`\n💰 ATTRIBUTING REVENUE TO FLOW`);
-        console.log(`   Flow: ${flowId}`);
-        console.log(`   Revenue: $${shopifyOrder.total_price}`);
+        console.log(`\n💰 ATTRIBUTING REVENUE TO FLOW: ${flowId}`);
         
         try {
           const FlowExecution = require('../models/FlowExecution');
@@ -412,7 +593,7 @@ class WebhooksController {
       
       try {
         const flowService = require('../services/flowService');
-        await flowService.processTrigger('order_placed', {
+        const result = await flowService.processTrigger('order_placed', {
           customerId: customer._id,
           orderId: order._id,
           orderNumber: order.orderNumber,
@@ -425,25 +606,66 @@ class WebhooksController {
           email: customer.email,
           customerName: `${customer.firstName} ${customer.lastName}`.trim()
         });
+        
+        if (result?.flowsTriggered) {
+          result.flowsTriggered.forEach(f => {
+            flowsTriggered.push({
+              flowId: f.flowId,
+              flowName: f.flowName,
+              executionId: f.executionId
+            });
+          });
+        }
+        
+        actions.push({
+          type: 'flow_trigger_order_placed',
+          details: { flowsTriggered: result?.flowsTriggered?.length || 0 },
+          success: true
+        });
+        
       } catch (err) {
         console.log('Flow service not available:', err.message);
+        actions.push({
+          type: 'flow_trigger_order_placed',
+          details: { error: err.message },
+          success: false,
+          error: err.message
+        });
       }
       
       console.log(`====================================================\n`);
       
-      res.status(200).json({ success: true });
+      await webhookLog.markProcessed(actions, flowsTriggered);
+      
+      res.status(200).json({ success: true, logId: webhookLog._id });
       
     } catch (error) {
       console.error('❌ Error en orderCreate:', error);
+      if (webhookLog) await webhookLog.markFailed(error);
       res.status(500).json({ error: error.message });
     }
   }
 
   async orderUpdate(req, res) {
+    const topic = 'orders/update';
+    let webhookLog;
+    
     try {
       const shopifyOrder = req.body;
       
+      webhookLog = await WebhookLog.logWebhook({
+        topic,
+        source: 'shopify',
+        shopifyId: shopifyOrder.id?.toString(),
+        email: shopifyOrder.email,
+        payload: shopifyOrder,
+        headers: extractHeaders(req),
+        metadata: extractMetadata(req)
+      });
+      
       console.log('📥 Webhook: Order Update', shopifyOrder.id);
+      
+      await webhookLog.markProcessing();
       
       await Order.findOneAndUpdate(
         { shopifyId: shopifyOrder.id.toString() },
@@ -457,18 +679,42 @@ class WebhooksController {
       
       console.log('✅ Orden actualizada');
       
-      res.status(200).json({ success: true });
+      await webhookLog.markProcessed([
+        { type: 'order_updated', details: { orderId: shopifyOrder.id }, success: true }
+      ], []);
+      
+      res.status(200).json({ success: true, logId: webhookLog._id });
       
     } catch (error) {
       console.error('❌ Error en orderUpdate:', error);
+      if (webhookLog) await webhookLog.markFailed(error);
       res.status(500).json({ error: error.message });
     }
   }
   
   async orderFulfilled(req, res) {
+    const topic = 'orders/fulfilled';
+    let webhookLog;
+    
     try {
       const order = req.body;
+      
+      webhookLog = await WebhookLog.logWebhook({
+        topic,
+        source: 'shopify',
+        shopifyId: order.id?.toString(),
+        email: order.email || order.customer?.email,
+        payload: order,
+        headers: extractHeaders(req),
+        metadata: extractMetadata(req)
+      });
+      
       console.log('📦 Webhook: Order Fulfilled', order.id);
+      
+      await webhookLog.markProcessing();
+      
+      const actions = [];
+      const flowsTriggered = [];
       
       const customer = await Customer.findOne({ 
         shopifyId: order.customer?.id?.toString() 
@@ -477,7 +723,7 @@ class WebhooksController {
       if (customer) {
         try {
           const flowService = require('../services/flowService');
-          await flowService.processTrigger('order_fulfilled', {
+          const result = await flowService.processTrigger('order_fulfilled', {
             customerId: customer._id,
             orderId: order.id,
             orderNumber: order.order_number,
@@ -485,22 +731,71 @@ class WebhooksController {
             trackingUrl: order.fulfillments?.[0]?.tracking_url,
             email: customer.email
           });
+          
+          if (result?.flowsTriggered) {
+            result.flowsTriggered.forEach(f => {
+              flowsTriggered.push({
+                flowId: f.flowId,
+                flowName: f.flowName,
+                executionId: f.executionId
+              });
+            });
+          }
+          
+          actions.push({
+            type: 'flow_trigger_order_fulfilled',
+            details: { 
+              trackingNumber: order.fulfillments?.[0]?.tracking_number,
+              flowsTriggered: flowsTriggered.length 
+            },
+            success: true
+          });
+          
         } catch (err) {
           console.log('Flow service not available:', err.message);
+          actions.push({
+            type: 'flow_trigger_order_fulfilled',
+            details: { error: err.message },
+            success: false,
+            error: err.message
+          });
         }
       }
       
-      res.status(200).json({ success: true });
+      await webhookLog.markProcessed(actions, flowsTriggered);
+      
+      res.status(200).json({ success: true, logId: webhookLog._id });
+      
     } catch (error) {
       console.error('❌ Error en orderFulfilled:', error);
+      if (webhookLog) await webhookLog.markFailed(error);
       res.status(500).json({ error: error.message });
     }
   }
 
   async orderCancelled(req, res) {
+    const topic = 'orders/cancelled';
+    let webhookLog;
+    
     try {
       const order = req.body;
+      
+      webhookLog = await WebhookLog.logWebhook({
+        topic,
+        source: 'shopify',
+        shopifyId: order.id?.toString(),
+        email: order.email || order.customer?.email,
+        payload: order,
+        headers: extractHeaders(req),
+        metadata: extractMetadata(req)
+      });
+      
       console.log('❌ Webhook: Order Cancelled', order.id);
+      
+      await webhookLog.markProcessing();
+      
+      const actions = [];
+      const flowsTriggered = [];
       
       const customer = await Customer.findOne({ 
         shopifyId: order.customer?.id?.toString() 
@@ -509,7 +804,7 @@ class WebhooksController {
       if (customer) {
         try {
           const flowService = require('../services/flowService');
-          await flowService.processTrigger('order_cancelled', {
+          const result = await flowService.processTrigger('order_cancelled', {
             customerId: customer._id,
             orderId: order.id,
             orderNumber: order.order_number,
@@ -517,35 +812,99 @@ class WebhooksController {
             refundAmount: order.total_price,
             email: customer.email
           });
+          
+          if (result?.flowsTriggered) {
+            result.flowsTriggered.forEach(f => flowsTriggered.push(f));
+          }
+          
+          actions.push({
+            type: 'flow_trigger_order_cancelled',
+            details: { cancelReason: order.cancel_reason },
+            success: true
+          });
+          
         } catch (err) {
           console.log('Flow service not available:', err.message);
         }
       }
       
-      res.status(200).json({ success: true });
+      await webhookLog.markProcessed(actions, flowsTriggered);
+      
+      res.status(200).json({ success: true, logId: webhookLog._id });
+      
     } catch (error) {
       console.error('❌ Error en orderCancelled:', error);
+      if (webhookLog) await webhookLog.markFailed(error);
       res.status(500).json({ error: error.message });
     }
   }
 
   async orderPaid(req, res) {
+    const topic = 'orders/paid';
+    let webhookLog;
+    
     try {
       const order = req.body;
+      
+      webhookLog = await WebhookLog.logWebhook({
+        topic,
+        source: 'shopify',
+        shopifyId: order.id?.toString(),
+        email: order.email,
+        payload: order,
+        headers: extractHeaders(req),
+        metadata: extractMetadata(req)
+      });
+      
       console.log('💰 Webhook: Order Paid', order.id);
       
-      res.status(200).json({ success: true });
+      await webhookLog.markProcessed([
+        { type: 'order_paid', details: { orderId: order.id }, success: true }
+      ], []);
+      
+      res.status(200).json({ success: true, logId: webhookLog._id });
+      
     } catch (error) {
       console.error('❌ Error en orderPaid:', error);
+      if (webhookLog) await webhookLog.markFailed(error);
       res.status(500).json({ error: error.message });
     }
   }
 
+  // ==================== CHECKOUT WEBHOOKS (Abandoned Cart) ====================
+
   async checkoutCreate(req, res) {
+    const topic = 'checkouts/create';
+    let webhookLog;
+    
     try {
       const checkout = req.body;
+      const checkoutToken = checkout.token;
+      const email = checkout.email || checkout.customer?.email;
+      
+      webhookLog = await WebhookLog.logWebhook({
+        topic,
+        source: 'shopify',
+        shopifyId: checkout.id?.toString(),
+        email,
+        payload: checkout,
+        headers: extractHeaders(req),
+        metadata: extractMetadata(req),
+        cartDetails: {
+          token: checkoutToken,
+          totalPrice: parseFloat(checkout.total_price || 0),
+          itemCount: checkout.line_items?.length || 0,
+          customerEmail: email
+        }
+      });
+      
       console.log('🛒 Webhook: Checkout Created', checkout.id);
       
+      await webhookLog.markProcessing();
+      
+      const actions = [];
+      
+      // Update customer cart info
       if (checkout.customer) {
         await Customer.findOneAndUpdate(
           { shopifyId: checkout.customer.id.toString() },
@@ -562,25 +921,89 @@ class WebhooksController {
             }
           }
         );
+        
+        actions.push({
+          type: 'customer_cart_updated',
+          details: { cartValue: parseFloat(checkout.total_price || 0) },
+          success: true
+        });
       }
       
-      res.status(200).json({ success: true });
+      // Start abandonment tracking
+      if (email) {
+        const abandonmentDelay = 60 * 60 * 1000; // 1 hour
+        
+        // Clear existing timer
+        if (abandonedCartTracker.has(checkoutToken)) {
+          clearTimeout(abandonedCartTracker.get(checkoutToken).timer);
+        }
+        
+        // Set new timer
+        const timer = setTimeout(async () => {
+          await this.processAbandonedCart(checkoutToken, email, checkout);
+        }, abandonmentDelay);
+        
+        abandonedCartTracker.set(checkoutToken, {
+          timer,
+          email,
+          payload: checkout,
+          createdAt: new Date()
+        });
+        
+        actions.push({
+          type: 'abandonment_tracking_started',
+          details: { checkoutToken, email, delayMinutes: 60 },
+          success: true
+        });
+        
+        console.log(`⏱️  Abandonment tracking started for ${email}`);
+      }
+      
+      await webhookLog.markProcessed(actions, []);
+      
+      res.status(200).json({ success: true, logId: webhookLog._id });
+      
     } catch (error) {
       console.error('❌ Error en checkoutCreate:', error);
+      if (webhookLog) await webhookLog.markFailed(error);
       res.status(500).json({ error: error.message });
     }
   }
 
   async checkoutUpdate(req, res) {
+    const topic = 'checkouts/update';
+    let webhookLog;
+    
     try {
       const checkout = req.body;
+      const checkoutToken = checkout.token;
+      const email = checkout.email || checkout.customer?.email;
+      
+      webhookLog = await WebhookLog.logWebhook({
+        topic,
+        source: 'shopify',
+        shopifyId: checkout.id?.toString(),
+        email,
+        payload: checkout,
+        headers: extractHeaders(req),
+        metadata: extractMetadata(req)
+      });
+      
       console.log('🛒 Webhook: Checkout Updated', checkout.id);
       
+      await webhookLog.markProcessing();
+      
+      const actions = [];
+      
       if (!checkout.customer) {
+        await webhookLog.markProcessed([
+          { type: 'checkout_update_no_customer', success: true }
+        ], []);
         return res.status(200).json({ success: true });
       }
       
       if (checkout.completed_at) {
+        // Checkout completed - clear tracking
         await Customer.findOneAndUpdate(
           { shopifyId: checkout.customer.id.toString() },
           {
@@ -591,7 +1014,35 @@ class WebhooksController {
             }
           }
         );
+        
+        // Cancel abandonment tracking
+        if (abandonedCartTracker.has(checkoutToken)) {
+          clearTimeout(abandonedCartTracker.get(checkoutToken).timer);
+          abandonedCartTracker.delete(checkoutToken);
+          
+          actions.push({
+            type: 'abandonment_tracking_cancelled',
+            details: { reason: 'checkout_completed' },
+            success: true
+          });
+        }
+        
+        // Mark as recovered
+        await WebhookLog.updateMany(
+          { 
+            'cartDetails.token': checkoutToken,
+            'cartDetails.isRecovered': false 
+          },
+          { 
+            $set: { 
+              'cartDetails.isRecovered': true,
+              'cartDetails.recoveredAt': new Date()
+            }
+          }
+        );
+        
       } else {
+        // Checkout still in progress - reset timer
         await Customer.findOneAndUpdate(
           { shopifyId: checkout.customer.id.toString() },
           {
@@ -601,19 +1052,192 @@ class WebhooksController {
             }
           }
         );
+        
+        // Reset abandonment timer
+        if (abandonedCartTracker.has(checkoutToken)) {
+          const tracked = abandonedCartTracker.get(checkoutToken);
+          clearTimeout(tracked.timer);
+          
+          const abandonmentDelay = 60 * 60 * 1000;
+          const timer = setTimeout(async () => {
+            await this.processAbandonedCart(checkoutToken, email || tracked.email, checkout);
+          }, abandonmentDelay);
+          
+          abandonedCartTracker.set(checkoutToken, {
+            ...tracked,
+            timer,
+            payload: checkout,
+            updatedAt: new Date()
+          });
+          
+          actions.push({
+            type: 'abandonment_timer_reset',
+            details: { checkoutToken },
+            success: true
+          });
+        }
       }
       
-      res.status(200).json({ success: true });
+      await webhookLog.markProcessed(actions, []);
+      
+      res.status(200).json({ success: true, logId: webhookLog._id });
+      
     } catch (error) {
       console.error('❌ Error en checkoutUpdate:', error);
+      if (webhookLog) await webhookLog.markFailed(error);
       res.status(500).json({ error: error.message });
     }
   }
 
+  /**
+   * Process an abandoned cart - called after timeout
+   */
+  async processAbandonedCart(checkoutToken, email, checkoutData) {
+    console.log(`\n🛒 ==================== ABANDONED CART ====================`);
+    console.log(`   Token: ${checkoutToken}`);
+    console.log(`   Email: ${email}`);
+    
+    try {
+      // Log the abandonment
+      const webhookLog = await WebhookLog.logWebhook({
+        topic: 'cart_abandoned',
+        source: 'shopify',
+        shopifyId: checkoutToken,
+        email,
+        payload: checkoutData,
+        headers: {},
+        metadata: { receivedAt: new Date() },
+        cartDetails: {
+          token: checkoutToken,
+          totalPrice: parseFloat(checkoutData.total_price || 0),
+          itemCount: checkoutData.line_items?.length || 0,
+          customerEmail: email,
+          abandonedAt: new Date()
+        }
+      });
+      
+      await webhookLog.markProcessing();
+      
+      const actions = [];
+      const flowsTriggered = [];
+      
+      // Find or create customer
+      let customer = await Customer.findOne({ email: email?.toLowerCase() });
+      
+      if (!customer && email) {
+        customer = new Customer({
+          email: email.toLowerCase(),
+          firstName: checkoutData.shipping_address?.first_name || checkoutData.billing_address?.first_name,
+          lastName: checkoutData.shipping_address?.last_name || checkoutData.billing_address?.last_name,
+          source: 'abandoned_cart'
+        });
+        await customer.save();
+        
+        actions.push({
+          type: 'customer_created_from_cart',
+          details: { email },
+          success: true
+        });
+      }
+      
+      // Prepare cart data
+      const cartItems = checkoutData.line_items?.map(item => ({
+        productId: item.product_id,
+        variantId: item.variant_id,
+        title: item.title,
+        quantity: item.quantity,
+        price: item.price,
+        image: item.image?.src || item.featured_image?.url
+      })) || [];
+      
+      // Trigger abandoned cart flows
+      try {
+        const flowService = require('../services/flowService');
+        const result = await flowService.processTrigger('cart_abandoned', {
+          customerId: customer?._id,
+          email: customer?.email || email,
+          firstName: customer?.firstName,
+          cart: {
+            token: checkoutToken,
+            checkoutUrl: checkoutData.abandoned_checkout_url || 
+                        `https://${process.env.SHOPIFY_SHOP_DOMAIN || 'jerseypickles.myshopify.com'}/checkouts/${checkoutToken}`,
+            totalPrice: checkoutData.total_price,
+            itemCount: cartItems.length,
+            items: cartItems
+          },
+          abandoned: {
+            productNames: cartItems.map(i => i.title).join(', '),
+            firstProductName: cartItems[0]?.title || 'your items',
+            firstProductImage: cartItems[0]?.image,
+            firstProductPrice: cartItems[0]?.price
+          }
+        });
+        
+        if (result?.flowsTriggered) {
+          result.flowsTriggered.forEach(f => {
+            flowsTriggered.push({
+              flowId: f.flowId,
+              flowName: f.flowName,
+              executionId: f.executionId
+            });
+          });
+        }
+        
+        actions.push({
+          type: 'abandoned_cart_flow_triggered',
+          details: { flowsTriggered: flowsTriggered.length },
+          success: true
+        });
+        
+        console.log(`   🚀 Flows triggered: ${flowsTriggered.length}`);
+        
+      } catch (err) {
+        console.log(`   ⚠️ Flow service not available: ${err.message}`);
+        actions.push({
+          type: 'abandoned_cart_flow_trigger_failed',
+          details: { error: err.message },
+          success: false,
+          error: err.message
+        });
+      }
+      
+      await webhookLog.markProcessed(actions, flowsTriggered);
+      
+      // Clean up tracker
+      abandonedCartTracker.delete(checkoutToken);
+      
+      console.log(`   ✅ Abandoned cart processed successfully`);
+      console.log(`====================================================\n`);
+      
+    } catch (error) {
+      console.error('❌ Error processing abandoned cart:', error.message);
+    }
+  }
+
+  // ==================== OTHER SHOPIFY WEBHOOKS ====================
+
   async productUpdate(req, res) {
+    const topic = 'products/update';
+    let webhookLog;
+    
     try {
       const product = req.body;
+      
+      webhookLog = await WebhookLog.logWebhook({
+        topic,
+        source: 'shopify',
+        shopifyId: product.id?.toString(),
+        payload: product,
+        headers: extractHeaders(req),
+        metadata: extractMetadata(req)
+      });
+      
       console.log('📦 Webhook: Product Update', product.id);
+      
+      await webhookLog.markProcessing();
+      
+      const actions = [];
+      const flowsTriggered = [];
       
       const variants = product.variants || [];
       const nowInStock = variants.filter(v => 
@@ -624,28 +1248,61 @@ class WebhooksController {
       if (nowInStock.length > 0) {
         try {
           const flowService = require('../services/flowService');
-          await flowService.processTrigger('product_back_in_stock', {
+          const result = await flowService.processTrigger('product_back_in_stock', {
             productId: product.id,
             productTitle: product.title,
             productHandle: product.handle,
             variants: nowInStock
           });
+          
+          if (result?.flowsTriggered) {
+            result.flowsTriggered.forEach(f => flowsTriggered.push(f));
+          }
+          
+          actions.push({
+            type: 'back_in_stock_triggered',
+            details: { productId: product.id, variantsBack: nowInStock.length },
+            success: true
+          });
+          
         } catch (err) {
           console.log('Flow service not available:', err.message);
         }
       }
       
-      res.status(200).json({ success: true });
+      await webhookLog.markProcessed(actions, flowsTriggered);
+      
+      res.status(200).json({ success: true, logId: webhookLog._id });
+      
     } catch (error) {
       console.error('❌ Error en productUpdate:', error);
+      if (webhookLog) await webhookLog.markFailed(error);
       res.status(500).json({ error: error.message });
     }
   }
 
   async refundCreate(req, res) {
+    const topic = 'refunds/create';
+    let webhookLog;
+    
     try {
       const refund = req.body;
+      
+      webhookLog = await WebhookLog.logWebhook({
+        topic,
+        source: 'shopify',
+        shopifyId: refund.id?.toString(),
+        payload: refund,
+        headers: extractHeaders(req),
+        metadata: extractMetadata(req)
+      });
+      
       console.log('💸 Webhook: Refund Created', refund.id);
+      
+      await webhookLog.markProcessing();
+      
+      const actions = [];
+      const flowsTriggered = [];
       
       const order = await Order.findOne({ 
         shopifyId: refund.order_id?.toString() 
@@ -657,22 +1314,417 @@ class WebhooksController {
         if (customer) {
           try {
             const flowService = require('../services/flowService');
-            await flowService.processTrigger('order_refunded', {
+            const result = await flowService.processTrigger('order_refunded', {
               customerId: customer._id,
               orderId: order._id,
               refundAmount: parseFloat(refund.transactions?.[0]?.amount || 0),
               refundReason: refund.note,
               email: customer.email
             });
+            
+            if (result?.flowsTriggered) {
+              result.flowsTriggered.forEach(f => flowsTriggered.push(f));
+            }
+            
+            actions.push({
+              type: 'refund_flow_triggered',
+              details: { refundAmount: parseFloat(refund.transactions?.[0]?.amount || 0) },
+              success: true
+            });
+            
           } catch (err) {
             console.log('Flow service not available:', err.message);
           }
         }
       }
       
-      res.status(200).json({ success: true });
+      await webhookLog.markProcessed(actions, flowsTriggered);
+      
+      res.status(200).json({ success: true, logId: webhookLog._id });
+      
     } catch (error) {
       console.error('❌ Error en refundCreate:', error);
+      if (webhookLog) await webhookLog.markFailed(error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // ==================== MONITORING ENDPOINTS ====================
+
+  async getWebhookLogs(req, res) {
+    try {
+      const { 
+        limit = 50, 
+        topic, 
+        status,
+        hours = 24 
+      } = req.query;
+      
+      const since = new Date(Date.now() - parseInt(hours) * 60 * 60 * 1000);
+      
+      const logs = await WebhookLog.getRecent({
+        limit: parseInt(limit),
+        topic,
+        status,
+        since
+      });
+      
+      res.json({
+        success: true,
+        count: logs.length,
+        logs
+      });
+      
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async getWebhookStats(req, res) {
+    try {
+      const { hours = 24 } = req.query;
+      
+      const stats = await WebhookLog.getStats(parseInt(hours));
+      
+      const since = new Date(Date.now() - parseInt(hours) * 60 * 60 * 1000);
+      const totals = await WebhookLog.aggregate([
+        { $match: { createdAt: { $gte: since } } },
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 }
+          }
+        }
+      ]);
+      
+      // Abandoned cart recovery stats
+      const cartStats = await WebhookLog.aggregate([
+        { 
+          $match: { 
+            topic: 'cart_abandoned',
+            createdAt: { $gte: since }
+          } 
+        },
+        {
+          $group: {
+            _id: '$cartDetails.isRecovered',
+            count: { $sum: 1 },
+            totalValue: { $sum: '$cartDetails.totalPrice' }
+          }
+        }
+      ]);
+      
+      res.json({
+        success: true,
+        period: `Last ${hours} hours`,
+        byTopic: stats,
+        byStatus: totals,
+        abandonedCarts: {
+          total: cartStats.reduce((sum, s) => sum + s.count, 0),
+          recovered: cartStats.find(s => s._id === true)?.count || 0,
+          recoveredValue: cartStats.find(s => s._id === true)?.totalValue || 0,
+          pending: cartStats.find(s => s._id === false)?.count || 0
+        }
+      });
+      
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async getWebhookLog(req, res) {
+    try {
+      const { id } = req.params;
+      
+      const log = await WebhookLog.findById(id)
+        .populate('processing.flowsTriggered.flowId', 'name')
+        .lean();
+      
+      if (!log) {
+        return res.status(404).json({ error: 'Log not found' });
+      }
+      
+      res.json({ success: true, log });
+      
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async getAbandonedCartStatus(req, res) {
+    try {
+      const trackedCarts = [];
+      
+      abandonedCartTracker.forEach((value, key) => {
+        trackedCarts.push({
+          token: key,
+          email: value.email,
+          createdAt: value.createdAt,
+          updatedAt: value.updatedAt,
+          cartValue: parseFloat(value.payload?.total_price || 0),
+          itemCount: value.payload?.line_items?.length || 0
+        });
+      });
+      
+      res.json({
+        success: true,
+        count: trackedCarts.length,
+        carts: trackedCarts
+      });
+      
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async testWebhook(req, res) {
+    try {
+      const { type, email, data } = req.body;
+      
+      console.log(`\n🧪 ==================== TEST WEBHOOK ====================`);
+      console.log(`   Type: ${type}`);
+      console.log(`   Email: ${email}`);
+      
+      let webhookLog;
+      const actions = [];
+      const flowsTriggered = [];
+      
+      switch (type) {
+        case 'customer_created':
+          webhookLog = await WebhookLog.logWebhook({
+            topic: 'customers/create',
+            source: 'test',
+            email,
+            payload: {
+              id: `test_${Date.now()}`,
+              email,
+              first_name: data?.firstName || 'Test',
+              last_name: data?.lastName || 'Customer',
+              created_at: new Date().toISOString(),
+              accepts_marketing: true,
+              ...data
+            },
+            headers: {},
+            metadata: { receivedAt: new Date(), ip: 'test' }
+          });
+          
+          // Try to trigger flows
+          try {
+            let customer = await Customer.findOne({ email: email?.toLowerCase() });
+            
+            if (!customer) {
+              customer = await Customer.create({
+                email: email.toLowerCase(),
+                firstName: data?.firstName || 'Test',
+                lastName: data?.lastName || 'Customer',
+                source: 'test'
+              });
+              
+              actions.push({
+                type: 'test_customer_created',
+                details: { email },
+                success: true
+              });
+            }
+            
+            const flowService = require('../services/flowService');
+            const result = await flowService.processTrigger('customer_created', {
+              customerId: customer._id,
+              email: customer.email,
+              firstName: customer.firstName,
+              source: 'test'
+            });
+            
+            if (result?.flowsTriggered) {
+              result.flowsTriggered.forEach(f => flowsTriggered.push(f));
+            }
+            
+            actions.push({
+              type: 'test_flow_triggered',
+              details: { flowsTriggered: flowsTriggered.length },
+              success: true
+            });
+            
+          } catch (err) {
+            actions.push({
+              type: 'test_flow_trigger_failed',
+              details: { error: err.message },
+              success: false,
+              error: err.message
+            });
+          }
+          break;
+          
+        case 'cart_abandoned':
+          webhookLog = await WebhookLog.logWebhook({
+            topic: 'cart_abandoned',
+            source: 'test',
+            email,
+            payload: {
+              token: `test_cart_${Date.now()}`,
+              email,
+              total_price: data?.totalPrice || '49.99',
+              line_items: data?.items || [
+                { title: 'Garlic Dill Spears', quantity: 1, price: '15.99', product_id: '123' },
+                { title: 'Cucumber Salad', quantity: 2, price: '16.99', product_id: '456' }
+              ],
+              abandoned_checkout_url: `https://jerseypickles.com/checkouts/test_${Date.now()}`,
+              ...data
+            },
+            headers: {},
+            metadata: { receivedAt: new Date(), ip: 'test' },
+            cartDetails: {
+              token: `test_cart_${Date.now()}`,
+              totalPrice: parseFloat(data?.totalPrice || 49.99),
+              itemCount: data?.items?.length || 2,
+              customerEmail: email,
+              abandonedAt: new Date()
+            }
+          });
+          
+          // Try to trigger flows
+          try {
+            let customer = await Customer.findOne({ email: email?.toLowerCase() });
+            
+            if (!customer) {
+              customer = await Customer.create({
+                email: email.toLowerCase(),
+                source: 'test_abandoned_cart'
+              });
+            }
+            
+            const flowService = require('../services/flowService');
+            const result = await flowService.processTrigger('cart_abandoned', {
+              customerId: customer._id,
+              email: customer.email,
+              cart: {
+                token: `test_cart_${Date.now()}`,
+                checkoutUrl: 'https://jerseypickles.com/checkouts/test',
+                totalPrice: data?.totalPrice || '49.99',
+                itemCount: 2,
+                items: [
+                  { title: 'Garlic Dill Spears', quantity: 1, price: '15.99' },
+                  { title: 'Cucumber Salad', quantity: 2, price: '16.99' }
+                ]
+              },
+              abandoned: {
+                productNames: 'Garlic Dill Spears, Cucumber Salad',
+                firstProductName: 'Garlic Dill Spears',
+                firstProductPrice: '15.99'
+              }
+            });
+            
+            if (result?.flowsTriggered) {
+              result.flowsTriggered.forEach(f => flowsTriggered.push(f));
+            }
+            
+            actions.push({
+              type: 'test_abandoned_cart_flow',
+              details: { flowsTriggered: flowsTriggered.length },
+              success: true
+            });
+            
+          } catch (err) {
+            actions.push({
+              type: 'test_flow_trigger_failed',
+              details: { error: err.message },
+              success: false,
+              error: err.message
+            });
+          }
+          break;
+          
+        case 'order_created':
+          webhookLog = await WebhookLog.logWebhook({
+            topic: 'orders/create',
+            source: 'test',
+            email,
+            payload: {
+              id: `test_order_${Date.now()}`,
+              order_number: Math.floor(Math.random() * 10000) + 1000,
+              email,
+              total_price: data?.totalPrice || '49.99',
+              currency: 'USD',
+              line_items: data?.items || [
+                { title: 'Garlic Dill Spears', quantity: 1, price: '15.99', product_id: '123' }
+              ],
+              customer: {
+                id: `test_customer_${Date.now()}`,
+                email,
+                first_name: 'Test',
+                last_name: 'Customer'
+              },
+              created_at: new Date().toISOString(),
+              ...data
+            },
+            headers: {},
+            metadata: { receivedAt: new Date(), ip: 'test' }
+          });
+          
+          // Try to trigger flows
+          try {
+            let customer = await Customer.findOne({ email: email?.toLowerCase() });
+            
+            if (!customer) {
+              customer = await Customer.create({
+                email: email.toLowerCase(),
+                firstName: 'Test',
+                lastName: 'Customer',
+                source: 'test_order'
+              });
+            }
+            
+            const flowService = require('../services/flowService');
+            const result = await flowService.processTrigger('order_placed', {
+              customerId: customer._id,
+              email: customer.email,
+              orderNumber: Math.floor(Math.random() * 10000) + 1000,
+              orderValue: parseFloat(data?.totalPrice || 49.99),
+              firstOrder: true,
+              products: [{ title: 'Garlic Dill Spears', quantity: 1, price: '15.99' }]
+            });
+            
+            if (result?.flowsTriggered) {
+              result.flowsTriggered.forEach(f => flowsTriggered.push(f));
+            }
+            
+            actions.push({
+              type: 'test_order_flow',
+              details: { flowsTriggered: flowsTriggered.length },
+              success: true
+            });
+            
+          } catch (err) {
+            actions.push({
+              type: 'test_flow_trigger_failed',
+              details: { error: err.message },
+              success: false,
+              error: err.message
+            });
+          }
+          break;
+          
+        default:
+          return res.status(400).json({ error: 'Invalid test type. Use: customer_created, cart_abandoned, order_created' });
+      }
+      
+      await webhookLog.markProcessed(actions, flowsTriggered);
+      
+      console.log(`   ✅ Test webhook processed`);
+      console.log(`   Actions: ${actions.length}`);
+      console.log(`   Flows triggered: ${flowsTriggered.length}`);
+      console.log(`====================================================\n`);
+      
+      res.json({
+        success: true,
+        message: `Test ${type} webhook created and processed`,
+        logId: webhookLog._id,
+        actions,
+        flowsTriggered
+      });
+      
+    } catch (error) {
+      console.error('❌ Test webhook error:', error);
       res.status(500).json({ error: error.message });
     }
   }

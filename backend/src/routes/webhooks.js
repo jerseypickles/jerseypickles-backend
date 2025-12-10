@@ -1,4 +1,5 @@
-// backend/src/routes/webhooks.js - CON BOUNCE MANAGEMENT AUTOMÁTICO
+// backend/src/routes/webhooks.js
+// 📡 COMPLETE WEBHOOK ROUTES - Shopify, Resend, Monitoring, Testing
 const express = require('express');
 const router = express.Router();
 const webhooksController = require('../controllers/webhooksController');
@@ -8,30 +9,54 @@ const { webhookLimiter } = require('../middleware/rateLimiter');
 // Aplicar rate limiter a todos los webhooks
 router.use(webhookLimiter);
 
-// ==================== WEBHOOKS DE CUSTOMERS ====================
+// ==================== SHOPIFY WEBHOOKS ====================
+
+// Customer webhooks
 router.post('/customers/create', validateShopifyWebhook, webhooksController.customerCreate);
 router.post('/customers/update', validateShopifyWebhook, webhooksController.customerUpdate);
 
-// ==================== WEBHOOKS DE ORDERS ====================
+// Order webhooks
 router.post('/orders/create', validateShopifyWebhook, webhooksController.orderCreate);
 router.post('/orders/update', validateShopifyWebhook, webhooksController.orderUpdate);
-
-// NUEVOS WEBHOOKS PARA FLOWS
 router.post('/orders/fulfilled', validateShopifyWebhook, webhooksController.orderFulfilled);
 router.post('/orders/cancelled', validateShopifyWebhook, webhooksController.orderCancelled);
 router.post('/orders/paid', validateShopifyWebhook, webhooksController.orderPaid);
 
-// ==================== WEBHOOKS DE CHECKOUTS (Cart Abandonment) ====================
+// Checkout webhooks (Abandoned Cart Tracking)
 router.post('/checkouts/create', validateShopifyWebhook, webhooksController.checkoutCreate);
 router.post('/checkouts/update', validateShopifyWebhook, webhooksController.checkoutUpdate);
 
-// ==================== WEBHOOKS DE PRODUCTS ====================
+// Cart webhooks (alternative to checkout)
+router.post('/carts/create', validateShopifyWebhook, webhooksController.checkoutCreate);
+router.post('/carts/update', validateShopifyWebhook, webhooksController.checkoutUpdate);
+
+// Product webhooks
 router.post('/products/update', validateShopifyWebhook, webhooksController.productUpdate);
 
-// ==================== WEBHOOKS DE REFUNDS ====================
+// Refund webhooks
 router.post('/refunds/create', validateShopifyWebhook, webhooksController.refundCreate);
 
-// ==================== WEBHOOKS DE RESEND ====================
+// ==================== MONITORING ENDPOINTS ====================
+
+// Get recent webhook logs
+router.get('/logs', webhooksController.getWebhookLogs);
+
+// Get webhook statistics
+router.get('/stats', webhooksController.getWebhookStats);
+
+// Get single webhook log details
+router.get('/logs/:id', webhooksController.getWebhookLog);
+
+// Get abandoned cart tracker status
+router.get('/abandoned-carts/status', webhooksController.getAbandonedCartStatus);
+
+// ==================== TESTING ENDPOINT ====================
+
+// Send test webhook
+router.post('/test', webhooksController.testWebhook);
+
+// ==================== RESEND WEBHOOKS ====================
+
 /**
  * Handler de webhooks de Resend - CON BOUNCE MANAGEMENT AUTOMÁTICO
  * 
@@ -39,9 +64,7 @@ router.post('/refunds/create', validateShopifyWebhook, webhooksController.refund
  * - 'sent' → Se incrementa en emailQueue.js worker (NO aquí)
  * - 'delivered' → Se incrementa AQUÍ vía webhook
  * - 'opened', 'clicked', etc → Se incrementan AQUÍ vía webhook
- * - 'bounced' → ✅ AHORA auto-marca customer como bounced
- * 
- * Esto evita el doble conteo que causaba sent: 1840 con 920 recipients
+ * - 'bounced' → ✅ Auto-marca customer como bounced
  */
 router.post('/resend', async (req, res) => {
   try {
@@ -77,6 +100,7 @@ router.post('/resend', async (req, res) => {
     const EmailSend = require('../models/EmailSend');
     const Campaign = require('../models/Campaign');
     const Customer = require('../models/Customer');
+    const WebhookLog = require('../models/WebhookLog');
     
     // Mapeo de tipos de eventos
     const eventTypeMap = {
@@ -118,13 +142,28 @@ router.post('/resend', async (req, res) => {
     console.log(`\n📬 Resend Webhook: ${type}`);
     console.log(`   Email: ${emailAddress}`);
     console.log(`   Campaign: ${campaignId || 'N/A'}`);
+    console.log(`   Flow: ${flowId || 'N/A'}`);
+    
+    // Log to WebhookLog
+    const webhookLog = await WebhookLog.logWebhook({
+      topic: `resend/${type}`,
+      source: 'resend',
+      email: emailAddress,
+      payload: event,
+      headers: {},
+      metadata: { receivedAt: new Date() }
+    });
     
     // ✅ RESPONDER INMEDIATAMENTE (Resend espera respuesta rápida)
     res.status(200).json({ received: true });
     
     // ========== PROCESAR EN BACKGROUND ==========
     setImmediate(async () => {
+      const actions = [];
+      
       try {
+        await webhookLog.markProcessing();
+        
         // 1. Crear EmailEvent
         const eventData = {
           customer: customerId || null,
@@ -139,7 +178,7 @@ router.post('/resend', async (req, res) => {
             idempotencyKey: idempotencyKey,
             timestamp: data.created_at,
             rawTags: data.tags,
-            bounceType: data.bounce?.type || null // ← Guardar bounce type de Resend
+            bounceType: data.bounce?.type || null
           }
         };
         
@@ -155,17 +194,33 @@ router.post('/resend', async (req, res) => {
         await EmailEvent.create(eventData);
         console.log(`   ✅ EmailEvent creado: ${eventType}`);
         
+        actions.push({
+          type: `email_event_${eventType}`,
+          details: { email: emailAddress },
+          success: true
+        });
+        
         // ========== 🆕 BOUNCE MANAGEMENT AUTOMÁTICO ==========
         if (eventType === 'bounced') {
           await handleBounce(emailAddress, data, campaignId);
+          actions.push({
+            type: 'bounce_handled',
+            details: { email: emailAddress, bounceType: data.bounce?.type },
+            success: true
+          });
         }
         
         // ========== COMPLAINT MANAGEMENT ==========
         if (eventType === 'complained') {
           await handleComplaint(emailAddress, data, campaignId);
+          actions.push({
+            type: 'complaint_handled',
+            details: { email: emailAddress },
+            success: true
+          });
         }
         
-        // 2. Actualizar EmailSend status (si existe)
+        // 2. Actualizar EmailSend status
         if (resendEventId) {
           const emailSendUpdates = {};
           
@@ -219,9 +274,15 @@ router.post('/resend', async (req, res) => {
               $inc: statsToIncrement
             });
             console.log(`   ✅ Campaign stats: ${eventType} +1`);
+            
+            actions.push({
+              type: 'campaign_stats_updated',
+              details: { campaignId, eventType },
+              success: true
+            });
           }
           
-          // Actualizar rates para delivered/opened/clicked
+          // Actualizar rates
           if (['delivered', 'opened', 'clicked'].includes(eventType)) {
             const campaign = await Campaign.findById(campaignId);
             if (campaign && typeof campaign.updateRates === 'function') {
@@ -230,7 +291,7 @@ router.post('/resend', async (req, res) => {
             }
           }
           
-          // Verificar si campaña terminó (después de delivered)
+          // Verificar si campaña terminó
           if (eventType === 'delivered') {
             try {
               const { checkAndFinalizeCampaign, isAvailable } = require('../jobs/emailQueue');
@@ -238,7 +299,7 @@ router.post('/resend', async (req, res) => {
                 await checkAndFinalizeCampaign(campaignId);
               }
             } catch (err) {
-              // Queue might not be available, that's ok
+              // Queue might not be available
             }
           }
         }
@@ -252,7 +313,7 @@ router.post('/resend', async (req, res) => {
           }
         }
         
-        // 5. Actualizar Flow stats (si aplica)
+        // 5. Actualizar Flow stats
         if (flowId) {
           try {
             const Flow = require('../models/Flow');
@@ -270,33 +331,38 @@ router.post('/resend', async (req, res) => {
               await Flow.findByIdAndUpdate(flowId, {
                 $inc: { [`metrics.${metricName}`]: 1 }
               });
+              
+              actions.push({
+                type: 'flow_stats_updated',
+                details: { flowId, metric: metricName },
+                success: true
+              });
             }
           } catch (err) {
             console.log(`   ⚠️  Flow not available: ${err.message}`);
           }
         }
         
+        await webhookLog.markProcessed(actions, []);
+        
         console.log(`   ✅ Webhook procesado completamente\n`);
         
       } catch (error) {
         console.error('❌ Error en background:', error);
+        await webhookLog.markFailed(error);
       }
     });
     
   } catch (error) {
     console.error('❌ Error procesando webhook Resend:', error);
-    // Siempre responder 200 para evitar reintentos
     res.status(200).json({ received: true, error: error.message });
   }
 });
 
-// ==================== 🆕 FUNCIONES DE BOUNCE MANAGEMENT ====================
+// ==================== BOUNCE & COMPLAINT HANDLERS ====================
 
 /**
  * Maneja bounces automáticamente
- * - Detecta tipo (hard/soft) desde Resend
- * - Marca customer como bounced
- * - Auto-remueve de listas si es hard bounce
  */
 async function handleBounce(email, data, campaignId) {
   try {
@@ -309,22 +375,14 @@ async function handleBounce(email, data, campaignId) {
       return;
     }
     
-    // ✅ DETERMINAR TIPO DE BOUNCE desde Resend
+    // Determinar tipo de bounce
     let bounceType = 'soft';
     const bounceMessage = data.bounce?.message || data.bounce?.type || '';
     
-    // Indicadores de hard bounce
     const hardBounceIndicators = [
-      'hard',
-      'permanent',
-      'does not exist',
-      'invalid',
-      'unknown user',
-      'no such user',
-      'mailbox not found',
-      'address rejected',
-      'user unknown',
-      'domain not found',
+      'hard', 'permanent', 'does not exist', 'invalid',
+      'unknown user', 'no such user', 'mailbox not found',
+      'address rejected', 'user unknown', 'domain not found',
       'recipient address rejected'
     ];
     
@@ -340,12 +398,34 @@ async function handleBounce(email, data, campaignId) {
     console.log(`      Tipo: ${bounceType}`);
     console.log(`      Razón: ${bounceMessage.substring(0, 100)}`);
     
-    // ✅ MARCAR COMO BOUNCED (auto-limpia listas si hard)
-    await customer.markAsBounced(
-      bounceType,
-      bounceMessage || 'Email bounced',
-      campaignId
-    );
+    // Marcar como bounced
+    if (typeof customer.markAsBounced === 'function') {
+      await customer.markAsBounced(bounceType, bounceMessage || 'Email bounced', campaignId);
+    } else {
+      // Fallback si el método no existe
+      customer.emailStatus = 'bounced';
+      customer.bounceInfo = {
+        isBounced: true,
+        bounceType,
+        lastBounceDate: new Date(),
+        bounceReason: bounceMessage,
+        bouncedCampaignId: campaignId
+      };
+      await customer.save();
+      
+      // Si es hard bounce, remover de listas
+      if (bounceType === 'hard') {
+        const List = require('../models/List');
+        await List.updateMany(
+          { members: customer._id },
+          { 
+            $pull: { members: customer._id },
+            $inc: { memberCount: -1 }
+          }
+        );
+        console.log(`   ✅ Hard bounce - removido de listas`);
+      }
+    }
     
   } catch (error) {
     console.error(`   ❌ Error handling bounce: ${error.message}`);
@@ -354,8 +434,6 @@ async function handleBounce(email, data, campaignId) {
 
 /**
  * Maneja spam complaints automáticamente
- * - Marca customer como complained
- * - Remueve de TODAS las listas
  */
 async function handleComplaint(email, data, campaignId) {
   try {
@@ -373,11 +451,13 @@ async function handleComplaint(email, data, campaignId) {
     
     // Marcar como complained
     customer.emailStatus = 'complained';
-    customer.bounceInfo.isBounced = true;
-    customer.bounceInfo.bounceType = 'hard';
-    customer.bounceInfo.lastBounceDate = new Date();
-    customer.bounceInfo.bounceReason = 'Spam complaint';
-    customer.bounceInfo.bouncedCampaignId = campaignId;
+    customer.bounceInfo = {
+      isBounced: true,
+      bounceType: 'hard',
+      lastBounceDate: new Date(),
+      bounceReason: 'Spam complaint',
+      bouncedCampaignId: campaignId
+    };
     
     await customer.save();
     
