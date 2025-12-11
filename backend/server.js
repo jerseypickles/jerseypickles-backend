@@ -1,4 +1,4 @@
-// backend/server.js (FIXED - Proper webhook raw body capture)
+// backend/server.js (FIXED - Proper webhook raw body capture v2)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -89,60 +89,35 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
-// ==================== 🔧 WEBHOOK RAW BODY CAPTURE ====================
-// CRÍTICO: Este middleware DEBE ir ANTES de express.json()
-// Captura el raw body para validación HMAC de Shopify
+// ==================== 🔧 SHOPIFY WEBHOOK ROUTES (RAW BODY) ====================
+// CRÍTICO: Estas rutas van ANTES de express.json()
+// Usan express.raw() para capturar el body como Buffer para HMAC validation
 
-app.use('/api/webhooks', (req, res, next) => {
-  // Solo procesar POST requests
-  if (req.method !== 'POST') {
-    return next();
-  }
-  
-  // Skip si no es de Shopify (ej: /api/webhooks/resend)
-  const isShopifyWebhook = req.headers['x-shopify-hmac-sha256'];
-  if (!isShopifyWebhook) {
-    return next();
-  }
-  
-  const chunks = [];
-  
-  req.on('data', (chunk) => {
-    chunks.push(chunk);
-  });
-  
-  req.on('end', () => {
-    if (chunks.length > 0) {
-      // Guardar raw body como Buffer
-      req.body = Buffer.concat(chunks);
-      req.rawBody = req.body; // Backup
-      
-      console.log(`📦 Raw body captured: ${req.body.length} bytes for ${req.path}`);
-    }
-    next();
-  });
-  
-  req.on('error', (err) => {
-    console.error('❌ Error capturing webhook body:', err);
-    next(err);
-  });
+const webhookRoutes = require('./src/routes/webhooks');
+
+// Rutas de Shopify que necesitan raw body
+const shopifyWebhookPaths = [
+  '/api/webhooks/customers',
+  '/api/webhooks/orders', 
+  '/api/webhooks/checkouts',
+  '/api/webhooks/carts',
+  '/api/webhooks/products',
+  '/api/webhooks/refunds'
+];
+
+// Aplicar express.raw() SOLO a webhooks de Shopify
+shopifyWebhookPaths.forEach(path => {
+  app.use(path, express.raw({ type: 'application/json', limit: '10mb' }));
 });
 
+// Montar webhook routes ANTES de express.json()
+app.use('/api/webhooks', webhookRoutes);
+
 // ==================== JSON PARSER ====================
-// Este va DESPUÉS del webhook raw body capture
-// El middleware de arriba ya manejó los webhooks de Shopify
+// Este va DESPUÉS de las rutas de webhooks de Shopify
+// Solo parsea requests que NO son webhooks de Shopify
 
-app.use(express.json({ 
-  limit: '10mb',
-  // NO parsear si ya es Buffer (webhooks de Shopify)
-  verify: (req, res, buf) => {
-    // Guardar raw body para cualquier ruta que lo necesite
-    if (req.path.includes('/webhooks/')) {
-      req.rawBody = buf;
-    }
-  }
-}));
-
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // COOKIE PARSER
@@ -170,7 +145,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({ 
     message: '🥒 Jersey Pickles Email Marketing API',
-    version: '2.3.0',
+    version: '2.3.1',
     status: 'running',
     features: {
       campaigns: '✅ Email Campaigns',
@@ -206,7 +181,7 @@ app.get('/', (req, res) => {
 
 app.use('/api/auth', require('./src/routes/auth'));
 app.use('/api/test', require('./src/routes/test'));
-app.use('/api/webhooks', require('./src/routes/webhooks'));
+// NOTA: webhooks ya están montados arriba ANTES de express.json()
 app.use('/api/customers', require('./src/routes/customers'));
 app.use('/api/orders', require('./src/routes/orders'));
 app.use('/api/segments', require('./src/routes/segments'));
@@ -276,8 +251,6 @@ app.use('/api/analytics', require('./src/routes/analytics'));
 app.use('/api/upload', require('./src/routes/upload'));
 app.use('/api/popup', require('./src/routes/popup'));
 
-app.use('/api/webhook-debug', require('./src/routes/webhookDiagnostic'));
-
 app.use('*', (req, res) => {
   res.status(404).json({ 
     error: 'Ruta no encontrada',
@@ -299,7 +272,7 @@ let calendarAvailable = false;
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║   🥒 Jersey Pickles Email Marketing v2.3      ║');
+  console.log('║   🥒 Jersey Pickles Email Marketing v2.3.1    ║');
   console.log('╚════════════════════════════════════════════════╝');
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -308,7 +281,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🔒 Webhook Validation: ${process.env.SHOPIFY_WEBHOOK_SECRET ? '✅ Enabled' : '⚠️  Disabled'}`);
   console.log(`📧 Email Queue: ${process.env.REDIS_URL ? '✅ Redis Connected' : '⚠️  Direct Send Mode'}`);
   console.log(`✅ Server ready - Payload limit: 10MB`);
-  console.log(`🔧 Webhook raw body capture: ✅ Enabled`);
+  console.log(`🔧 Shopify webhooks: express.raw() enabled`);
   
   // Inicializar Flow Queue
   setTimeout(() => {
