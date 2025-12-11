@@ -336,9 +336,10 @@ class AICalculator {
   /**
    * Analiza el contexto estratégico de todas las campañas recientes
    * Detecta si estamos en período de build-up hacia algo importante
+   * 🔧 PRIORIZA la fecha actual sobre menciones en subjects antiguos
    */
   analyzeStrategicContext(campaigns) {
-    // Obtener contexto temporal actual
+    // Obtener contexto temporal actual - ESTO TIENE PRIORIDAD
     const currentSeasonalContexts = this.getCurrentSeasonalContext();
     const currentEvent = currentSeasonalContexts[0]?.event || null;
     const currentEventType = currentSeasonalContexts[0]?.type || null;
@@ -348,8 +349,8 @@ class AICalculator {
       campaign: c.name,
       subject: c.subject,
       sentAt: c.sentAt,
-      openRate: c.stats?.openRate || 0,
-      clickRate: c.stats?.clickRate || 0,
+      openRate: Math.min(c.stats?.openRate || 0, 100), // 🔧 Cap at 100%
+      clickRate: Math.min(c.stats?.clickRate || 0, 100), // 🔧 Cap at 100%
       revenue: c.stats?.totalRevenue || 0,
       conversionRate: c.stats?.conversionRate || 0
     }));
@@ -361,38 +362,71 @@ class AICalculator {
     let promoCount = 0;
     let contentCount = 0;
 
+    // 🔧 Fecha límite para considerar eventos pasados como "actuales"
+    // Si Black Friday fue hace más de 14 días, no lo consideramos relevante
+    const now = new Date();
+    const twoWeeksAgo = new Date(now);
+    twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+
     contexts.forEach(ctx => {
       typeCounts[ctx.type] = (typeCounts[ctx.type] || 0) + 1;
+      
+      // 🔧 Solo contar eventos si son del contexto temporal actual
+      // o si la campaña es reciente (últimos 7 días)
       if (ctx.event) {
-        eventMentions[ctx.event] = (eventMentions[ctx.event] || 0) + 1;
+        const campaignDate = new Date(ctx.sentAt);
+        const isRecentCampaign = campaignDate >= twoWeeksAgo;
+        
+        // 🔧 Filtrar eventos pasados que ya no son relevantes
+        const pastEvents = ['Black Friday', 'Cyber Monday', 'Thanksgiving'];
+        const isPastEvent = pastEvents.includes(ctx.event);
+        
+        // Solo contar si:
+        // - No es un evento pasado, O
+        // - Es el evento actual del calendario, O
+        // - La campaña es muy reciente (últimos 7 días)
+        const sevenDaysAgo = new Date(now);
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+        const isVeryRecent = campaignDate >= sevenDaysAgo;
+        
+        if (!isPastEvent || ctx.event === currentEvent || isVeryRecent) {
+          eventMentions[ctx.event] = (eventMentions[ctx.event] || 0) + 1;
+        }
       }
+      
       if (ctx.isBuildup) buildupCount++;
       if (ctx.isPromo) promoCount++;
       if (ctx.isContent) contentCount++;
     });
 
-    // Detectar evento dominante de las campañas
-    let dominantEvent = null;
+    // 🔧 PRIORIDAD: Usar contexto temporal actual si existe
+    let dominantEvent = currentEvent; // Empezar con el evento actual del calendario
+    
+    // Solo sobrescribir si hay un evento MUY mencionado en campañas recientes
+    // Y ese evento coincide con el contexto actual
     let maxEventCount = 0;
     for (const [event, count] of Object.entries(eventMentions)) {
-      if (count > maxEventCount && count >= 2) {
-        dominantEvent = event;
-        maxEventCount = count;
+      if (count > maxEventCount && count >= 3) {
+        // Solo usar este evento si es relevante al contexto actual
+        if (event === currentEvent || !currentEvent) {
+          dominantEvent = event;
+          maxEventCount = count;
+        }
       }
     }
     
-    // 🔧 Si no hay evento dominante en campañas, usar el contexto temporal actual
-    if (!dominantEvent && currentEvent) {
+    // 🔧 Si no hay evento dominante, usar el contexto temporal
+    if (!dominantEvent) {
       dominantEvent = currentEvent;
     }
 
-    // Determinar fase estratégica
+    // Determinar fase estratégica basada en FECHA ACTUAL primero
     let strategicPhase = 'normal';
     let phaseDescription = 'Operación normal de email marketing';
 
-    // 🔧 Lógica mejorada considerando fecha actual
-    if (currentEventType === 'major_event' || currentEventType === 'holiday') {
-      // Estamos en una temporada importante
+    // 🔧 Lógica mejorada: La fecha actual tiene PRIORIDAD
+    if (currentEventType === 'major_event' || currentEventType === 'holiday' || currentEventType === 'seasonal') {
+      // Estamos en una temporada importante según el calendario
       if (buildupCount >= 2 || (buildupCount >= 1 && promoCount === 0)) {
         strategicPhase = 'buildup';
         phaseDescription = `Período de anticipación hacia ${dominantEvent}. Alto engagement esperado, el revenue principal vendrá con las promociones.`;
@@ -406,12 +440,6 @@ class AICalculator {
         strategicPhase = 'pre_event';
         phaseDescription = `Preparándose para ${dominantEvent}. Buen momento para calentar a la audiencia.`;
       }
-    } else if (dominantEvent && buildupCount >= 2) {
-      strategicPhase = 'buildup';
-      phaseDescription = `Período de anticipación hacia ${dominantEvent}. Alto engagement esperado, revenue vendrá después.`;
-    } else if (dominantEvent && promoCount >= 2) {
-      strategicPhase = 'event_active';
-      phaseDescription = `${dominantEvent} activo. Momento de máximo revenue esperado.`;
     } else if (buildupCount > promoCount && buildupCount >= 2) {
       strategicPhase = 'anticipation';
       phaseDescription = 'Construyendo anticipación. Normal ver alto engagement con bajo revenue.';
@@ -423,9 +451,16 @@ class AICalculator {
       phaseDescription = 'Push de ventas activo. Se espera conversión directa.';
     }
 
-    // Analizar métricas en contexto
-    const avgOpenRate = contexts.reduce((sum, c) => sum + c.openRate, 0) / contexts.length || 0;
-    const avgClickRate = contexts.reduce((sum, c) => sum + c.clickRate, 0) / contexts.length || 0;
+    // 🔧 Calcular métricas con valores válidos (capped at 100%)
+    const validOpenRates = contexts.map(c => c.openRate).filter(r => r <= 100);
+    const validClickRates = contexts.map(c => c.clickRate).filter(r => r <= 100);
+    
+    const avgOpenRate = validOpenRates.length > 0 
+      ? validOpenRates.reduce((sum, r) => sum + r, 0) / validOpenRates.length 
+      : 0;
+    const avgClickRate = validClickRates.length > 0 
+      ? validClickRates.reduce((sum, r) => sum + r, 0) / validClickRates.length 
+      : 0;
     const totalRevenue = contexts.reduce((sum, c) => sum + c.revenue, 0);
     const avgRevenue = totalRevenue / contexts.length || 0;
 
@@ -493,8 +528,8 @@ class AICalculator {
       phaseDescription,
       dominantEvent,
       metrics: {
-        avgOpenRate: parseFloat(avgOpenRate.toFixed(2)),
-        avgClickRate: parseFloat(avgClickRate.toFixed(2)),
+        avgOpenRate: parseFloat(Math.min(avgOpenRate, 100).toFixed(2)), // 🔧 Capped
+        avgClickRate: parseFloat(Math.min(avgClickRate, 100).toFixed(2)), // 🔧 Capped
         totalRevenue: parseFloat(totalRevenue.toFixed(2)),
         avgRevenuePerCampaign: parseFloat(avgRevenue.toFixed(2))
       },
