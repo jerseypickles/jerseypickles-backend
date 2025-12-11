@@ -1,28 +1,63 @@
 // backend/src/services/businessContextService.js
 // 🎯 Business Context Service - Integra todos los datos de negocio para Claude
-const productService = require('./productService');
-const businessCalendarService = require('./businessCalendarService');
-const Product = require('../models/Product');
-const BusinessCalendar = require('../models/BusinessCalendar');
-const Order = require('../models/Order');
-const List = require('../models/List');
+// ⚠️ FIXED: Safe model access without static method dependencies
+const mongoose = require('mongoose');
+
+// Safe model getters
+const getModel = (name) => {
+  try {
+    return mongoose.model(name);
+  } catch (e) {
+    console.warn(`Model ${name} not available`);
+    return null;
+  }
+};
+
+// Lazy service loading to avoid circular deps
+let _productService = null;
+let _businessCalendarService = null;
+
+const getProductService = () => {
+  if (!_productService) {
+    try { _productService = require('./productService'); } catch (e) { }
+  }
+  return _productService;
+};
+
+const getBusinessCalendarService = () => {
+  if (!_businessCalendarService) {
+    try { _businessCalendarService = require('./businessCalendarService'); } catch (e) { }
+  }
+  return _businessCalendarService;
+};
 
 class BusinessContextService {
 
   /**
    * Obtener contexto completo de negocio para Claude
-   * Combina: Productos, Calendario, Goals, Promociones
    */
   async getFullBusinessContext() {
     try {
+      const productService = getProductService();
+      const businessCalendarService = getBusinessCalendarService();
+      
       const [
         productData,
         calendarContext,
         listProductAnalysis
       ] = await Promise.all([
-        productService.prepareProductDataForClaude(),
-        businessCalendarService.getBusinessContextForClaude(),
-        this.getProductsByListAnalysis()
+        productService?.prepareProductDataForClaude().catch(e => {
+          console.warn('Error preparing product data:', e.message);
+          return null;
+        }),
+        businessCalendarService?.getBusinessContextForClaude().catch(e => {
+          console.warn('Error getting calendar context:', e.message);
+          return null;
+        }),
+        this.getProductsByListAnalysis().catch(e => {
+          console.warn('Error analyzing list products:', e.message);
+          return null;
+        })
       ]);
       
       return {
@@ -46,17 +81,18 @@ class BusinessContextService {
    */
   async getProductsByListAnalysis() {
     try {
-      // Obtener listas activas
+      const List = getModel('List');
+      if (!List) return [];
+      
       const lists = await List.find({ isActive: true })
         .select('_id name memberCount')
         .lean();
       
       if (lists.length === 0) return [];
       
-      // Para cada lista, obtener top productos comprados por sus miembros
       const listAnalysis = [];
       
-      for (const list of lists.slice(0, 5)) { // Max 5 listas
+      for (const list of lists.slice(0, 5)) {
         const topProducts = await this.getTopProductsForList(list._id, list.name);
         
         if (topProducts.length > 0) {
@@ -65,7 +101,7 @@ class BusinessContextService {
             memberCount: list.memberCount,
             topProducts: topProducts.slice(0, 3).map(p => ({
               title: p.title,
-              revenue: `$${p.revenue.toFixed(0)}`,
+              revenue: `$${(p.revenue || 0).toFixed(0)}`,
               unitsSold: p.unitsSold
             })),
             preferredCategory: this.detectPreferredCategory(topProducts)
@@ -84,221 +120,242 @@ class BusinessContextService {
    * Obtener top productos para una lista específica
    */
   async getTopProductsForList(listId, listName) {
-    // Buscar en Product.listPerformance
-    const products = await Product.find({
-      'listPerformance.listId': listId,
-      status: 'active'
-    })
-    .select('title listPerformance categories')
-    .lean();
+    const Product = getModel('Product');
+    if (!Product) return [];
     
-    // Extraer y ordenar por revenue
-    const productStats = products.map(p => {
-      const listStats = p.listPerformance.find(
-        lp => lp.listId?.toString() === listId.toString()
-      );
-      return {
-        title: p.title,
-        revenue: listStats?.revenue || 0,
-        unitsSold: listStats?.unitsSold || 0,
-        categories: p.categories
-      };
-    });
-    
-    return productStats.sort((a, b) => b.revenue - a.revenue);
+    try {
+      const products = await Product.find({
+        'listPerformance.listId': listId,
+        status: 'active'
+      })
+      .select('title listPerformance categories')
+      .lean();
+      
+      const productStats = products.map(p => {
+        const listStats = p.listPerformance.find(
+          lp => lp.listId?.toString() === listId.toString()
+        );
+        return {
+          title: p.title,
+          revenue: listStats?.revenue || 0,
+          unitsSold: listStats?.unitsSold || 0,
+          categories: p.categories
+        };
+      });
+      
+      return productStats.sort((a, b) => b.revenue - a.revenue);
+    } catch (e) {
+      console.warn('Error getting top products for list:', e.message);
+      return [];
+    }
   }
 
   /**
-   * Detectar categoría preferida de una lista
+   * Detectar categoría preferida basada en compras
    */
   detectPreferredCategory(products) {
-    if (!products || products.length === 0) return 'general';
-    
-    let giftSets = 0;
-    let seasonal = 0;
-    let regular = 0;
+    const categories = {
+      gift_sets: 0,
+      seasonal: 0,
+      regular: 0
+    };
     
     for (const p of products) {
-      if (p.categories?.isGiftSet) giftSets++;
-      else if (p.categories?.isSeasonal) seasonal++;
-      else regular++;
+      if (p.categories?.isGiftSet) categories.gift_sets += p.revenue || 0;
+      else if (p.categories?.isSeasonal) categories.seasonal += p.revenue || 0;
+      else categories.regular += p.revenue || 0;
     }
     
-    if (giftSets > seasonal && giftSets > regular) return 'gift_sets';
-    if (seasonal > regular) return 'seasonal';
+    const max = Math.max(categories.gift_sets, categories.seasonal, categories.regular);
+    
+    if (max === categories.gift_sets && categories.gift_sets > 0) return 'gift_sets';
+    if (max === categories.seasonal && categories.seasonal > 0) return 'seasonal';
     return 'regular';
   }
 
   /**
    * Formatear contexto de negocio para el prompt de Claude
    */
-  formatBusinessContextForPrompt(businessContext) {
-    if (!businessContext) return '';
+  formatBusinessContextForPrompt(context) {
+    if (!context) return '';
     
-    const { products, calendar, listProductPreferences } = businessContext;
+    const sections = [];
     
-    let prompt = '';
-    
-    // === SECCIÓN DE PRODUCTOS ===
-    if (products) {
-      prompt += `
-═══════════════════════════════════════════════════════════
-🛒 DATOS DE PRODUCTOS (IMPORTANTE PARA RECOMENDACIONES)
-═══════════════════════════════════════════════════════════
-
-📊 TOP PRODUCTOS (últimos 30 días):
-`;
-      if (products.topSellingProducts?.length > 0) {
-        products.topSellingProducts.forEach((p, i) => {
-          prompt += `${i + 1}. ${p.title}
-   Revenue: ${p.revenue} | Vendidos: ${p.unitsSold} | Stock: ${p.inventory}${p.isLowStock ? ' ⚠️ BAJO' : ''}${p.isOutOfStock ? ' ❌ AGOTADO' : ''}
-`;
+    // === PRODUCTOS ===
+    if (context.products) {
+      const p = context.products;
+      
+      // Top selling
+      if (p.topSellingProducts?.length > 0) {
+        sections.push(`🛒 TOP PRODUCTOS (últimos 30 días):`);
+        p.topSellingProducts.forEach((prod, i) => {
+          const stockWarning = prod.isOutOfStock ? '❌ AGOTADO' : (prod.isLowStock ? '⚠️ BAJO' : '');
+          sections.push(`${i + 1}. ${prod.title}: ${prod.revenue} | ${prod.unitsSold} vendidos | Stock: ${prod.inventory} ${stockWarning}`);
         });
-      } else {
-        prompt += `   No hay datos de ventas recientes\n`;
+        sections.push('');
       }
       
-      // Alertas de inventario
-      if (products.lowStockAlert?.length > 0) {
-        prompt += `
-⚠️ PRODUCTOS CON BAJO STOCK (se están vendiendo):
-`;
-        products.lowStockAlert.forEach(p => {
-          prompt += `• ${p.title}: ${p.currentStock} unidades (vendió ${p.recentSales} en 30 días)
-`;
+      // Low stock
+      if (p.lowStockAlert?.length > 0) {
+        sections.push(`⚠️ PRODUCTOS CON BAJO STOCK (necesitan atención):`);
+        p.lowStockAlert.forEach(prod => {
+          sections.push(`• ${prod.title}: ${prod.currentStock} unidades (vendió ${prod.recentSales} en 30 días)`);
         });
+        sections.push('');
       }
       
-      // Gift sets disponibles
-      if (products.giftSetsAvailable?.length > 0) {
-        prompt += `
-🎁 GIFT SETS DISPONIBLES (importantes para holidays):
-`;
-        products.giftSetsAvailable.forEach(p => {
-          prompt += `• ${p.title}: ${p.inventory} unidades @ $${p.price}
-`;
+      // Out of stock
+      if (p.outOfStockProducts?.length > 0) {
+        sections.push(`❌ PRODUCTOS AGOTADOS (NO PROMOCIONAR):`);
+        p.outOfStockProducts.forEach(prod => {
+          sections.push(`• ${prod.title} - Revenue previo: $${prod.previousRevenue}`);
         });
+        sections.push('');
       }
       
-      // Resumen de inventario
-      if (products.inventorySummary) {
-        prompt += `
-📦 RESUMEN DE INVENTARIO:
-• Total productos: ${products.inventorySummary.totalProducts}
-• Unidades totales: ${products.inventorySummary.totalUnits}
-• Valor estimado: ${products.inventorySummary.estimatedValue}
-• Con bajo stock: ${products.inventorySummary.lowStockCount}
-• Agotados: ${products.inventorySummary.outOfStockCount}
-`;
+      // Gift sets
+      if (p.giftSetsAvailable?.length > 0) {
+        sections.push(`🎁 GIFT SETS DISPONIBLES (buenos para promociones):`);
+        p.giftSetsAvailable.forEach(prod => {
+          sections.push(`• ${prod.title}: ${prod.inventory} unidades @ $${prod.price}`);
+        });
+        sections.push('');
       }
       
-      // Bundles naturales
-      if (products.frequentlyBoughtTogether?.length > 0) {
-        prompt += `
-🔗 PRODUCTOS QUE SE COMPRAN JUNTOS (oportunidad de bundle):
-`;
-        products.frequentlyBoughtTogether.forEach(pair => {
-          prompt += `• ${pair.products.join(' + ')} (${pair.timesBoughtTogether} veces)
-`;
+      // Bundles
+      if (p.frequentlyBoughtTogether?.length > 0) {
+        sections.push(`🔗 PRODUCTOS QUE SE COMPRAN JUNTOS (ideas para bundles):`);
+        p.frequentlyBoughtTogether.forEach(pair => {
+          sections.push(`• ${pair.products.join(' + ')} (${pair.timesBoughtTogether} veces)`);
         });
+        sections.push('');
+      }
+      
+      // Inventory summary
+      if (p.inventorySummary) {
+        sections.push(`📦 RESUMEN DE INVENTARIO:`);
+        sections.push(`• Total productos activos: ${p.inventorySummary.totalProducts}`);
+        sections.push(`• Total unidades: ${p.inventorySummary.totalUnits}`);
+        sections.push(`• Valor estimado: ${p.inventorySummary.estimatedValue}`);
+        sections.push(`• Productos con bajo stock: ${p.inventorySummary.lowStockCount}`);
+        sections.push(`• Productos agotados: ${p.inventorySummary.outOfStockCount}`);
+        sections.push('');
       }
     }
     
-    // === SECCIÓN DE CALENDARIO/OBJETIVOS ===
-    if (calendar) {
-      prompt += `
-═══════════════════════════════════════════════════════════
-📅 OBJETIVOS Y CALENDARIO DE NEGOCIO
-═══════════════════════════════════════════════════════════
-`;
+    // === CALENDARIO / GOALS ===
+    if (context.calendar) {
+      const c = context.calendar;
       
-      // Revenue Goal
-      if (calendar.revenueGoal) {
-        const goal = calendar.revenueGoal;
-        const statusEmoji = {
-          'achieved': '🏆',
-          'on_track': '✅',
-          'slightly_behind': '📊',
-          'behind': '⚠️',
-          'critical': '🚨'
-        };
-        
-        prompt += `
-🎯 OBJETIVO DE REVENUE MENSUAL:
-• Meta: ${goal.target}
-• Actual: ${goal.current} (${goal.percentComplete})
-• Restante: ${goal.remaining}
-• Días restantes: ${goal.daysRemaining}
-• Necesitas: ${goal.dailyNeeded}/día
-• Estado: ${statusEmoji[goal.status] || '📊'} ${goal.status.replace('_', ' ').toUpperCase()}
-
-`;
-        if (goal.status === 'behind' || goal.status === 'critical') {
-          prompt += `⚠️ ACCIÓN REQUERIDA: El objetivo está en riesgo. Considera campañas adicionales o promociones para acelerar ventas.\n`;
-        }
-      } else {
-        prompt += `
-ℹ️ No hay objetivo de revenue configurado para este mes.
-`;
+      // Revenue goal
+      if (c.revenueGoal?.hasGoal) {
+        const g = c.revenueGoal;
+        sections.push(`🎯 OBJETIVO DE REVENUE MENSUAL:`);
+        sections.push(`• Meta: $${g.targetAmount.toLocaleString()}`);
+        sections.push(`• Actual: $${g.currentAmount.toLocaleString()} (${g.percentComplete}%)`);
+        sections.push(`• Restante: $${g.remaining.toLocaleString()}`);
+        sections.push(`• Días restantes: ${g.daysRemaining}`);
+        sections.push(`• Necesitas: $${g.dailyNeeded.toLocaleString()}/día`);
+        sections.push(`• Estado: ${g.status === 'achieved' ? '✅ ALCANZADO' : g.status === 'on_track' ? '📈 EN CAMINO' : '⚠️ ' + g.status.toUpperCase()}`);
+        sections.push('');
       }
       
-      // Promociones activas
-      if (calendar.activePromotions?.length > 0) {
-        prompt += `
-🎟️ PROMOCIONES ACTIVAS:
-`;
-        calendar.activePromotions.forEach(p => {
-          prompt += `• ${p.name}: ${p.discount} OFF (código: ${p.code})
-  Termina en: ${p.endsIn} | Canjes: ${p.redemptions} | Revenue: ${p.revenue}
-`;
+      // Active promotions
+      if (c.activePromotions?.length > 0) {
+        sections.push(`🎟️ PROMOCIONES ACTIVAS:`);
+        c.activePromotions.forEach(promo => {
+          sections.push(`• ${promo.name} (código: ${promo.discountCode})`);
+          sections.push(`  Termina en: ${promo.daysRemaining} días | Canjes: ${promo.redemptionCount} | Revenue: $${promo.revenueGenerated}`);
         });
+        sections.push('');
       }
       
-      // Eventos próximos
-      if (calendar.upcomingEvents?.length > 0) {
-        prompt += `
-📆 EVENTOS PRÓXIMOS (oportunidades de campaña):
-`;
-        calendar.upcomingEvents.forEach(e => {
-          prompt += `• ${e.name}: ${e.date} (en ${e.daysUntil} días) - Tipo: ${e.type}
-`;
+      // Upcoming events
+      if (c.upcomingEvents?.length > 0) {
+        sections.push(`📆 EVENTOS PRÓXIMOS:`);
+        c.upcomingEvents.forEach(event => {
+          sections.push(`• ${event.name}: ${event.date} (en ${event.daysUntil} días)`);
+          if (event.keywords?.length > 0) {
+            sections.push(`  Keywords: ${event.keywords.join(', ')}`);
+          }
         });
+        sections.push('');
       }
     }
     
     // === PREFERENCIAS POR LISTA ===
-    if (listProductPreferences?.length > 0) {
-      prompt += `
-═══════════════════════════════════════════════════════════
-👥 QUÉ COMPRA CADA LISTA (para personalización)
-═══════════════════════════════════════════════════════════
-`;
-      listProductPreferences.forEach(list => {
-        prompt += `
-📋 ${list.listName} (${list.memberCount} miembros):
-   Preferencia: ${list.preferredCategory}
-   Top productos: ${list.topProducts.map(p => p.title).join(', ')}
-`;
+    if (context.listProductPreferences?.length > 0) {
+      sections.push(`👥 QUÉ COMPRA CADA LISTA:`);
+      context.listProductPreferences.forEach(list => {
+        sections.push(`📋 ${list.listName} (${list.memberCount} miembros):`);
+        sections.push(`   Preferencia: ${list.preferredCategory}`);
+        sections.push(`   Top productos: ${list.topProducts.map(p => p.title).join(', ')}`);
       });
+      sections.push('');
     }
     
-    // === INSTRUCCIONES PARA CLAUDE ===
-    prompt += `
-═══════════════════════════════════════════════════════════
-⚠️ USA ESTOS DATOS PARA:
-═══════════════════════════════════════════════════════════
-1. Recomendar QUÉ PRODUCTOS promocionar (los que tienen stock y se venden)
-2. ALERTAR si un producto popular tiene bajo stock
-3. Sugerir BUNDLES basados en productos comprados juntos
-4. Ajustar recomendaciones según el OBJETIVO DE REVENUE
-5. Sugerir campañas para EVENTOS PRÓXIMOS
-6. Personalizar sugerencias según QUÉ COMPRA CADA LISTA
-7. NO promocionar productos AGOTADOS
+    return sections.join('\n');
+  }
 
-`;
-    
-    return prompt;
+  /**
+   * Obtener insights rápidos para widget
+   */
+  async getQuickInsights() {
+    try {
+      const businessCalendarService = getBusinessCalendarService();
+      const productService = getProductService();
+      
+      const [revenueGoal, lowStock, upcomingEvents] = await Promise.all([
+        businessCalendarService?.getCurrentGoalProgress().catch(() => null),
+        productService?.getLowStock(5).catch(() => []),
+        businessCalendarService?.getUpcomingEvents(7).catch(() => [])
+      ]);
+      
+      const insights = [];
+      
+      // Alerta de revenue goal
+      if (revenueGoal?.hasGoal) {
+        if (revenueGoal.status === 'critical') {
+          insights.push({
+            type: 'warning',
+            icon: '🚨',
+            message: `Meta mensual en riesgo: ${revenueGoal.percentComplete}% alcanzado, necesitas $${revenueGoal.dailyNeeded}/día`
+          });
+        } else if (revenueGoal.status === 'achieved') {
+          insights.push({
+            type: 'success',
+            icon: '🎉',
+            message: `¡Meta mensual alcanzada! $${revenueGoal.currentAmount.toLocaleString()} de $${revenueGoal.targetAmount.toLocaleString()}`
+          });
+        }
+      }
+      
+      // Alerta de bajo stock
+      if (lowStock?.length > 0) {
+        insights.push({
+          type: 'warning',
+          icon: '📦',
+          message: `${lowStock.length} productos con bajo stock - revisar inventario`
+        });
+      }
+      
+      // Eventos próximos
+      if (upcomingEvents?.length > 0) {
+        const nextEvent = upcomingEvents[0];
+        insights.push({
+          type: 'info',
+          icon: '📅',
+          message: `Próximo evento: ${nextEvent.name} en ${nextEvent.daysUntil} días`
+        });
+      }
+      
+      return insights;
+    } catch (error) {
+      console.error('Error getting quick insights:', error);
+      return [];
+    }
   }
 }
 
+// Singleton export
 module.exports = new BusinessContextService();

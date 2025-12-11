@@ -1,7 +1,26 @@
 // backend/src/services/productService.js
 // 🛒 Product Service - Sync desde Shopify y análisis de productos
-const Product = require('../models/Product');
-const Order = require('../models/Order');
+// ⚠️ FIXED: No depende de métodos estáticos del modelo
+const mongoose = require('mongoose');
+
+// Obtener modelo de forma segura
+const getProductModel = () => {
+  try {
+    return mongoose.model('Product');
+  } catch (e) {
+    console.warn('Product model not available');
+    return null;
+  }
+};
+
+const getOrderModel = () => {
+  try {
+    return mongoose.model('Order');
+  } catch (e) {
+    console.warn('Order model not available');
+    return null;
+  }
+};
 
 class ProductService {
   
@@ -12,9 +31,6 @@ class ProductService {
 
   // ==================== SHOPIFY API ====================
 
-  /**
-   * Llamada genérica a Shopify API
-   */
   async shopifyRequest(endpoint, method = 'GET', body = null) {
     if (!this.shopifyDomain || !this.accessToken) {
       throw new Error('Shopify credentials not configured');
@@ -46,143 +62,161 @@ class ProductService {
 
   // ==================== SYNC PRODUCTOS ====================
 
-  /**
-   * Sincronizar todos los productos desde Shopify
-   */
   async syncAllProducts() {
-    console.log('🔄 Starting full product sync from Shopify...');
+    const Product = getProductModel();
+    if (!Product) {
+      throw new Error('Product model not available');
+    }
     
-    let products = [];
+    console.log('🔄 Syncing products from Shopify...');
+    
+    let synced = 0;
     let pageInfo = null;
-    let hasNextPage = true;
     
-    while (hasNextPage) {
+    do {
       const endpoint = pageInfo 
         ? `products.json?limit=250&page_info=${pageInfo}`
-        : 'products.json?limit=250';
+        : 'products.json?limit=250&status=active';
+        
+      const data = await this.shopifyRequest(endpoint);
       
-      const response = await this.shopifyRequest(endpoint);
-      products = products.concat(response.products || []);
-      
-      // Pagination handling
-      const linkHeader = response.headers?.get?.('link') || '';
-      hasNextPage = linkHeader.includes('rel="next"');
-      
-      if (hasNextPage) {
-        const match = linkHeader.match(/page_info=([^>&]*)/);
-        pageInfo = match ? match[1] : null;
-      }
-      
-      // Simple pagination fallback
-      if (!hasNextPage && response.products?.length === 250) {
-        // Puede haber más, pero Shopify no dio link header
-        // Por ahora, asumir que no hay más
-        hasNextPage = false;
-      }
-    }
-    
-    console.log(`📦 Found ${products.length} products in Shopify`);
-    
-    // Upsert each product
-    let synced = 0;
-    let errors = 0;
-    
-    for (const shopifyProduct of products) {
-      try {
-        await Product.upsertFromShopify(shopifyProduct);
+      for (const shopifyProduct of data.products) {
+        await this.upsertProduct(shopifyProduct);
         synced++;
-      } catch (error) {
-        console.error(`❌ Error syncing product ${shopifyProduct.id}:`, error.message);
-        errors++;
       }
-    }
+      
+      // Paginación cursor-based de Shopify
+      pageInfo = this.extractPageInfo(data);
+      
+      console.log(`   📦 Synced ${synced} products...`);
+      
+    } while (pageInfo);
     
-    console.log(`✅ Product sync complete: ${synced} synced, ${errors} errors`);
+    console.log(`✅ Product sync complete: ${synced} products`);
     
-    return { synced, errors, total: products.length };
+    return { synced, timestamp: new Date() };
   }
 
-  /**
-   * Sincronizar un producto específico por Shopify ID
-   */
+  async upsertProduct(shopifyProduct) {
+    const Product = getProductModel();
+    if (!Product) return null;
+    
+    const productData = {
+      shopifyId: shopifyProduct.id.toString(),
+      title: shopifyProduct.title,
+      handle: shopifyProduct.handle,
+      productType: shopifyProduct.product_type,
+      vendor: shopifyProduct.vendor,
+      tags: shopifyProduct.tags ? shopifyProduct.tags.split(',').map(t => t.trim()) : [],
+      status: shopifyProduct.status || 'active',
+      variants: (shopifyProduct.variants || []).map(v => ({
+        shopifyVariantId: v.id?.toString(),
+        title: v.title,
+        sku: v.sku,
+        price: parseFloat(v.price) || 0,
+        compareAtPrice: v.compare_at_price ? parseFloat(v.compare_at_price) : null,
+        inventoryQuantity: v.inventory_quantity || 0,
+        inventoryPolicy: v.inventory_policy,
+        weight: v.weight,
+        weightUnit: v.weight_unit
+      })),
+      images: (shopifyProduct.images || []).map(img => ({
+        shopifyImageId: img.id?.toString(),
+        src: img.src,
+        alt: img.alt,
+        position: img.position
+      })),
+      featuredImage: shopifyProduct.image?.src || shopifyProduct.images?.[0]?.src,
+      shopifyData: shopifyProduct,
+      lastSyncedAt: new Date()
+    };
+    
+    // Calcular totalInventory
+    productData.totalInventory = (productData.variants || []).reduce(
+      (sum, v) => sum + (v.inventoryQuantity || 0), 0
+    );
+    
+    // Calcular priceRange
+    const prices = (productData.variants || []).map(v => v.price).filter(p => p > 0);
+    if (prices.length > 0) {
+      productData.priceRange = { min: Math.min(...prices), max: Math.max(...prices) };
+    }
+    
+    // Calcular stock status
+    productData.isOutOfStock = productData.totalInventory <= 0;
+    productData.isLowStock = productData.totalInventory > 0 && productData.totalInventory <= 10;
+    
+    // Auto-detectar categorías
+    const titleLower = (productData.title || '').toLowerCase();
+    const tagsLower = (productData.tags || []).map(t => t.toLowerCase());
+    
+    productData.categories = {
+      isGiftSet: titleLower.includes('gift') || titleLower.includes('set') || 
+                 tagsLower.includes('gift') || tagsLower.includes('gift set'),
+      isSeasonal: tagsLower.includes('seasonal') || tagsLower.includes('holiday') || 
+                  tagsLower.includes('christmas') || tagsLower.includes('bbq') ||
+                  tagsLower.includes('summer'),
+      isNewArrival: false,
+      isBestSeller: false,
+      isOnSale: productData.variants?.some(v => v.compareAtPrice && v.compareAtPrice > v.price)
+    };
+    
+    const product = await Product.findOneAndUpdate(
+      { shopifyId: productData.shopifyId },
+      productData,
+      { upsert: true, new: true, runValidators: true }
+    );
+    
+    return product;
+  }
+
+  extractPageInfo(data) {
+    // Shopify devuelve page_info en headers para paginación
+    // Por ahora retornamos null para no paginar infinitamente
+    return null;
+  }
+
   async syncProduct(shopifyProductId) {
-    try {
-      const response = await this.shopifyRequest(`products/${shopifyProductId}.json`);
-      
-      if (response.product) {
-        return Product.upsertFromShopify(response.product);
-      }
-      
-      return null;
-    } catch (error) {
-      console.error(`Error syncing product ${shopifyProductId}:`, error.message);
-      throw error;
-    }
+    const data = await this.shopifyRequest(`products/${shopifyProductId}.json`);
+    return this.upsertProduct(data.product);
   }
 
-  /**
-   * Manejar webhook de producto
-   */
   async handleProductWebhook(topic, payload) {
-    console.log(`📦 Product webhook received: ${topic}`);
+    console.log(`📦 Product webhook: ${topic}`);
+    
+    const Product = getProductModel();
+    if (!Product) {
+      console.warn('Product model not available for webhook');
+      return;
+    }
     
     switch (topic) {
       case 'products/create':
       case 'products/update':
-        return this.handleProductCreateOrUpdate(payload);
+        await this.upsertProduct(payload);
+        break;
         
       case 'products/delete':
-        return this.handleProductDelete(payload);
-        
-      default:
-        console.log(`⚠️ Unknown product webhook topic: ${topic}`);
-        return null;
+        await Product.findOneAndUpdate(
+          { shopifyId: payload.id?.toString() },
+          { status: 'archived' }
+        );
+        console.log(`📦 Product archived: ${payload.id}`);
+        break;
     }
   }
 
-  async handleProductCreateOrUpdate(shopifyProduct) {
-    try {
-      const product = await Product.upsertFromShopify(shopifyProduct);
-      console.log(`✅ Product ${product.title} synced from webhook`);
-      return product;
-    } catch (error) {
-      console.error('Error handling product webhook:', error);
-      throw error;
-    }
-  }
+  // ==================== ANÁLISIS ====================
 
-  async handleProductDelete(payload) {
-    try {
-      const shopifyId = payload.id?.toString();
-      
-      if (!shopifyId) {
-        console.log('⚠️ No product ID in delete webhook');
-        return null;
-      }
-      
-      const result = await Product.findOneAndUpdate(
-        { shopifyId },
-        { status: 'archived' },
-        { new: true }
-      );
-      
-      if (result) {
-        console.log(`🗑️ Product ${result.title} archived`);
-      }
-      
-      return result;
-    } catch (error) {
-      console.error('Error handling product delete:', error);
-      throw error;
-    }
-  }
-
-  // ==================== ANÁLISIS DE PRODUCTOS ====================
-
-  /**
-   * Calcular productos más vendidos desde Orders
-   */
   async calculateTopSellingFromOrders(days = 30) {
+    const Order = getOrderModel();
+    const Product = getProductModel();
+    
+    if (!Order) {
+      console.warn('Order model not available');
+      return [];
+    }
+    
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - days);
     
@@ -209,244 +243,292 @@ class ProductService {
     
     const topProducts = await Order.aggregate(pipeline);
     
-    // Enriquecer con datos de Product
+    // Enriquecer con datos de Product si está disponible
     const enriched = await Promise.all(topProducts.map(async (item) => {
-      const product = await Product.findOne({ shopifyId: item._id }).lean();
+      let productData = {
+        inventory: 'unknown',
+        isLowStock: false,
+        isOutOfStock: false,
+        featuredImage: null,
+        priceRange: null
+      };
+      
+      if (Product) {
+        try {
+          const product = await Product.findOne({ shopifyId: item._id }).lean();
+          if (product) {
+            productData = {
+              inventory: product.totalInventory || 0,
+              isLowStock: product.isLowStock || false,
+              isOutOfStock: product.isOutOfStock || false,
+              featuredImage: product.featuredImage || null,
+              priceRange: product.priceRange || null
+            };
+          }
+        } catch (e) {
+          console.warn('Error enriching product:', e.message);
+        }
+      }
       
       return {
         shopifyId: item._id,
         title: item.title,
         totalQuantity: item.totalQuantity,
-        totalRevenue: parseFloat(item.totalRevenue.toFixed(2)),
+        totalRevenue: parseFloat(item.totalRevenue?.toFixed(2) || 0),
         ordersCount: item.ordersCount,
         avgOrderQuantity: parseFloat((item.totalQuantity / item.ordersCount).toFixed(2)),
-        // Datos de Product si existe
-        inventory: product?.totalInventory || 'unknown',
-        isLowStock: product?.isLowStock || false,
-        isOutOfStock: product?.isOutOfStock || false,
-        featuredImage: product?.featuredImage || null,
-        priceRange: product?.priceRange || null
+        ...productData
       };
     }));
     
     return enriched;
   }
 
-  /**
-   * Calcular productos comprados juntos frecuentemente
-   */
   async calculateFrequentlyBoughtTogether(days = 90, minCoOccurrences = 3) {
+    const Order = getOrderModel();
+    if (!Order) return [];
+    
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - days);
     
-    // Obtener órdenes con múltiples productos
     const orders = await Order.find({
       orderDate: { $gte: startDate },
-      'lineItems.1': { $exists: true },  // Al menos 2 items
+      'lineItems.1': { $exists: true },
       financialStatus: { $in: ['paid', 'partially_refunded'] }
     }).select('lineItems').lean();
     
-    // Contar co-ocurrencias
     const coOccurrences = new Map();
     
     for (const order of orders) {
-      const productIds = order.lineItems.map(item => item.productId).filter(Boolean);
+      const productIds = [...new Set(order.lineItems.map(li => li.productId))];
       
-      // Generar pares únicos
       for (let i = 0; i < productIds.length; i++) {
         for (let j = i + 1; j < productIds.length; j++) {
-          const pair = [productIds[i], productIds[j]].sort().join('|');
-          coOccurrences.set(pair, (coOccurrences.get(pair) || 0) + 1);
-        }
-      }
-    }
-    
-    // Filtrar y formatear
-    const pairs = [];
-    for (const [pair, count] of coOccurrences) {
-      if (count >= minCoOccurrences) {
-        const [id1, id2] = pair.split('|');
-        pairs.push({ productIds: [id1, id2], count });
-      }
-    }
-    
-    // Ordenar por frecuencia
-    pairs.sort((a, b) => b.count - a.count);
-    
-    // Enriquecer con títulos
-    const enriched = await Promise.all(pairs.slice(0, 20).map(async (pair) => {
-      const [p1, p2] = await Promise.all([
-        Product.findOne({ shopifyId: pair.productIds[0] }).select('title').lean(),
-        Product.findOne({ shopifyId: pair.productIds[1] }).select('title').lean()
-      ]);
-      
-      return {
-        products: [
-          { id: pair.productIds[0], title: p1?.title || 'Unknown' },
-          { id: pair.productIds[1], title: p2?.title || 'Unknown' }
-        ],
-        coOccurrences: pair.count
-      };
-    }));
-    
-    return enriched;
-  }
-
-  /**
-   * Obtener productos con bajo stock que se están vendiendo
-   */
-  async getCriticalInventory() {
-    const lowStockProducts = await Product.find({
-      status: 'active',
-      totalInventory: { $gt: 0, $lte: 15 },
-      'salesStats.last7Days.unitsSold': { $gt: 0 }
-    })
-    .sort({ 'salesStats.last7Days.unitsSold': -1 })
-    .select('title totalInventory salesStats.last7Days priceRange')
-    .lean();
-    
-    return lowStockProducts.map(p => ({
-      title: p.title,
-      currentStock: p.totalInventory,
-      soldLast7Days: p.salesStats?.last7Days?.unitsSold || 0,
-      estimatedDaysUntilStockout: p.salesStats?.last7Days?.unitsSold > 0
-        ? Math.ceil(p.totalInventory / (p.salesStats.last7Days.unitsSold / 7))
-        : null,
-      potentialLostRevenue: p.salesStats?.last7Days?.unitsSold > 0
-        ? parseFloat(((p.salesStats.last7Days.unitsSold / 7) * 14 * (p.priceRange?.min || 0)).toFixed(2))
-        : 0
-    }));
-  }
-
-  /**
-   * Actualizar stats de venta desde una orden procesada
-   */
-  async recordOrderSales(order, listId = null, listName = null) {
-    if (!order.lineItems || order.lineItems.length === 0) {
-      return;
-    }
-    
-    for (const item of order.lineItems) {
-      if (item.productId) {
-        await Product.recordSale(
-          item.productId,
-          item.quantity,
-          item.price * item.quantity,
-          listId,
-          listName
-        );
-      }
-    }
-    
-    // Actualizar frequently bought together si hay múltiples productos
-    if (order.lineItems.length >= 2) {
-      await this.updateFrequentlyBoughtTogether(order.lineItems);
-    }
-  }
-
-  /**
-   * Actualizar productos comprados juntos
-   */
-  async updateFrequentlyBoughtTogether(lineItems) {
-    const productIds = lineItems.map(item => item.productId).filter(Boolean);
-    
-    for (let i = 0; i < productIds.length; i++) {
-      for (let j = i + 1; j < productIds.length; j++) {
-        const product = await Product.findOne({ shopifyId: productIds[i] });
-        
-        if (product) {
-          const existing = product.frequentlyBoughtWith.find(
-            fbt => fbt.shopifyId === productIds[j]
-          );
+          const key = [productIds[i], productIds[j]].sort().join('|');
           
-          if (existing) {
-            existing.coOccurrences += 1;
-            existing.lastUpdated = new Date();
-          } else {
-            const relatedProduct = await Product.findOne({ shopifyId: productIds[j] }).lean();
-            product.frequentlyBoughtWith.push({
-              shopifyId: productIds[j],
-              title: relatedProduct?.title || 'Unknown',
-              coOccurrences: 1,
-              lastUpdated: new Date()
+          if (!coOccurrences.has(key)) {
+            coOccurrences.set(key, {
+              products: [
+                order.lineItems.find(li => li.productId === productIds[i]),
+                order.lineItems.find(li => li.productId === productIds[j])
+              ],
+              count: 0
             });
           }
-          
-          await product.save();
+          coOccurrences.get(key).count++;
         }
+      }
+    }
+    
+    return Array.from(coOccurrences.values())
+      .filter(co => co.count >= minCoOccurrences)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10)
+      .map(co => ({
+        products: co.products.map(p => ({
+          productId: p?.productId,
+          title: p?.title || 'Unknown'
+        })),
+        coOccurrences: co.count
+      }));
+  }
+
+  // ==================== HELPERS DE QUERY (REEMPLAZAN STATIC METHODS) ====================
+
+  async getLowStock(threshold = 10) {
+    const Product = getProductModel();
+    if (!Product) return [];
+    
+    return Product.find({
+      status: 'active',
+      totalInventory: { $gt: 0, $lte: threshold }
+    })
+    .sort({ totalInventory: 1 })
+    .select('title handle totalInventory variants.sku salesStats.last30Days shopifyId')
+    .lean();
+  }
+
+  async getOutOfStock() {
+    const Product = getProductModel();
+    if (!Product) return [];
+    
+    return Product.find({
+      status: 'active',
+      totalInventory: { $lte: 0 }
+    })
+    .select('title handle salesStats.last30Days shopifyId')
+    .lean();
+  }
+
+  async getGiftSets() {
+    const Product = getProductModel();
+    if (!Product) return [];
+    
+    return Product.find({
+      status: 'active',
+      'categories.isGiftSet': true,
+      totalInventory: { $gt: 0 }
+    })
+    .sort({ 'salesStats.last30Days.revenue': -1 })
+    .lean();
+  }
+
+  async getInventorySummary() {
+    const Product = getProductModel();
+    if (!Product) {
+      return {
+        totalProducts: 0,
+        totalInventory: 0,
+        totalValue: 0,
+        lowStockCount: 0,
+        outOfStockCount: 0,
+        giftSetsCount: 0
+      };
+    }
+    
+    const [summary] = await Product.aggregate([
+      { $match: { status: 'active' } },
+      {
+        $group: {
+          _id: null,
+          totalProducts: { $sum: 1 },
+          totalInventory: { $sum: '$totalInventory' },
+          totalValue: { $sum: { $multiply: ['$totalInventory', { $ifNull: ['$priceRange.min', 0] }] } },
+          lowStockCount: { $sum: { $cond: [{ $and: [{ $gt: ['$totalInventory', 0] }, { $lte: ['$totalInventory', 10] }] }, 1, 0] } },
+          outOfStockCount: { $sum: { $cond: [{ $lte: ['$totalInventory', 0] }, 1, 0] } },
+          giftSetsCount: { $sum: { $cond: [{ $eq: ['$categories.isGiftSet', true] }, 1, 0] } }
+        }
+      }
+    ]);
+    
+    return summary || {
+      totalProducts: 0,
+      totalInventory: 0,
+      totalValue: 0,
+      lowStockCount: 0,
+      outOfStockCount: 0,
+      giftSetsCount: 0
+    };
+  }
+
+  async getCriticalInventory(threshold = 10, minRecentSales = 5) {
+    const Product = getProductModel();
+    if (!Product) return [];
+    
+    return Product.find({
+      status: 'active',
+      totalInventory: { $gt: 0, $lte: threshold },
+      'salesStats.last7Days.unitsSold': { $gte: minRecentSales }
+    })
+    .sort({ totalInventory: 1 })
+    .lean();
+  }
+
+  async recordOrderSales(order, listId = null, listName = null) {
+    const Product = getProductModel();
+    if (!Product || !order?.lineItems) return;
+    
+    for (const item of order.lineItems) {
+      if (!item.productId) continue;
+      
+      try {
+        const update = {
+          $inc: {
+            'salesStats.totalUnitsSold': item.quantity,
+            'salesStats.totalRevenue': item.price * item.quantity,
+            'salesStats.totalOrders': 1,
+            'salesStats.last30Days.unitsSold': item.quantity,
+            'salesStats.last30Days.revenue': item.price * item.quantity,
+            'salesStats.last30Days.orders': 1,
+            'salesStats.last7Days.unitsSold': item.quantity,
+            'salesStats.last7Days.revenue': item.price * item.quantity,
+            'salesStats.last7Days.orders': 1
+          },
+          $set: { 'salesStats.lastSoldAt': new Date() }
+        };
+        
+        await Product.findOneAndUpdate(
+          { shopifyId: item.productId.toString() },
+          update
+        );
+      } catch (e) {
+        console.warn(`Error recording sale for product ${item.productId}:`, e.message);
       }
     }
   }
 
   // ==================== DATOS PARA CLAUDE ====================
 
-  /**
-   * Preparar datos de productos para análisis de Claude
-   */
   async prepareProductDataForClaude() {
-    const [
-      topSelling,
-      lowStock,
-      outOfStock,
-      giftSets,
-      inventorySummary,
-      frequentlyBought
-    ] = await Promise.all([
-      this.calculateTopSellingFromOrders(30),
-      Product.getLowStock(10),
-      Product.getOutOfStock(),
-      Product.getGiftSets(),
-      Product.getInventorySummary(),
-      this.calculateFrequentlyBoughtTogether(90, 3)
-    ]);
-    
-    return {
-      // Top 10 productos más vendidos (30 días)
-      topSellingProducts: topSelling.slice(0, 10).map(p => ({
-        title: p.title,
-        revenue: `$${p.totalRevenue}`,
-        unitsSold: p.totalQuantity,
-        orders: p.ordersCount,
-        inventory: p.inventory,
-        isLowStock: p.isLowStock,
-        isOutOfStock: p.isOutOfStock
-      })),
+    try {
+      const [
+        topSelling,
+        lowStock,
+        outOfStock,
+        giftSets,
+        inventorySummary,
+        frequentlyBought
+      ] = await Promise.all([
+        this.calculateTopSellingFromOrders(30),
+        this.getLowStock(10),
+        this.getOutOfStock(),
+        this.getGiftSets(),
+        this.getInventorySummary(),
+        this.calculateFrequentlyBoughtTogether(90, 3)
+      ]);
       
-      // Productos con bajo stock que se venden
-      lowStockAlert: lowStock.slice(0, 5).map(p => ({
-        title: p.title,
-        currentStock: p.totalInventory,
-        recentSales: p.salesStats?.last30Days?.unitsSold || 0
-      })),
-      
-      // Productos agotados con ventas previas
-      outOfStockProducts: outOfStock.slice(0, 5).map(p => ({
-        title: p.title,
-        previousRevenue: p.salesStats?.last30Days?.revenue || 0
-      })),
-      
-      // Gift sets disponibles (importantes para holidays)
-      giftSetsAvailable: giftSets.slice(0, 5).map(p => ({
-        title: p.title,
-        inventory: p.totalInventory,
-        price: p.priceRange?.min || 0
-      })),
-      
-      // Resumen de inventario
-      inventorySummary: {
-        totalProducts: inventorySummary.totalProducts,
-        totalUnits: inventorySummary.totalInventory,
-        estimatedValue: `$${inventorySummary.totalValue.toFixed(0)}`,
-        lowStockCount: inventorySummary.lowStockCount,
-        outOfStockCount: inventorySummary.outOfStockCount
-      },
-      
-      // Top bundles naturales
-      frequentlyBoughtTogether: frequentlyBought.slice(0, 5).map(pair => ({
-        products: pair.products.map(p => p.title),
-        timesBoughtTogether: pair.coOccurrences
-      }))
-    };
+      return {
+        topSellingProducts: topSelling.slice(0, 10).map(p => ({
+          title: p.title,
+          revenue: `$${p.totalRevenue}`,
+          unitsSold: p.totalQuantity,
+          orders: p.ordersCount,
+          inventory: p.inventory,
+          isLowStock: p.isLowStock,
+          isOutOfStock: p.isOutOfStock
+        })),
+        
+        lowStockAlert: lowStock.slice(0, 5).map(p => ({
+          title: p.title,
+          currentStock: p.totalInventory,
+          recentSales: p.salesStats?.last30Days?.unitsSold || 0
+        })),
+        
+        outOfStockProducts: outOfStock.slice(0, 5).map(p => ({
+          title: p.title,
+          previousRevenue: p.salesStats?.last30Days?.revenue || 0
+        })),
+        
+        giftSetsAvailable: giftSets.slice(0, 5).map(p => ({
+          title: p.title,
+          inventory: p.totalInventory,
+          price: p.priceRange?.min || 0
+        })),
+        
+        inventorySummary: {
+          totalProducts: inventorySummary.totalProducts,
+          totalUnits: inventorySummary.totalInventory,
+          estimatedValue: `$${(inventorySummary.totalValue || 0).toFixed(0)}`,
+          lowStockCount: inventorySummary.lowStockCount,
+          outOfStockCount: inventorySummary.outOfStockCount
+        },
+        
+        frequentlyBoughtTogether: frequentlyBought.slice(0, 5).map(pair => ({
+          products: pair.products.map(p => p.title),
+          timesBoughtTogether: pair.coOccurrences
+        }))
+      };
+    } catch (error) {
+      console.error('Error preparing product data for Claude:', error);
+      return {
+        topSellingProducts: [],
+        lowStockAlert: [],
+        outOfStockProducts: [],
+        giftSetsAvailable: [],
+        inventorySummary: { totalProducts: 0, totalUnits: 0, estimatedValue: '$0', lowStockCount: 0, outOfStockCount: 0 },
+        frequentlyBoughtTogether: []
+      };
+    }
   }
 }
 

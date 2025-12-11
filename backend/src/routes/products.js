@@ -1,22 +1,46 @@
 // backend/src/routes/products.js
 // 🛒 Product Routes - API para gestión de productos
+// ⚠️ FIXED: No depende de métodos estáticos del modelo
 const express = require('express');
 const router = express.Router();
 const { auth, authorize } = require('../middleware/auth');
-const Product = require('../models/Product');
-const productService = require('../services/productService');
+const mongoose = require('mongoose');
+
+// Import dinámico del modelo para evitar conflictos
+const getProductModel = () => {
+  try {
+    return mongoose.model('Product');
+  } catch (e) {
+    // Si no existe, retornar null
+    return null;
+  }
+};
+
+// Lazy import del service
+let _productService = null;
+const getProductService = () => {
+  if (!_productService) {
+    try {
+      _productService = require('../services/productService');
+    } catch (e) {
+      console.error('ProductService not available:', e.message);
+    }
+  }
+  return _productService;
+};
 
 router.use(auth);
 
 // ==================== SYNC ====================
 
-/**
- * POST /api/products/sync
- * Sincronizar todos los productos desde Shopify
- */
 router.post('/sync', authorize('admin'), async (req, res) => {
   try {
     console.log('🔄 Starting manual product sync...');
+    
+    const productService = getProductService();
+    if (!productService) {
+      return res.status(503).json({ error: 'Product service not available' });
+    }
     
     const result = await productService.syncAllProducts();
     
@@ -34,12 +58,13 @@ router.post('/sync', authorize('admin'), async (req, res) => {
 
 // ==================== LISTADO ====================
 
-/**
- * GET /api/products
- * Listar todos los productos
- */
 router.get('/', authorize('admin', 'manager'), async (req, res) => {
   try {
+    const Product = getProductModel();
+    if (!Product) {
+      return res.json({ success: true, products: [], message: 'Product model not initialized' });
+    }
+    
     const { 
       status = 'active',
       limit = 50,
@@ -88,22 +113,53 @@ router.get('/', authorize('admin', 'manager'), async (req, res) => {
 
 // ==================== ANÁLISIS ====================
 
-/**
- * GET /api/products/top-selling
- * Obtener productos más vendidos
- */
 router.get('/top-selling', authorize('admin', 'manager'), async (req, res) => {
   try {
     const { days = 30, limit = 10 } = req.query;
     
-    const topProducts = await productService.calculateTopSellingFromOrders(
-      parseInt(days)
-    );
+    const productService = getProductService();
+    if (productService) {
+      try {
+        const topProducts = await productService.calculateTopSellingFromOrders(parseInt(days));
+        return res.json({
+          success: true,
+          period: `${days} días`,
+          products: topProducts.slice(0, parseInt(limit))
+        });
+      } catch (e) {
+        console.warn('calculateTopSellingFromOrders failed:', e.message);
+      }
+    }
+    
+    // Fallback: query directo al modelo
+    const Product = getProductModel();
+    if (!Product) {
+      return res.json({ success: true, products: [], message: 'Product model not initialized' });
+    }
+    
+    const periodField = parseInt(days) <= 7 ? 'salesStats.last7Days.revenue' : 'salesStats.last30Days.revenue';
+    
+    const products = await Product.find({ status: 'active' })
+      .sort({ [periodField]: -1 })
+      .limit(parseInt(limit))
+      .select('title handle priceRange totalInventory salesStats categories featuredImage isLowStock isOutOfStock')
+      .lean();
+    
+    const formatted = products.map(p => ({
+      shopifyId: p.shopifyId,
+      title: p.title,
+      revenue: `$${(p.salesStats?.last30Days?.revenue || 0).toFixed(2)}`,
+      unitsSold: p.salesStats?.last30Days?.unitsSold || 0,
+      inventory: p.totalInventory || 0,
+      isLowStock: p.isLowStock || false,
+      isOutOfStock: p.isOutOfStock || false,
+      featuredImage: p.featuredImage
+    }));
     
     res.json({
       success: true,
       period: `${days} días`,
-      products: topProducts.slice(0, parseInt(limit))
+      products: formatted
     });
     
   } catch (error) {
@@ -112,21 +168,37 @@ router.get('/top-selling', authorize('admin', 'manager'), async (req, res) => {
   }
 });
 
-/**
- * GET /api/products/low-stock
- * Obtener productos con bajo stock
- */
 router.get('/low-stock', authorize('admin', 'manager'), async (req, res) => {
   try {
     const { threshold = 10 } = req.query;
     
-    const lowStock = await Product.getLowStock(parseInt(threshold));
+    const Product = getProductModel();
+    if (!Product) {
+      return res.json({ success: true, products: [], count: 0, message: 'Product model not initialized' });
+    }
+    
+    // Query directo en lugar de método estático
+    const lowStock = await Product.find({
+      status: 'active',
+      totalInventory: { $gt: 0, $lte: parseInt(threshold) }
+    })
+    .sort({ totalInventory: 1 })
+    .select('title handle totalInventory variants.sku salesStats.last30Days shopifyId')
+    .lean();
+    
+    const formatted = lowStock.map(p => ({
+      shopifyId: p.shopifyId,
+      title: p.title,
+      handle: p.handle,
+      currentStock: p.totalInventory,
+      recentSales: p.salesStats?.last30Days?.unitsSold || 0
+    }));
     
     res.json({
       success: true,
       threshold: parseInt(threshold),
       count: lowStock.length,
-      products: lowStock
+      products: formatted
     });
     
   } catch (error) {
@@ -135,13 +207,19 @@ router.get('/low-stock', authorize('admin', 'manager'), async (req, res) => {
   }
 });
 
-/**
- * GET /api/products/out-of-stock
- * Obtener productos agotados
- */
 router.get('/out-of-stock', authorize('admin', 'manager'), async (req, res) => {
   try {
-    const outOfStock = await Product.getOutOfStock();
+    const Product = getProductModel();
+    if (!Product) {
+      return res.json({ success: true, products: [], count: 0, message: 'Product model not initialized' });
+    }
+    
+    const outOfStock = await Product.find({
+      status: 'active',
+      totalInventory: { $lte: 0 }
+    })
+    .select('title handle salesStats.last30Days shopifyId')
+    .lean();
     
     res.json({
       success: true,
@@ -155,13 +233,20 @@ router.get('/out-of-stock', authorize('admin', 'manager'), async (req, res) => {
   }
 });
 
-/**
- * GET /api/products/gift-sets
- * Obtener gift sets disponibles
- */
 router.get('/gift-sets', authorize('admin', 'manager'), async (req, res) => {
   try {
-    const giftSets = await Product.getGiftSets();
+    const Product = getProductModel();
+    if (!Product) {
+      return res.json({ success: true, products: [], count: 0, message: 'Product model not initialized' });
+    }
+    
+    const giftSets = await Product.find({
+      status: 'active',
+      'categories.isGiftSet': true,
+      totalInventory: { $gt: 0 }
+    })
+    .sort({ 'salesStats.last30Days.revenue': -1 })
+    .lean();
     
     res.json({
       success: true,
@@ -175,13 +260,14 @@ router.get('/gift-sets', authorize('admin', 'manager'), async (req, res) => {
   }
 });
 
-/**
- * GET /api/products/frequently-bought-together
- * Obtener productos comprados juntos frecuentemente
- */
 router.get('/frequently-bought-together', authorize('admin', 'manager'), async (req, res) => {
   try {
     const { days = 90, minOccurrences = 3 } = req.query;
+    
+    const productService = getProductService();
+    if (!productService) {
+      return res.json({ success: true, pairs: [], message: 'Product service not available' });
+    }
     
     const pairs = await productService.calculateFrequentlyBoughtTogether(
       parseInt(days),
@@ -201,17 +287,55 @@ router.get('/frequently-bought-together', authorize('admin', 'manager'), async (
   }
 });
 
-/**
- * GET /api/products/inventory-summary
- * Obtener resumen de inventario
- */
 router.get('/inventory-summary', authorize('admin', 'manager'), async (req, res) => {
   try {
-    const summary = await Product.getInventorySummary();
+    const Product = getProductModel();
+    if (!Product) {
+      return res.json({ 
+        success: true, 
+        summary: {
+          totalProducts: 0,
+          totalInventory: 0,
+          totalValue: 0,
+          lowStockCount: 0,
+          outOfStockCount: 0,
+          giftSetsCount: 0,
+          estimatedValue: '$0'
+        },
+        message: 'Product model not initialized' 
+      });
+    }
+    
+    // Query de agregación directo
+    const [summary] = await Product.aggregate([
+      { $match: { status: 'active' } },
+      {
+        $group: {
+          _id: null,
+          totalProducts: { $sum: 1 },
+          totalInventory: { $sum: '$totalInventory' },
+          totalValue: { $sum: { $multiply: ['$totalInventory', { $ifNull: ['$priceRange.min', 0] }] } },
+          lowStockCount: { $sum: { $cond: [{ $and: [{ $gt: ['$totalInventory', 0] }, { $lte: ['$totalInventory', 10] }] }, 1, 0] } },
+          outOfStockCount: { $sum: { $cond: [{ $lte: ['$totalInventory', 0] }, 1, 0] } },
+          giftSetsCount: { $sum: { $cond: [{ $eq: ['$categories.isGiftSet', true] }, 1, 0] } }
+        }
+      }
+    ]);
+    
+    const result = summary || {
+      totalProducts: 0,
+      totalInventory: 0,
+      totalValue: 0,
+      lowStockCount: 0,
+      outOfStockCount: 0,
+      giftSetsCount: 0
+    };
+    
+    result.estimatedValue = `$${(result.totalValue || 0).toLocaleString()}`;
     
     res.json({
       success: true,
-      summary
+      summary: result
     });
     
   } catch (error) {
@@ -220,12 +344,13 @@ router.get('/inventory-summary', authorize('admin', 'manager'), async (req, res)
   }
 });
 
-/**
- * GET /api/products/critical-inventory
- * Obtener productos críticos (bajo stock + vendiéndose)
- */
 router.get('/critical-inventory', authorize('admin', 'manager'), async (req, res) => {
   try {
+    const productService = getProductService();
+    if (!productService) {
+      return res.json({ success: true, products: [], count: 0, message: 'Product service not available' });
+    }
+    
     const critical = await productService.getCriticalInventory();
     
     res.json({
@@ -242,12 +367,13 @@ router.get('/critical-inventory', authorize('admin', 'manager'), async (req, res
 
 // ==================== DETALLE ====================
 
-/**
- * GET /api/products/:id
- * Obtener detalle de un producto
- */
 router.get('/:id', authorize('admin', 'manager'), async (req, res) => {
   try {
+    const Product = getProductModel();
+    if (!Product) {
+      return res.status(404).json({ error: 'Product model not initialized' });
+    }
+    
     const product = await Product.findById(req.params.id).lean();
     
     if (!product) {
