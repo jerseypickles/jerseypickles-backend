@@ -1,4 +1,4 @@
-// backend/src/routes/analytics.js (CORREGIDO - String vs ObjectId fix)
+// backend/src/routes/analytics.js (FIXED - Top Campaigns sort by actual revenue)
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -520,38 +520,61 @@ router.get('/trends', auth, async (req, res) => {
 });
 
 // ============================================================
-// 4. TOP CAMPAIGNS POR REVENUE (sin cambios necesarios)
+// 4. TOP CAMPAIGNS POR REVENUE (🔧 FIXED - Sort by actual revenue)
 // ============================================================
 router.get('/top-campaigns', auth, async (req, res) => {
   try {
     const { days = 90, limit = 10 } = req.query;
     const { start, end } = getDateRange(parseInt(days));
     
-    // Ya filtra por status: 'sent'
+    console.log(`🏆 Top campaigns request: ${days} days, limit ${limit}`);
+    
+    // 🔧 PASO 1: Obtener revenue REAL de Orders agrupado por campaña
+    const revenueByCampaign = await Order.aggregate([
+      {
+        $match: {
+          orderDate: { $gte: start, $lte: end },
+          'attribution.campaign': { $exists: true, $ne: null }
+        }
+      },
+      {
+        $group: {
+          _id: '$attribution.campaign',
+          revenue: { $sum: '$totalPrice' },
+          orders: { $sum: 1 },
+          avgOrderValue: { $avg: '$totalPrice' }
+        }
+      },
+      { $sort: { revenue: -1 } }
+    ]);
+    
+    console.log(`   Found ${revenueByCampaign.length} campaigns with revenue`);
+    
+    // Crear map de revenue (soporta ObjectId y String)
+    const revenueMap = new Map();
+    revenueByCampaign.forEach(r => {
+      revenueMap.set(r._id.toString(), r);
+    });
+    
+    // 🔧 PASO 2: Obtener todas las campañas enviadas en el período
     const campaigns = await Campaign.find({
       status: 'sent',
       sentAt: { $gte: start, $lte: end }
     })
     .select('name subject sentAt stats segment')
-    .populate('segment', 'name')
-    .sort({ 'stats.totalRevenue': -1 })
-    .limit(parseInt(limit));
+    .populate('segment', 'name');
     
-    const enrichedCampaigns = await Promise.all(
-      campaigns.map(async (campaign) => {
-        const orders = await Order.aggregate([
-          { $match: { 'attribution.campaign': campaign._id } },
-          {
-            $group: {
-              _id: null,
-              revenue: { $sum: '$totalPrice' },
-              orders: { $sum: 1 },
-              avgOrderValue: { $avg: '$totalPrice' }
-            }
-          }
-        ]);
+    console.log(`   Found ${campaigns.length} sent campaigns in period`);
+    
+    // 🔧 PASO 3: Enriquecer con revenue real y ordenar
+    const enrichedCampaigns = campaigns
+      .map(campaign => {
+        const campaignIdStr = campaign._id.toString();
+        const orderData = revenueMap.get(campaignIdStr) || { revenue: 0, orders: 0, avgOrderValue: 0 };
         
-        const orderData = orders[0] || { revenue: 0, orders: 0, avgOrderValue: 0 };
+        const sent = campaign.stats?.sent || 0;
+        const opened = campaign.stats?.opened || 0;
+        const clicked = campaign.stats?.clicked || 0;
         
         return {
           _id: campaign._id,
@@ -560,25 +583,40 @@ router.get('/top-campaigns', auth, async (req, res) => {
           sentAt: campaign.sentAt,
           segment: campaign.segment?.name || 'N/A',
           stats: {
-            sent: campaign.stats.sent,
-            opened: campaign.stats.opened,
-            clicked: campaign.stats.clicked,
-            openRate: campaign.stats.openRate || 
-              (campaign.stats.sent > 0 ? ((campaign.stats.opened / campaign.stats.sent) * 100).toFixed(2) : 0) + '%',
-            clickRate: campaign.stats.clickRate ||
-              (campaign.stats.sent > 0 ? ((campaign.stats.clicked / campaign.stats.sent) * 100).toFixed(2) : 0) + '%'
+            sent,
+            opened,
+            clicked,
+            openRate: sent > 0 ? ((opened / sent) * 100).toFixed(2) : '0',
+            clickRate: sent > 0 ? ((clicked / sent) * 100).toFixed(2) : '0'
           },
           revenue: {
             total: orderData.revenue.toFixed(2),
             orders: orderData.orders,
-            avgOrderValue: orderData.avgOrderValue.toFixed(2),
-            revenuePerEmail: campaign.stats.sent > 0 
-              ? (orderData.revenue / campaign.stats.sent).toFixed(3) 
+            avgOrderValue: (orderData.avgOrderValue || 0).toFixed(2),
+            revenuePerEmail: sent > 0 
+              ? (orderData.revenue / sent).toFixed(3) 
               : '0.000'
-          }
+          },
+          // Campo temporal para sorting
+          _revenueTotal: orderData.revenue
         };
       })
-    );
+      // 🔧 ORDENAR POR REVENUE REAL (descendente)
+      .sort((a, b) => b._revenueTotal - a._revenueTotal)
+      // Aplicar límite
+      .slice(0, parseInt(limit))
+      // Remover campo temporal
+      .map(({ _revenueTotal, ...campaign }) => campaign);
+    
+    console.log(`   Returning ${enrichedCampaigns.length} campaigns sorted by revenue`);
+    
+    // Debug: mostrar top 3
+    if (enrichedCampaigns.length > 0) {
+      console.log('   Top 3:');
+      enrichedCampaigns.slice(0, 3).forEach((c, i) => {
+        console.log(`     ${i + 1}. ${c.name}: $${c.revenue.total}`);
+      });
+    }
     
     res.json({
       period: { start, end, days: parseInt(days) },
