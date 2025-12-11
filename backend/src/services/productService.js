@@ -1,6 +1,6 @@
 // backend/src/services/productService.js
 // 🛒 Product Service - Sync desde Shopify y análisis de productos
-// ⚠️ FIXED: No depende de métodos estáticos del modelo
+// ✅ FIXED: Usa SHOPIFY_STORE_URL (no SHOPIFY_STORE_DOMAIN)
 const mongoose = require('mongoose');
 
 // Obtener modelo de forma segura
@@ -25,18 +25,28 @@ const getOrderModel = () => {
 class ProductService {
   
   constructor() {
-    this.shopifyDomain = process.env.SHOPIFY_STORE_DOMAIN;
+    // ✅ FIXED: Usa SHOPIFY_STORE_URL (tu variable) con fallback a SHOPIFY_STORE_DOMAIN
+    this.shopifyDomain = process.env.SHOPIFY_STORE_URL || process.env.SHOPIFY_STORE_DOMAIN;
     this.accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+    
+    // Log para debug
+    console.log(`📦 ProductService initialized - Domain: ${this.shopifyDomain ? '✅ Set' : '❌ Missing'}, Token: ${this.accessToken ? '✅ Set' : '❌ Missing'}`);
   }
 
   // ==================== SHOPIFY API ====================
 
   async shopifyRequest(endpoint, method = 'GET', body = null) {
     if (!this.shopifyDomain || !this.accessToken) {
+      console.error('❌ Shopify config missing:', {
+        domain: this.shopifyDomain ? 'set' : 'MISSING',
+        token: this.accessToken ? 'set' : 'MISSING'
+      });
       throw new Error('Shopify credentials not configured');
     }
 
     const url = `https://${this.shopifyDomain}/admin/api/2024-01/${endpoint}`;
+    
+    console.log(`🔗 Shopify API: ${method} ${endpoint}`);
     
     const options = {
       method,
@@ -54,6 +64,7 @@ class ProductService {
     
     if (!response.ok) {
       const errorText = await response.text();
+      console.error(`❌ Shopify API error: ${response.status}`, errorText.substring(0, 200));
       throw new Error(`Shopify API error: ${response.status} - ${errorText}`);
     }
 
@@ -69,6 +80,7 @@ class ProductService {
     }
     
     console.log('🔄 Syncing products from Shopify...');
+    console.log(`   Domain: ${this.shopifyDomain}`);
     
     let synced = 0;
     let pageInfo = null;
