@@ -1,4 +1,4 @@
-// backend/server.js (ACTUALIZADO CON FLOWS, AI ANALYTICS & MANEJO DE ERRORES)
+// backend/server.js (ACTUALIZADO CON PRODUCTS, CALENDAR, FLOWS, AI ANALYTICS)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -74,7 +74,7 @@ app.use('/api/webhooks/orders', express.raw({
   limit: '10mb'
 }));
 
-// NUEVOS WEBHOOKS PARA FLOWS
+// WEBHOOKS PARA FLOWS
 app.use('/api/webhooks/checkouts', express.raw({ 
   type: 'application/json',
   limit: '10mb'
@@ -119,7 +119,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({ 
     message: '🥒 Jersey Pickles Email Marketing API',
-    version: '2.1.0',
+    version: '2.2.0',  // 🆕 Versión actualizada
     status: 'running',
     features: {
       campaigns: '✅ Email Campaigns',
@@ -127,7 +127,9 @@ app.get('/', (req, res) => {
       segmentation: '✅ Dynamic Segments',
       revenue_tracking: '✅ Revenue Attribution',
       shopify_integration: '✅ Shopify Webhooks',
-      ai_analytics: '✅ AI-Powered Insights'  // 🆕
+      ai_analytics: '✅ AI-Powered Insights',
+      products: '✅ Product Analytics',      // 🆕
+      calendar: '✅ Business Calendar'       // 🆕
     },
     endpoints: {
       health: '/health',
@@ -142,7 +144,9 @@ app.get('/', (req, res) => {
       tracking: '/api/track',
       analytics: '/api/analytics',
       popup: '/api/popup',
-      ai: '/api/ai'  // 🆕
+      ai: '/api/ai',
+      products: '/api/products',    // 🆕
+      calendar: '/api/calendar'     // 🆕
     }
   });
 });
@@ -171,7 +175,7 @@ try {
   });
 }
 
-// 🆕 AI ANALYTICS ROUTES - con manejo de errores
+// AI ANALYTICS ROUTES - con manejo de errores
 try {
   const aiRoutes = require('./src/routes/ai');
   app.use('/api/ai', aiRoutes);
@@ -180,6 +184,36 @@ try {
   app.use('/api/ai', (req, res) => {
     res.status(503).json({ 
       error: 'AI Analytics feature is currently unavailable',
+      message: 'Please check system configuration'
+    });
+  });
+}
+
+// 🆕 PRODUCTS ROUTES - con manejo de errores
+try {
+  const productsRoutes = require('./src/routes/products');
+  app.use('/api/products', productsRoutes);
+  console.log('✅ Products routes loaded');
+} catch (error) {
+  console.log('⚠️  Products routes not available:', error.message);
+  app.use('/api/products', (req, res) => {
+    res.status(503).json({ 
+      error: 'Products feature is currently unavailable',
+      message: 'Please check system configuration'
+    });
+  });
+}
+
+// 🆕 BUSINESS CALENDAR ROUTES - con manejo de errores
+try {
+  const calendarRoutes = require('./src/routes/calendar');
+  app.use('/api/calendar', calendarRoutes);
+  console.log('✅ Calendar routes loaded');
+} catch (error) {
+  console.log('⚠️  Calendar routes not available:', error.message);
+  app.use('/api/calendar', (req, res) => {
+    res.status(503).json({ 
+      error: 'Calendar feature is currently unavailable',
       message: 'Please check system configuration'
     });
   });
@@ -207,11 +241,13 @@ const PORT = process.env.PORT || 5000;
 
 // Variables para tracking de features disponibles
 let flowEngineAvailable = false;
-let aiAnalyticsAvailable = false;  // 🆕
+let aiAnalyticsAvailable = false;
+let productsAvailable = false;     // 🆕
+let calendarAvailable = false;     // 🆕
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║   🥒 Jersey Pickles Email Marketing v2.1      ║');
+  console.log('║   🥒 Jersey Pickles Email Marketing v2.2      ║');
   console.log('╚════════════════════════════════════════════════╝');
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -235,7 +271,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     }
   }, 2000);
   
-  // 🆕 Inicializar AI Analytics Job
+  // Inicializar AI Analytics Job
   setTimeout(() => {
     console.log('\n🧠 Inicializando AI Analytics Engine...');
     try {
@@ -254,7 +290,54 @@ const server = app.listen(PORT, '0.0.0.0', () => {
       console.log('   El sistema continuará funcionando sin AI insights');
       console.log('   Para habilitar, instale: npm install node-cron');
     }
-  }, 3000); // Delay de 3 segundos (después del Flow Engine)
+  }, 3000);
+  
+  // 🆕 Inicializar Product Service
+  setTimeout(() => {
+    console.log('\n📦 Inicializando Product Service...');
+    try {
+      const productService = require('./src/services/productService');
+      productsAvailable = true;
+      console.log('✅ Product Service listo');
+      console.log('   Sync manual: POST /api/products/sync');
+      console.log('   Webhooks: products/create, products/update, products/delete');
+    } catch (error) {
+      productsAvailable = false;
+      console.log('⚠️  Product Service no disponible:', error.message);
+    }
+  }, 3500);
+  
+  // 🆕 Inicializar Business Calendar Service
+  setTimeout(() => {
+    console.log('\n📅 Inicializando Business Calendar Service...');
+    try {
+      const businessCalendarService = require('./src/services/businessCalendarService');
+      calendarAvailable = true;
+      console.log('✅ Business Calendar Service listo');
+      console.log('   Goals: POST /api/calendar/goals/monthly');
+      console.log('   Events: POST /api/calendar/events/initialize');
+      
+      // Inicializar eventos del año actual si no existen
+      businessCalendarService.initializeCommonEvents().catch(err => {
+        console.log('   ⚠️ Error inicializando eventos:', err.message);
+      });
+    } catch (error) {
+      calendarAvailable = false;
+      console.log('⚠️  Business Calendar Service no disponible:', error.message);
+    }
+  }, 4000);
+  
+  // 🆕 Resumen de features después de inicialización
+  setTimeout(() => {
+    console.log('\n╔════════════════════════════════════════════════╗');
+    console.log('║              FEATURES STATUS                   ║');
+    console.log('╠════════════════════════════════════════════════╣');
+    console.log(`║  Flow Engine:        ${flowEngineAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
+    console.log(`║  AI Analytics:       ${aiAnalyticsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
+    console.log(`║  Product Analytics:  ${productsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
+    console.log(`║  Business Calendar:  ${calendarAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
+    console.log('╚════════════════════════════════════════════════╝');
+  }, 5000);
 });
 
 // ==================== GRACEFUL SHUTDOWN ====================
@@ -286,7 +369,7 @@ const gracefulShutdown = async (signal) => {
       }
     }
     
-    // 🆕 CERRAR AI ANALYTICS JOB
+    // CERRAR AI ANALYTICS JOB
     if (aiAnalyticsAvailable) {
       try {
         const aiAnalyticsJob = require('./src/jobs/aiAnalyticsJob');

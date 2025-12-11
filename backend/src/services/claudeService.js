@@ -1,8 +1,16 @@
 // backend/src/services/claudeService.js
 // 🧠 Servicio para integración con Claude API (Anthropic)
-// 🔧 UPDATED: Análisis profundo y narrativo en lugar de bullets genéricos
+// 🔧 UPDATED: Integración con datos de productos y calendario de negocio
 
 const Anthropic = require('@anthropic-ai/sdk');
+
+// 🆕 Importar servicios de contexto de negocio
+let businessContextService = null;
+try {
+  businessContextService = require('./businessContextService');
+} catch (error) {
+  console.log('⚠️  businessContextService no disponible:', error.message);
+}
 
 class ClaudeService {
   constructor() {
@@ -43,14 +51,30 @@ class ClaudeService {
       return this.getFallbackInsights(metricsData);
     }
 
+    // 🆕 Obtener contexto de negocio (productos, goals, promociones)
+    let businessContext = null;
+    let businessContextPrompt = '';
+    
+    if (businessContextService) {
+      try {
+        console.log('📦 Obteniendo contexto de negocio para Claude...');
+        businessContext = await businessContextService.getFullBusinessContext();
+        businessContextPrompt = businessContextService.formatBusinessContextForPrompt(businessContext);
+        console.log('✅ Contexto de negocio obtenido');
+      } catch (error) {
+        console.log('⚠️  Error obteniendo contexto de negocio:', error.message);
+      }
+    }
+
     const systemPrompt = this.buildSystemPrompt();
-    const userPrompt = this.buildUserPrompt(metricsData);
+    const userPrompt = this.buildUserPrompt(metricsData, businessContextPrompt);
 
     try {
       console.log('🧠 Llamando a Claude API para análisis profundo...');
       console.log(`   Model: ${this.model}`);
       console.log(`   System prompt length: ${systemPrompt.length} chars`);
       console.log(`   User prompt length: ${userPrompt.length} chars`);
+      console.log(`   Business context: ${businessContextPrompt ? 'Incluido' : 'No disponible'}`);
       
       const startTime = Date.now();
 
@@ -61,7 +85,7 @@ class ClaudeService {
 
       const apiPromise = this.client.messages.create({
         model: this.model,
-        max_tokens: 2500,
+        max_tokens: 3500, // 🆕 Aumentado para incluir análisis de productos
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }]
       });
@@ -95,6 +119,7 @@ class ClaudeService {
       console.log(`   - Deep analysis sections: ${Object.keys(analysis.deepAnalysis || {}).length}`);
       console.log(`   - Action plan items: ${analysis.actionPlan?.length || 0}`);
       console.log(`   - Quick wins: ${analysis.quickWins?.length || 0}`);
+      console.log(`   - Product recommendations: ${analysis.productRecommendations ? 'Sí' : 'No'}`);
 
       return {
         success: true,
@@ -105,7 +130,8 @@ class ClaudeService {
           input: response.usage?.input_tokens || 0,
           output: response.usage?.output_tokens || 0
         },
-        duration
+        duration,
+        hasBusinessContext: !!businessContextPrompt
       };
 
     } catch (error) {
@@ -123,7 +149,7 @@ class ClaudeService {
   }
 
   /**
-   * System prompt optimizado para análisis profundo
+   * System prompt optimizado para análisis profundo CON PRODUCTOS
    */
   buildSystemPrompt() {
     return `Eres el consultor de email marketing de Jersey Pickles, un e-commerce de pickles artesanales y olives gourmet en New Jersey.
@@ -131,7 +157,7 @@ class ClaudeService {
 TU ROL: Analizar datos y dar recomendaciones ESPECÍFICAS y ACCIONABLES, no genéricas.
 
 CONTEXTO DEL NEGOCIO:
-- Productos: Pickles artesanales, olives marinadas, productos gourmet
+- Productos: Pickles artesanales, olives marinadas, productos gourmet, gift sets
 - Clientes: Consumidores D2C, restaurantes, delis, wholesale
 - Ticket promedio: $35-50 por orden
 - Estacionalidad: Picos en BBQ season (Mayo-Sept) y holidays (Nov-Dic)
@@ -142,15 +168,24 @@ BENCHMARKS INDUSTRIA FOOD & BEVERAGE:
 - Bounce Rate saludable: <2%
 - Unsub Rate saludable: <0.5%
 
+🆕 IMPORTANTE - DATOS DE PRODUCTOS Y OBJETIVOS:
+Cuando recibas datos de productos, inventario y objetivos de revenue:
+1. MENCIONA productos específicos por nombre en tus recomendaciones
+2. NO recomiendes promocionar productos AGOTADOS o con stock crítico
+3. PRIORIZA productos con buen stock y alta demanda
+4. AJUSTA urgencia de recomendaciones según el progreso del objetivo de revenue
+5. CONSIDERA eventos próximos para timing de campañas
+6. USA los datos de "qué compra cada lista" para personalizar sugerencias
+
 INSTRUCCIONES:
 1. Responde SOLO con JSON válido (sin markdown, sin \`\`\`)
 2. Todo en ESPAÑOL
-3. Sé específico - menciona datos reales del input
+3. Sé específico - menciona datos reales del input, INCLUYENDO NOMBRES DE PRODUCTOS
 4. Prioriza acciones por impacto en revenue
 
 FORMATO JSON REQUERIDO:
 {
-  "executiveSummary": "2-3 oraciones con el estado general y la acción más importante a tomar",
+  "executiveSummary": "2-3 oraciones con el estado general, mención de objetivo de revenue si existe, y la acción más importante",
   "deepAnalysis": {
     "health": {
       "status": "healthy o warning o critical",
@@ -160,30 +195,34 @@ FORMATO JSON REQUERIDO:
       "analysis": "Párrafo sobre qué funciona en subjects y qué evitar"
     },
     "lists": {
-      "analysis": "Párrafo sobre performance de listas y oportunidades"
+      "analysis": "Párrafo sobre performance de listas, QUÉ PRODUCTOS prefiere cada una"
     },
     "timing": {
       "analysis": "Párrafo sobre mejores horarios"
     },
     "revenue": {
-      "analysis": "Párrafo sobre efectividad de email como canal de revenue"
+      "analysis": "Párrafo sobre efectividad de email, progreso hacia objetivo mensual si existe"
+    },
+    "inventory": {
+      "analysis": "Párrafo sobre estado de inventario y productos a promocionar/evitar"
     }
   },
   "actionPlan": [
     {
       "priority": 1,
       "title": "Título corto",
-      "what": "Qué hacer específicamente",
+      "what": "Qué hacer específicamente, MENCIONANDO PRODUCTOS por nombre",
       "why": "Por qué importa basado en los datos",
       "how": "Pasos concretos",
-      "expectedImpact": "Resultado esperado"
+      "expectedImpact": "Resultado esperado en $ si es posible",
+      "products": ["Producto 1", "Producto 2"]
     }
   ],
-  "quickWins": ["Acción rápida 1", "Acción rápida 2"],
+  "quickWins": ["Acción rápida 1 con producto específico", "Acción rápida 2"],
   "warnings": [
     {
       "severity": "critical o warning",
-      "issue": "Problema",
+      "issue": "Problema (incluir producto si aplica)",
       "consequence": "Qué pasa si no se arregla",
       "solution": "Cómo arreglarlo"
     }
@@ -191,24 +230,56 @@ FORMATO JSON REQUERIDO:
   "opportunities": [
     {
       "opportunity": "Oportunidad identificada",
-      "potential": "Impacto potencial",
-      "effort": "low o medium o high"
+      "potential": "Impacto potencial en $",
+      "effort": "low o medium o high",
+      "products": ["Productos relacionados"]
     }
   ],
+  "productRecommendations": {
+    "toPromote": [
+      {
+        "product": "Nombre del producto",
+        "reason": "Por qué promocionarlo ahora",
+        "suggestedDiscount": "Sugerencia de descuento si aplica",
+        "targetList": "Lista ideal para este producto"
+      }
+    ],
+    "toAvoid": [
+      {
+        "product": "Nombre del producto",
+        "reason": "Por qué NO promocionar (agotado, bajo stock, etc.)"
+      }
+    ],
+    "bundles": [
+      {
+        "products": ["Producto 1", "Producto 2"],
+        "reason": "Por qué funcionan juntos",
+        "suggestedName": "Nombre sugerido para el bundle"
+      }
+    ]
+  },
+  "revenueGoalStrategy": {
+    "currentStatus": "Resumen del progreso hacia el objetivo",
+    "daysRemaining": 0,
+    "dailyTarget": "$X necesario por día",
+    "recommendedActions": ["Acción 1 para alcanzar objetivo", "Acción 2"],
+    "riskLevel": "low o medium o high"
+  },
   "nextCampaignSuggestion": {
     "type": "Tipo de campaña",
     "targetList": "Lista recomendada",
-    "subjectIdeas": ["Idea 1", "Idea 2", "Idea 3"],
+    "subjectIdeas": ["Idea 1 con producto", "Idea 2", "Idea 3"],
     "bestTime": "Día y hora recomendados",
-    "rationale": "Por qué esta campaña ahora"
+    "products": ["Producto 1 a destacar", "Producto 2"],
+    "rationale": "Por qué esta campaña ahora, conectando datos de email + productos + objetivo"
   }
 }`;
   }
 
   /**
-   * User prompt con datos detallados y contexto estratégico
+   * User prompt con datos detallados, contexto estratégico Y PRODUCTOS
    */
-  buildUserPrompt(data) {
+  buildUserPrompt(data, businessContextPrompt = '') {
     // Sección de contexto estratégico si está disponible
     const strategicSection = data.strategicContext ? `
 ═══════════════════════════════════════════════════════════
@@ -300,13 +371,46 @@ ${data.alerts?.length > 0 ? data.alerts.map(a =>
   `[${a.severity?.toUpperCase()}] ${a.message}`
 ).join('\n') : '✅ Sin alertas activas'}
 
+${businessContextPrompt}
+
+═══════════════════════════════════════════════════════════
+📝 TU TAREA
 ═══════════════════════════════════════════════════════════
 
-Genera un análisis profundo y accionable. Recuerda:
-- Sé específico con números y nombres de los datos
-- Conecta insights con el negocio de pickles/gourmet
-- Prioriza por impacto en revenue
-- Da acciones concretas, no genéricas`;
+Basándote en TODOS los datos anteriores (email + productos + objetivos), proporciona:
+
+1. RESUMEN EJECUTIVO (2-3 oraciones)
+   - Estado general
+   - Progreso hacia objetivo de revenue (si existe)
+   - Oportunidad principal con PRODUCTO específico
+
+2. ANÁLISIS PROFUNDO
+   - Incluye sección de "inventory" si hay datos de productos
+   - Conecta performance de listas con productos que prefieren
+
+3. PLAN DE ACCIÓN (3-4 acciones priorizadas)
+   - NOMBRA productos específicos en cada acción
+   - Calcula impacto en $ cuando sea posible
+
+4. RECOMENDACIONES DE PRODUCTOS
+   - Qué promocionar (con stock disponible)
+   - Qué evitar (agotados o bajo stock)
+   - Bundles naturales basados en compras juntas
+
+5. ESTRATEGIA PARA OBJETIVO DE REVENUE (si existe)
+   - Status actual
+   - Acciones para alcanzarlo
+
+6. PRÓXIMA CAMPAÑA SUGERIDA
+   - Con productos específicos a destacar
+   - Subject lines que mencionen esos productos
+
+IMPORTANTE:
+- Sé ESPECÍFICO: menciona PRODUCTOS, listas, y números concretos
+- NO recomiendes productos AGOTADOS
+- Considera el OBJETIVO DE REVENUE para urgencia
+- Aprovecha EVENTOS PRÓXIMOS
+- Personaliza según lo que COMPRA CADA LISTA`;
   }
 
   /**
@@ -557,12 +661,15 @@ Genera un análisis profundo y accionable. Recuerda:
         subjects: { analysis: subjectsAnalysis },
         lists: { analysis: listsAnalysis },
         timing: { analysis: timingAnalysis },
-        revenue: { analysis: revenueAnalysis }
+        revenue: { analysis: revenueAnalysis },
+        inventory: { analysis: 'Datos de inventario no disponibles. Sincroniza productos desde Shopify para ver análisis de stock.' }
       },
       actionPlan,
       quickWins,
       warnings,
       opportunities,
+      productRecommendations: null,
+      revenueGoalStrategy: null,
       nextCampaignSuggestion: data.timing?.best ? {
         type: 'Promocional',
         targetList: data.lists?.[0]?.name || 'Lista principal',
@@ -572,17 +679,19 @@ Genera un análisis profundo y accionable. Recuerda:
           '15% OFF weekend special (ends Sunday)'
         ],
         bestTime: data.timing.best,
+        products: [],
         rationale: 'Basado en tus mejores horarios históricos'
       } : null,
       generatedAt: new Date().toISOString(),
       model: 'fallback-analysis',
       tokensUsed: { input: 0, output: 0 },
-      isFallback: true
+      isFallback: true,
+      hasBusinessContext: false
     };
   }
 
   /**
-   * Generar sugerencias de subject line
+   * Generar sugerencias de subject line CON PRODUCTOS
    */
   async suggestSubjectLines(context) {
     if (!this.isAvailable()) {
@@ -597,6 +706,22 @@ Genera un análisis profundo y accionable. Recuerda:
       };
     }
 
+    // 🆕 Obtener productos top si están disponibles
+    let productContext = '';
+    if (businessContextService) {
+      try {
+        const businessContext = await businessContextService.getFullBusinessContext();
+        if (businessContext.products?.topSellingProducts?.length > 0) {
+          productContext = `\nProductos más vendidos para mencionar: ${businessContext.products.topSellingProducts.slice(0, 3).map(p => p.title).join(', ')}`;
+        }
+        if (businessContext.products?.giftSetsAvailable?.length > 0) {
+          productContext += `\nGift sets disponibles: ${businessContext.products.giftSetsAvailable.slice(0, 2).map(p => p.title).join(', ')}`;
+        }
+      } catch (error) {
+        console.log('⚠️  No se pudieron obtener productos para subjects');
+      }
+    }
+
     const prompt = `Genera 5 subject lines para un email de Jersey Pickles (pickles y olives gourmet de New Jersey).
 
 Contexto:
@@ -604,12 +729,15 @@ Contexto:
 - Audiencia: ${context.audience || 'clientes generales'}
 - Objetivo: ${context.objective || 'engagement y ventas'}
 - Lo que funciona para este negocio: ${context.patterns || 'emojis (especialmente 🥒🫒), números/descuentos, urgencia'}
+${productContext}
+
+${context.products?.length > 0 ? `Productos a destacar en esta campaña: ${context.products.join(', ')}` : ''}
 
 Responde SOLO con JSON válido:
 {
   "suggestions": [
     { 
-      "subject": "El subject line completo", 
+      "subject": "El subject line completo (puede mencionar producto específico)", 
       "reason": "Por qué funcionaría para este negocio específico",
       "expectedOpenRate": "Estimado basado en patrones (ej: 22-28%)"
     }
@@ -638,6 +766,72 @@ Responde SOLO con JSON válido:
         success: false,
         message: error.message,
         suggestions: []
+      };
+    }
+  }
+
+  /**
+   * 🆕 Generar análisis rápido de un producto específico
+   */
+  async analyzeProductForCampaign(productName, listName = null) {
+    if (!this.isAvailable()) {
+      return {
+        success: false,
+        message: 'Claude API no disponible'
+      };
+    }
+
+    let productData = '';
+    if (businessContextService) {
+      try {
+        const context = await businessContextService.getFullBusinessContext();
+        const product = context.products?.topSellingProducts?.find(
+          p => p.title.toLowerCase().includes(productName.toLowerCase())
+        );
+        if (product) {
+          productData = `\nDatos del producto:
+- Revenue últimos 30 días: ${product.revenue}
+- Unidades vendidas: ${product.unitsSold}
+- Stock actual: ${product.inventory}
+- Estado: ${product.isLowStock ? 'BAJO STOCK' : product.isOutOfStock ? 'AGOTADO' : 'Disponible'}`;
+        }
+      } catch (error) {
+        console.log('⚠️  No se pudieron obtener datos del producto');
+      }
+    }
+
+    const prompt = `Analiza brevemente si "${productName}" es buen candidato para una campaña de email${listName ? ` a la lista "${listName}"` : ''}.
+${productData}
+
+Responde en JSON:
+{
+  "recommendation": "promote o avoid o caution",
+  "reason": "Explicación breve",
+  "suggestedAngle": "Ángulo de venta sugerido",
+  "subjectIdea": "Una idea de subject line"
+}`;
+
+    try {
+      const response = await this.client.messages.create({
+        model: this.model,
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }]
+      });
+
+      const content = response.content[0].text;
+      const parsed = this.parseResponse(content);
+      
+      return {
+        success: true,
+        ...parsed,
+        generatedAt: new Date().toISOString()
+      };
+
+    } catch (error) {
+      console.error('Error analizando producto:', error.message);
+      return {
+        success: false,
+        message: error.message
       };
     }
   }
