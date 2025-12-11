@@ -745,8 +745,38 @@ class AICalculator {
       };
     }
 
+    // 🔧 SANITIZAR DATOS: Corregir open rates imposibles
+    const sanitizedCampaigns = campaigns.map(c => {
+      const sent = c.stats?.sent || 0;
+      const opened = c.stats?.opened || 0;
+      const clicked = c.stats?.clicked || 0;
+      
+      // Recalcular rates para evitar datos corruptos
+      // Open rate no puede ser > 100%
+      let openRate = c.stats?.openRate || 0;
+      if (openRate > 100 || openRate < 0) {
+        // Recalcular desde los números base
+        openRate = sent > 0 ? Math.min((opened / sent) * 100, 100) : 0;
+        console.log(`⚠️ Corrigiendo open rate corrupto en "${c.name}": ${c.stats?.openRate}% → ${openRate.toFixed(2)}%`);
+      }
+      
+      let clickRate = c.stats?.clickRate || 0;
+      if (clickRate > 100 || clickRate < 0) {
+        clickRate = opened > 0 ? Math.min((clicked / opened) * 100, 100) : 0;
+      }
+      
+      return {
+        ...c,
+        stats: {
+          ...c.stats,
+          openRate: Math.min(Math.max(openRate, 0), 100),
+          clickRate: Math.min(Math.max(clickRate, 0), 100)
+        }
+      };
+    });
+
     // === AGREGAR CONTEXTO A CADA CAMPAÑA ===
-    const campaignsWithContext = campaigns.map(c => ({
+    const campaignsWithContext = sanitizedCampaigns.map(c => ({
       ...c,
       context: this.detectCampaignContext(c.subject, c.name)
     }));
@@ -824,12 +854,12 @@ class AICalculator {
       };
     });
 
-    // Top/Low performers
+    // Top/Low performers (ya sanitizados)
     const sorted = [...campaignsWithContext].sort((a, b) => (b.stats?.openRate || 0) - (a.stats?.openRate || 0));
     const topPerformers = sorted.slice(0, 5).map(c => ({
       subject: c.subject,
-      openRate: c.stats?.openRate || 0,
-      clickRate: c.stats?.clickRate || 0,
+      openRate: parseFloat((c.stats?.openRate || 0).toFixed(2)),
+      clickRate: parseFloat((c.stats?.clickRate || 0).toFixed(2)),
       sent: c.stats?.sent || 0,
       sentAt: c.sentAt,
       name: c.name,
@@ -837,8 +867,8 @@ class AICalculator {
     }));
     const lowPerformers = sorted.slice(-5).reverse().map(c => ({
       subject: c.subject,
-      openRate: c.stats?.openRate || 0,
-      clickRate: c.stats?.clickRate || 0,
+      openRate: parseFloat((c.stats?.openRate || 0).toFixed(2)),
+      clickRate: parseFloat((c.stats?.clickRate || 0).toFixed(2)),
       sent: c.stats?.sent || 0,
       sentAt: c.sentAt,
       name: c.name,
@@ -848,7 +878,7 @@ class AICalculator {
     const avgOpenRate = calcAvg(campaignsWithContext.map(c => ({ openRate: c.stats?.openRate || 0 })));
 
     // === ANÁLISIS ESTRATÉGICO ===
-    const strategicContext = this.analyzeStrategicContext(campaigns);
+    const strategicContext = this.analyzeStrategicContext(sanitizedCampaigns);
 
     // Generar recomendaciones
     const recommendations = [];
@@ -900,12 +930,12 @@ class AICalculator {
       period: { days, start, end: new Date() },
       summary: {
         campaignsAnalyzed: campaigns.length,
-        avgOpenRate: avgOpenRate.toFixed(2),
-        bestOpenRate: topPerformers[0]?.openRate?.toFixed(2) || 0,
-        worstOpenRate: lowPerformers[0]?.openRate?.toFixed(2) || 0,
-        score: Math.round(avgOpenRate * 3),
+        avgOpenRate: parseFloat(Math.min(avgOpenRate, 100).toFixed(2)), // 🔧 Capped
+        bestOpenRate: parseFloat(Math.min(topPerformers[0]?.openRate || 0, 100).toFixed(2)),
+        worstOpenRate: parseFloat(Math.min(lowPerformers[0]?.openRate || 0, 100).toFixed(2)),
+        score: Math.round(Math.min(avgOpenRate, 100) * 3),
         status: avgOpenRate > 25 ? 'healthy' : avgOpenRate > 15 ? 'warning' : 'critical',
-        primaryMetric: { name: 'avgOpenRate', value: avgOpenRate }
+        primaryMetric: { name: 'avgOpenRate', value: Math.min(avgOpenRate, 100) }
       },
       // === NUEVO: Contexto estratégico ===
       strategicContext,
@@ -1298,34 +1328,42 @@ class AICalculator {
 
   // ==================== 6. PREPARE DATA FOR CLAUDE (últimos 15 días) ====================
 
+  /**
+   * Helper para sanitizar rates (máx 100%, mín 0%)
+   */
+  sanitizeRate(rate) {
+    const num = parseFloat(rate) || 0;
+    return parseFloat(Math.min(Math.max(num, 0), 100).toFixed(2));
+  }
+
   prepareDataForClaude(analysisResults) {
     const { healthCheck, subjectAnalysis, sendTiming, listPerformance } = analysisResults;
 
-    // === HEALTH ===
+    // === HEALTH (sanitizado) ===
     const health = {
-      openRate: parseFloat(healthCheck?.metrics?.rates?.openRate) || 0,
-      clickRate: parseFloat(healthCheck?.metrics?.rates?.clickRate) || 0,
-      bounceRate: parseFloat(healthCheck?.metrics?.rates?.bounceRate) || 0,
-      unsubRate: parseFloat(healthCheck?.metrics?.rates?.unsubRate) || 0,
-      deliveryRate: parseFloat(healthCheck?.metrics?.rates?.deliveryRate) || 0,
+      openRate: this.sanitizeRate(healthCheck?.metrics?.rates?.openRate),
+      clickRate: this.sanitizeRate(healthCheck?.metrics?.rates?.clickRate),
+      bounceRate: this.sanitizeRate(healthCheck?.metrics?.rates?.bounceRate),
+      unsubRate: this.sanitizeRate(healthCheck?.metrics?.rates?.unsubRate),
+      deliveryRate: this.sanitizeRate(healthCheck?.metrics?.rates?.deliveryRate),
       campaignsSent: healthCheck?.metrics?.campaigns?.sent || 0,
       totalSent: healthCheck?.metrics?.totals?.sent || 0,
-      healthScore: healthCheck?.health?.score || 0,
+      healthScore: Math.min(healthCheck?.health?.score || 0, 100),
       status: healthCheck?.health?.status || 'unknown'
     };
 
-    // === SUBJECTS ===
+    // === SUBJECTS (sanitizado) ===
     const subjects = {
       top: subjectAnalysis?.topPerformers?.[0] ? {
         subject: subjectAnalysis.topPerformers[0].subject,
-        openRate: subjectAnalysis.topPerformers[0].openRate,
-        clickRate: subjectAnalysis.topPerformers[0].clickRate,
+        openRate: this.sanitizeRate(subjectAnalysis.topPerformers[0].openRate),
+        clickRate: this.sanitizeRate(subjectAnalysis.topPerformers[0].clickRate),
         sentAt: subjectAnalysis.topPerformers[0].sentAt,
         context: subjectAnalysis.topPerformers[0].context
       } : null,
       bottom: subjectAnalysis?.lowPerformers?.[0] ? {
         subject: subjectAnalysis.lowPerformers[0].subject,
-        openRate: subjectAnalysis.lowPerformers[0].openRate,
+        openRate: this.sanitizeRate(subjectAnalysis.lowPerformers[0].openRate),
         sentAt: subjectAnalysis.lowPerformers[0].sentAt,
         context: subjectAnalysis.lowPerformers[0].context
       } : null,
@@ -1333,26 +1371,31 @@ class AICalculator {
       campaignsAnalyzed: subjectAnalysis?.summary?.campaignsAnalyzed || 0
     };
 
-    // Extraer patrones de subjects
+    // Extraer patrones de subjects (sanitizando lifts imposibles)
     if (subjectAnalysis?.insights) {
       const ins = subjectAnalysis.insights;
-      if (ins.hasEmoji) subjects.patterns.emoji = `${ins.hasEmoji.lift}% lift`;
-      if (ins.hasNumber) subjects.patterns.numbers = `${ins.hasNumber.lift}% lift`;
-      if (ins.hasUrgency) subjects.patterns.urgency = `${ins.hasUrgency.lift}% lift`;
-      if (ins.hasQuestion) subjects.patterns.questions = `${ins.hasQuestion.lift}% lift`;
+      // Limitar lift a rangos razonables (-100% a +200%)
+      const sanitizeLift = (lift) => {
+        const num = parseFloat(lift) || 0;
+        return Math.min(Math.max(num, -100), 200).toFixed(1) + '% lift';
+      };
+      if (ins.hasEmoji) subjects.patterns.emoji = sanitizeLift(ins.hasEmoji.lift);
+      if (ins.hasNumber) subjects.patterns.numbers = sanitizeLift(ins.hasNumber.lift);
+      if (ins.hasUrgency) subjects.patterns.urgency = sanitizeLift(ins.hasUrgency.lift);
+      if (ins.hasQuestion) subjects.patterns.questions = sanitizeLift(ins.hasQuestion.lift);
     }
 
     // === CONTEXTO ESTRATÉGICO ===
     const strategicContext = subjectAnalysis?.strategicContext || null;
 
-    // === LISTS ===
+    // === LISTS (sanitizado) ===
     const lists = (listPerformance?.lists || []).slice(0, 5).map(list => ({
       name: list.name,
-      openRate: list.rates?.openRate || 0,
-      clickRate: list.rates?.clickRate || 0,
-      revenue: list.revenue?.total || 0,
-      revenuePerEmail: list.revenue?.perEmail || 0,
-      unsubRate: list.rates?.unsubRate || 0,
+      openRate: this.sanitizeRate(list.rates?.openRate),
+      clickRate: this.sanitizeRate(list.rates?.clickRate),
+      revenue: Math.max(list.revenue?.total || 0, 0),
+      revenuePerEmail: Math.max(list.revenue?.perEmail || 0, 0),
+      unsubRate: this.sanitizeRate(list.rates?.unsubRate),
       campaigns: list.campaigns || 0,
       recentCampaigns: list.recentCampaigns || []
     }));
@@ -1366,14 +1409,14 @@ class AICalculator {
       topHours: (sendTiming?.bestTimes || []).slice(0, 3).map(t => ({
         day: t.day,
         hour: t.hour,
-        score: t.score
+        score: this.sanitizeRate(t.score) + '%'
       }))
     };
 
     // === REVENUE ===
     const revenue = {
-      total: parseFloat(listPerformance?.summary?.totalRevenue) || 0,
-      perEmail: listPerformance?.summary?.avgRevenuePerEmail || 0,
+      total: Math.max(parseFloat(listPerformance?.summary?.totalRevenue) || 0, 0),
+      perEmail: Math.max(listPerformance?.summary?.avgRevenuePerEmail || 0, 0),
       orders: 0
     };
 
@@ -1395,7 +1438,7 @@ class AICalculator {
       generatedAt: new Date().toISOString(),
       health,
       subjects,
-      strategicContext, // <-- NUEVO
+      strategicContext,
       lists,
       timing,
       revenue,
