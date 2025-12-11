@@ -206,11 +206,33 @@ FORMATO JSON REQUERIDO:
   }
 
   /**
-   * User prompt con datos detallados
+   * User prompt con datos detallados y contexto estratégico
    */
   buildUserPrompt(data) {
-    return `Analiza estos datos de email marketing de Jersey Pickles del ${data.period || 'último mes'}:
+    // Sección de contexto estratégico si está disponible
+    const strategicSection = data.strategicContext ? `
+═══════════════════════════════════════════════════════════
+🎯 CONTEXTO ESTRATÉGICO (IMPORTANTE)
+═══════════════════════════════════════════════════════════
+Fase actual: ${data.strategicContext.strategicPhase || 'normal'}
+${data.strategicContext.dominantEvent ? `Evento detectado: ${data.strategicContext.dominantEvent}` : ''}
+Descripción: ${data.strategicContext.phaseDescription || 'Operación normal'}
 
+Tipos de campaña detectados:
+• Build-up/Anticipación: ${data.strategicContext.summary?.buildupCampaigns || 0} campañas
+• Promocionales: ${data.strategicContext.summary?.promoCampaigns || 0} campañas
+• Contenido/Newsletter: ${data.strategicContext.summary?.contentCampaigns || 0} campañas
+
+${data.strategicContext.interpretation ? `Interpretación: ${data.strategicContext.interpretation}` : ''}
+
+⚠️ IMPORTANTE: Analiza las métricas en CONTEXTO de la fase actual:
+- Si estamos en "buildup": alto engagement + bajo revenue es NORMAL (la audiencia espera la oferta)
+- Si estamos en "event_active" o "sales_push": se espera conversión directa
+- Si estamos en "nurturing": el foco es engagement, no revenue inmediato
+` : '';
+
+    return `Analiza estos datos de email marketing de Jersey Pickles de los ÚLTIMOS 15 DÍAS:
+${strategicSection}
 ═══════════════════════════════════════════════════════════
 📊 MÉTRICAS DE SALUD
 ═══════════════════════════════════════════════════════════
@@ -229,10 +251,12 @@ FORMATO JSON REQUERIDO:
 🏆 MEJOR PERFORMER:
    Subject: "${data.subjects?.top?.subject || 'N/A'}"
    Open Rate: ${data.subjects?.top?.openRate || 0}%
+   ${data.subjects?.top?.context?.type ? `Tipo: ${data.subjects.top.context.type}${data.subjects.top.context.event ? ` (${data.subjects.top.context.event})` : ''}` : ''}
 
 💀 PEOR PERFORMER:
    Subject: "${data.subjects?.bottom?.subject || 'N/A'}"
    Open Rate: ${data.subjects?.bottom?.openRate || 0}%
+   ${data.subjects?.bottom?.context?.type ? `Tipo: ${data.subjects.bottom.context.type}${data.subjects.bottom.context.event ? ` (${data.subjects.bottom.context.event})` : ''}` : ''}
 
 📈 PATRONES DETECTADOS:
    • Emojis: ${data.subjects?.patterns?.emoji || 'sin datos suficientes'}
