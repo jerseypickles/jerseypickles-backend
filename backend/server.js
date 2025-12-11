@@ -1,4 +1,4 @@
-// backend/server.js (ACTUALIZADO CON PRODUCTS, CALENDAR, FLOWS, AI ANALYTICS)
+// backend/server.js (FIXED - Proper webhook raw body capture)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -19,11 +19,8 @@ app.set('trust proxy', 1);
 connectDB();
 
 // ==================== CARGAR MODELOS ====================
-// ⚠️ IMPORTANTE: Los modelos deben cargarse ANTES de las rutas
-// para que mongoose.model() funcione en los servicios
 console.log('📦 Loading models...');
 
-// Modelos base
 try { require('./src/models/User'); } catch(e) { /* opcional */ }
 try { require('./src/models/Customer'); } catch(e) { /* opcional */ }
 try { require('./src/models/Order'); } catch(e) { /* opcional */ }
@@ -31,7 +28,6 @@ try { require('./src/models/Campaign'); } catch(e) { /* opcional */ }
 try { require('./src/models/List'); } catch(e) { /* opcional */ }
 try { require('./src/models/Segment'); } catch(e) { /* opcional */ }
 
-// 🆕 Modelos nuevos para Products y Calendar
 try { 
   require('./src/models/Product'); 
   console.log('   ✅ Product model loaded');
@@ -54,7 +50,7 @@ console.log('📦 Models ready');
 app.use(helmet());
 app.use(compression());
 
-// CORS MEJORADA
+// CORS
 const corsOptions = {
   origin: function (origin, callback) {
     if (!origin) {
@@ -93,38 +89,63 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
-// express.raw() SOLO para webhooks de Shopify (necesitan Buffer para HMAC)
-app.use('/api/webhooks/customers', express.raw({ 
-  type: 'application/json',
-  limit: '10mb'
+// ==================== 🔧 WEBHOOK RAW BODY CAPTURE ====================
+// CRÍTICO: Este middleware DEBE ir ANTES de express.json()
+// Captura el raw body para validación HMAC de Shopify
+
+app.use('/api/webhooks', (req, res, next) => {
+  // Solo procesar POST requests
+  if (req.method !== 'POST') {
+    return next();
+  }
+  
+  // Skip si no es de Shopify (ej: /api/webhooks/resend)
+  const isShopifyWebhook = req.headers['x-shopify-hmac-sha256'];
+  if (!isShopifyWebhook) {
+    return next();
+  }
+  
+  const chunks = [];
+  
+  req.on('data', (chunk) => {
+    chunks.push(chunk);
+  });
+  
+  req.on('end', () => {
+    if (chunks.length > 0) {
+      // Guardar raw body como Buffer
+      req.body = Buffer.concat(chunks);
+      req.rawBody = req.body; // Backup
+      
+      console.log(`📦 Raw body captured: ${req.body.length} bytes for ${req.path}`);
+    }
+    next();
+  });
+  
+  req.on('error', (err) => {
+    console.error('❌ Error capturing webhook body:', err);
+    next(err);
+  });
+});
+
+// ==================== JSON PARSER ====================
+// Este va DESPUÉS del webhook raw body capture
+// El middleware de arriba ya manejó los webhooks de Shopify
+
+app.use(express.json({ 
+  limit: '10mb',
+  // NO parsear si ya es Buffer (webhooks de Shopify)
+  verify: (req, res, buf) => {
+    // Guardar raw body para cualquier ruta que lo necesite
+    if (req.path.includes('/webhooks/')) {
+      req.rawBody = buf;
+    }
+  }
 }));
 
-app.use('/api/webhooks/orders', express.raw({ 
-  type: 'application/json',
-  limit: '10mb'
-}));
-
-// WEBHOOKS PARA FLOWS
-app.use('/api/webhooks/checkouts', express.raw({ 
-  type: 'application/json',
-  limit: '10mb'
-}));
-
-app.use('/api/webhooks/products', express.raw({ 
-  type: 'application/json',
-  limit: '10mb'
-}));
-
-app.use('/api/webhooks/refunds', express.raw({ 
-  type: 'application/json',
-  limit: '10mb'
-}));
-
-// express.json() para todas las demás rutas
-app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// COOKIE PARSER (para attribution tracking)
+// COOKIE PARSER
 app.use(cookieParser());
 
 // Rate limiting para rutas API (excepto webhooks)
@@ -149,7 +170,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({ 
     message: '🥒 Jersey Pickles Email Marketing API',
-    version: '2.2.0',
+    version: '2.3.0',
     status: 'running',
     features: {
       campaigns: '✅ Email Campaigns',
@@ -191,7 +212,7 @@ app.use('/api/orders', require('./src/routes/orders'));
 app.use('/api/segments', require('./src/routes/segments'));
 app.use('/api/campaigns', require('./src/routes/campaigns'));
 
-// FLOWS ROUTES - con manejo de errores
+// FLOWS ROUTES
 try {
   const flowsRoutes = require('./src/routes/flows');
   app.use('/api/flows', flowsRoutes);
@@ -205,7 +226,7 @@ try {
   });
 }
 
-// AI ANALYTICS ROUTES - con manejo de errores
+// AI ANALYTICS ROUTES
 try {
   const aiRoutes = require('./src/routes/ai');
   app.use('/api/ai', aiRoutes);
@@ -219,7 +240,7 @@ try {
   });
 }
 
-// 🆕 PRODUCTS ROUTES - con manejo de errores
+// PRODUCTS ROUTES
 try {
   const productsRoutes = require('./src/routes/products');
   app.use('/api/products', productsRoutes);
@@ -234,7 +255,7 @@ try {
   });
 }
 
-// 🆕 BUSINESS CALENDAR ROUTES - con manejo de errores
+// BUSINESS CALENDAR ROUTES
 try {
   const calendarRoutes = require('./src/routes/calendar');
   app.use('/api/calendar', calendarRoutes);
@@ -255,6 +276,8 @@ app.use('/api/analytics', require('./src/routes/analytics'));
 app.use('/api/upload', require('./src/routes/upload'));
 app.use('/api/popup', require('./src/routes/popup'));
 
+app.use('/api/webhook-debug', require('./src/routes/webhookDiagnostic'));
+
 app.use('*', (req, res) => {
   res.status(404).json({ 
     error: 'Ruta no encontrada',
@@ -269,7 +292,6 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 
-// Variables para tracking de features disponibles
 let flowEngineAvailable = false;
 let aiAnalyticsAvailable = false;
 let productsAvailable = false;
@@ -277,17 +299,18 @@ let calendarAvailable = false;
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║   🥒 Jersey Pickles Email Marketing v2.2      ║');
+  console.log('║   🥒 Jersey Pickles Email Marketing v2.3      ║');
   console.log('╚════════════════════════════════════════════════╝');
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔗 MongoDB: ${mongoose.connection.readyState === 1 ? '✅ Connected' : '⏳ Connecting...'}`);
   console.log(`🍪 Cookie Parser: Enabled`);
-  console.log(`🔒 Webhook Validation: ${process.env.SHOPIFY_WEBHOOK_SECRET ? 'Enabled' : '⚠️  Disabled'}`);
+  console.log(`🔒 Webhook Validation: ${process.env.SHOPIFY_WEBHOOK_SECRET ? '✅ Enabled' : '⚠️  Disabled'}`);
   console.log(`📧 Email Queue: ${process.env.REDIS_URL ? '✅ Redis Connected' : '⚠️  Direct Send Mode'}`);
   console.log(`✅ Server ready - Payload limit: 10MB`);
+  console.log(`🔧 Webhook raw body capture: ✅ Enabled`);
   
-  // Inicializar Flow Queue con manejo de errores mejorado
+  // Inicializar Flow Queue
   setTimeout(() => {
     console.log('\n🔄 Inicializando Flow Engine...');
     try {
@@ -297,7 +320,6 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     } catch (error) {
       flowEngineAvailable = false;
       console.log('⚠️  Flow Engine no disponible:', error.message);
-      console.log('   El sistema continuará funcionando sin automatizaciones');
     }
   }, 2000);
   
@@ -306,48 +328,35 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('\n🧠 Inicializando AI Analytics Engine...');
     try {
       const aiAnalyticsJob = require('./src/jobs/aiAnalyticsJob');
-      
-      // Inicializar con cron cada 6 horas
       aiAnalyticsJob.init('0 */6 * * *');
-      
       aiAnalyticsAvailable = true;
       console.log('✅ AI Analytics Engine listo');
-      console.log('   Schedule: Cada 6 horas (0 */6 * * *)');
-      console.log('   Primer análisis: En 30 segundos');
     } catch (error) {
       aiAnalyticsAvailable = false;
       console.log('⚠️  AI Analytics no disponible:', error.message);
-      console.log('   El sistema continuará funcionando sin AI insights');
-      console.log('   Para habilitar, instale: npm install node-cron');
     }
   }, 3000);
   
-  // 🆕 Inicializar Product Service
+  // Inicializar Product Service
   setTimeout(() => {
     console.log('\n📦 Inicializando Product Service...');
     try {
       const productService = require('./src/services/productService');
       productsAvailable = true;
       console.log('✅ Product Service listo');
-      console.log('   Sync manual: POST /api/products/sync');
-      console.log('   Webhooks: products/create, products/update, products/delete');
     } catch (error) {
       productsAvailable = false;
       console.log('⚠️  Product Service no disponible:', error.message);
     }
   }, 3500);
   
-  // 🆕 Inicializar Business Calendar Service
+  // Inicializar Business Calendar Service
   setTimeout(() => {
     console.log('\n📅 Inicializando Business Calendar Service...');
     try {
       const businessCalendarService = require('./src/services/businessCalendarService');
       calendarAvailable = true;
       console.log('✅ Business Calendar Service listo');
-      console.log('   Goals: POST /api/calendar/goals/monthly');
-      console.log('   Events: POST /api/calendar/events/initialize');
-      
-      // Inicializar eventos del año actual si no existen
       businessCalendarService.initializeCommonEvents().catch(err => {
         console.log('   ⚠️ Error inicializando eventos:', err.message);
       });
@@ -357,7 +366,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     }
   }, 4000);
   
-  // 🆕 Resumen de features después de inicialización
+  // Resumen de features
   setTimeout(() => {
     console.log('\n╔════════════════════════════════════════════════╗');
     console.log('║              FEATURES STATUS                   ║');
@@ -378,7 +387,6 @@ const gracefulShutdown = async (signal) => {
   server.close(async () => {
     console.log('✅ HTTP server closed');
     
-    // CERRAR EMAIL QUEUE
     try {
       await closeQueue();
       console.log('✅ Email queue closed');
@@ -386,7 +394,6 @@ const gracefulShutdown = async (signal) => {
       console.error('⚠️  Error closing email queue:', err.message);
     }
     
-    // CERRAR FLOW QUEUE
     if (flowEngineAvailable) {
       try {
         const flowQueueModule = require('./src/jobs/flowQueue');
@@ -399,7 +406,6 @@ const gracefulShutdown = async (signal) => {
       }
     }
     
-    // CERRAR AI ANALYTICS JOB
     if (aiAnalyticsAvailable) {
       try {
         const aiAnalyticsJob = require('./src/jobs/aiAnalyticsJob');
@@ -412,7 +418,6 @@ const gracefulShutdown = async (signal) => {
       }
     }
     
-    // Cerrar MongoDB
     try {
       await mongoose.connection.close();
       console.log('✅ MongoDB connection closed');
@@ -424,30 +429,24 @@ const gracefulShutdown = async (signal) => {
     process.exit(0);
   });
   
-  // Timeout de 10 segundos
   setTimeout(() => {
     console.error('⚠️  Forcing shutdown after timeout');
     process.exit(1);
   }, 10000);
 };
 
-// SIGNALS para shutdown
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// UNHANDLED REJECTION - NO HACER SHUTDOWN en producción
 process.on('unhandledRejection', (err) => {
   console.error('❌ Unhandled Promise Rejection:', err);
   console.error('Stack:', err.stack);
-  // NO cerrar servidor - solo loggear el error
 });
 
-// UNCAUGHT EXCEPTION - Este sí es crítico
 process.on('uncaughtException', (err) => {
   console.error('❌ Uncaught Exception:', err);
   console.error('Stack:', err.stack);
   
-  // Solo cerrar si NO es un error de módulo faltante
   if (err.code !== 'MODULE_NOT_FOUND') {
     gracefulShutdown('uncaughtException');
   } else {
