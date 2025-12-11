@@ -18,6 +18,36 @@ app.set('trust proxy', 1);
 // Conectar a MongoDB
 connectDB();
 
+// ==================== CARGAR MODELOS ====================
+// ⚠️ IMPORTANTE: Los modelos deben cargarse ANTES de las rutas
+// para que mongoose.model() funcione en los servicios
+console.log('📦 Loading models...');
+
+// Modelos base
+try { require('./src/models/User'); } catch(e) { /* opcional */ }
+try { require('./src/models/Customer'); } catch(e) { /* opcional */ }
+try { require('./src/models/Order'); } catch(e) { /* opcional */ }
+try { require('./src/models/Campaign'); } catch(e) { /* opcional */ }
+try { require('./src/models/List'); } catch(e) { /* opcional */ }
+try { require('./src/models/Segment'); } catch(e) { /* opcional */ }
+
+// 🆕 Modelos nuevos para Products y Calendar
+try { 
+  require('./src/models/Product'); 
+  console.log('   ✅ Product model loaded');
+} catch(e) { 
+  console.log('   ⚠️ Product model:', e.message); 
+}
+
+try { 
+  require('./src/models/BusinessCalendar'); 
+  console.log('   ✅ BusinessCalendar model loaded');
+} catch(e) { 
+  console.log('   ⚠️ BusinessCalendar model:', e.message); 
+}
+
+console.log('📦 Models ready');
+
 // ==================== MIDDLEWARE ====================
 
 // Seguridad y compresión
@@ -119,7 +149,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({ 
     message: '🥒 Jersey Pickles Email Marketing API',
-    version: '2.2.0',  // 🆕 Versión actualizada
+    version: '2.2.0',
     status: 'running',
     features: {
       campaigns: '✅ Email Campaigns',
@@ -128,8 +158,8 @@ app.get('/', (req, res) => {
       revenue_tracking: '✅ Revenue Attribution',
       shopify_integration: '✅ Shopify Webhooks',
       ai_analytics: '✅ AI-Powered Insights',
-      products: '✅ Product Analytics',      // 🆕
-      calendar: '✅ Business Calendar'       // 🆕
+      products: '✅ Product Analytics',
+      calendar: '✅ Business Calendar'
     },
     endpoints: {
       health: '/health',
@@ -145,8 +175,8 @@ app.get('/', (req, res) => {
       analytics: '/api/analytics',
       popup: '/api/popup',
       ai: '/api/ai',
-      products: '/api/products',    // 🆕
-      calendar: '/api/calendar'     // 🆕
+      products: '/api/products',
+      calendar: '/api/calendar'
     }
   });
 });
@@ -242,8 +272,8 @@ const PORT = process.env.PORT || 5000;
 // Variables para tracking de features disponibles
 let flowEngineAvailable = false;
 let aiAnalyticsAvailable = false;
-let productsAvailable = false;     // 🆕
-let calendarAvailable = false;     // 🆕
+let productsAvailable = false;
+let calendarAvailable = false;
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('╔════════════════════════════════════════════════╗');
