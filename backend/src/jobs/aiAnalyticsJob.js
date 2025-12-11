@@ -40,22 +40,36 @@ class AIAnalyticsJob {
   }
 
   async checkAndRunIfNeeded() {
+    // Prevent concurrent runs
+    if (this.isRunning) {
+      console.log('✅ Análisis ya en progreso, saltando verificación');
+      return;
+    }
+    
     try {
-      const dueAnalyses = await AIInsight.getDueForRecalculation();
+      // Check if we have recent Claude insights (less than 6 hours old)
+      const claudeInsight = await AIInsight.findOne({
+        type: 'ai_generated_insights',
+        periodDays: 30,
+        segmentId: null,
+        createdAt: { $gte: new Date(Date.now() - 6 * 60 * 60 * 1000) }
+      }).lean();
       
-      if (dueAnalyses.length > 0) {
-        console.log(`\n🔄 ${dueAnalyses.length} análisis pendientes, ejecutando...`);
+      if (claudeInsight) {
+        console.log('✅ Análisis de IA reciente encontrado, no es necesario recalcular');
+        return;
+      }
+      
+      // Check if we have any analysis at all
+      const summary = await AIInsight.getDashboardSummary();
+      const hasData = Object.values(summary.analyses).some(a => a !== null);
+      
+      if (!hasData) {
+        console.log('\n🧠 No hay análisis guardados, ejecutando cálculo inicial...');
         await this.runAllAnalyses();
       } else {
-        const summary = await AIInsight.getDashboardSummary();
-        const hasData = Object.values(summary.analyses).some(a => a !== null);
-        
-        if (!hasData) {
-          console.log('\n🧠 No hay análisis guardados, ejecutando cálculo inicial...');
-          await this.runAllAnalyses();
-        } else {
-          console.log('✅ Análisis de IA al día');
-        }
+        console.log('\n🔄 Análisis de Claude no encontrado o expirado, ejecutando...');
+        await this.runAllAnalyses();
       }
     } catch (error) {
       console.error('❌ Error verificando análisis:', error.message);
@@ -65,6 +79,13 @@ class AIAnalyticsJob {
   async runAllAnalyses() {
     if (this.isRunning) {
       console.log('⚠️  AI Analytics ya está ejecutándose, saltando...');
+      return;
+    }
+
+    // Doble verificación con timestamp para evitar race conditions
+    const now = Date.now();
+    if (this.lastRun && (now - this.lastRun.getTime()) < 30000) {
+      console.log('⚠️  AI Analytics ejecutado hace menos de 30s, saltando...');
       return;
     }
 
@@ -330,7 +351,8 @@ class AIAnalyticsJob {
 
   async forceRecalculate() {
     console.log('🔄 Forzando recálculo de todos los análisis...');
-    await AIInsight.invalidate();
+    // NO invalidar primero - esto causa race conditions cuando hay múltiples instancias
+    // Los nuevos análisis automáticamente marcarán los viejos como stale en saveAnalysis
     await this.runAllAnalyses();
   }
 

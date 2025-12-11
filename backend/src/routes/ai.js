@@ -84,7 +84,23 @@ router.get('/insights/quick', authorize('admin', 'manager'), async (req, res) =>
  */
 router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
   try {
-    const insight = await AIInsight.getLatest('ai_generated_insights', 30);
+    // Primero intentar obtener el más reciente no-stale
+    let insight = await AIInsight.getLatest('ai_generated_insights', 30);
+    
+    // Si no hay, buscar el más reciente aunque sea stale (para manejar race conditions)
+    if (!insight) {
+      insight = await AIInsight.findOne({
+        type: 'ai_generated_insights',
+        periodDays: 30,
+        segmentId: null
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+      
+      if (insight) {
+        console.log('📋 Usando insight stale (race condition detected)');
+      }
+    }
     
     if (!insight) {
       return res.json({
@@ -490,6 +506,16 @@ router.post('/recalculate', authorize('admin'), async (req, res) => {
     const { type } = req.body;
     const aiAnalyticsJob = require('../jobs/aiAnalyticsJob');
     
+    // Check if already running
+    const status = aiAnalyticsJob.getStatus();
+    if (status.isRunning) {
+      return res.json({
+        success: false,
+        message: 'Ya hay un análisis en progreso. Espera unos minutos.',
+        isRunning: true
+      });
+    }
+    
     if (type) {
       console.log(`🔄 Forzando recálculo de: ${type}`);
       const results = await aiAnalyticsJob.forceRecalculateType(type);
@@ -501,14 +527,16 @@ router.post('/recalculate', authorize('admin'), async (req, res) => {
     } else {
       console.log('🔄 Forzando recálculo de todos los análisis...');
       
-      setImmediate(async () => {
-        await aiAnalyticsJob.forceRecalculate();
+      // NO usar setImmediate - ejecutar directamente para evitar múltiples llamadas
+      // El flag isRunning protegerá contra ejecuciones duplicadas
+      aiAnalyticsJob.forceRecalculate().catch(err => {
+        console.error('Error en recálculo background:', err);
       });
       
       res.json({
         success: true,
-        message: 'Recálculo iniciado en background',
-        note: 'Los resultados estarán disponibles en unos minutos'
+        message: 'Recálculo iniciado',
+        note: 'Los resultados estarán disponibles en ~1 minuto'
       });
     }
     
