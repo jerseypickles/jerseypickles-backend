@@ -1,7 +1,17 @@
 // backend/src/services/businessCalendarService.js
 // 📅 Business Calendar Service - Gestión de objetivos y contexto de negocio
+// ✅ FIXED: getCurrentGoalProgress ahora sincroniza automáticamente con órdenes
 const BusinessCalendar = require('../models/BusinessCalendar');
-const Order = require('../models/Order');
+const mongoose = require('mongoose');
+
+// Helper para obtener modelo Order de forma segura
+const getOrderModel = () => {
+  try {
+    return mongoose.model('Order');
+  } catch (e) {
+    return null;
+  }
+};
 
 class BusinessCalendarService {
 
@@ -11,13 +21,22 @@ class BusinessCalendarService {
    * Crear o actualizar goal mensual
    */
   async setMonthlyGoal(targetAmount, month = null, year = null) {
-    return BusinessCalendar.createMonthlyGoal(targetAmount, month, year);
+    const goal = await BusinessCalendar.createMonthlyGoal(targetAmount, month, year);
+    
+    // Sincronizar inmediatamente con órdenes existentes
+    await this.syncGoalWithOrders();
+    
+    return goal;
   }
 
   /**
    * Obtener goal actual y progreso
+   * ✅ FIXED: Ahora sincroniza automáticamente con órdenes
    */
   async getCurrentGoalProgress() {
+    // Primero sincronizar con órdenes reales
+    await this.syncGoalWithOrders();
+    
     const goal = await BusinessCalendar.getActiveRevenueGoal('monthly');
     
     if (!goal) {
@@ -44,9 +63,9 @@ class BusinessCalendarService {
       name: goal.name,
       target: goal.revenueGoal.targetAmount,
       current: goal.revenueGoal.currentAmount,
-      remaining,
+      remaining: Math.max(0, remaining),
       percentComplete: parseFloat(goal.revenueGoal.percentComplete.toFixed(1)),
-      daysRemaining,
+      daysRemaining: Math.max(0, daysRemaining),
       dailyNeeded: parseFloat(dailyNeeded.toFixed(2)),
       isOnTrack,
       isAchieved: goal.revenueGoal.isAchieved,
@@ -90,6 +109,7 @@ class BusinessCalendarService {
 
   /**
    * Sincronizar progreso del goal con órdenes reales
+   * ✅ FIXED: Usa getOrderModel() para evitar errores de modelo
    */
   async syncGoalWithOrders() {
     const goal = await BusinessCalendar.findOne({
@@ -99,44 +119,54 @@ class BusinessCalendarService {
     });
     
     if (!goal) {
-      console.log('⚠️ No active revenue goal to sync');
       return null;
     }
     
-    // Obtener total de órdenes en el período del goal
-    const orders = await Order.aggregate([
-      {
-        $match: {
-          orderDate: { $gte: goal.startDate, $lte: goal.endDate },
-          financialStatus: { $in: ['paid', 'partially_paid', 'partially_refunded'] }
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalRevenue: { $sum: '$totalPrice' },
-          ordersCount: { $sum: 1 }
-        }
-      }
-    ]);
-    
-    const totals = orders[0] || { totalRevenue: 0, ordersCount: 0 };
-    
-    // Actualizar goal
-    goal.revenueGoal.currentAmount = totals.totalRevenue;
-    goal.revenueGoal.percentComplete = goal.revenueGoal.targetAmount > 0
-      ? (totals.totalRevenue / goal.revenueGoal.targetAmount) * 100
-      : 0;
-    
-    if (goal.revenueGoal.currentAmount >= goal.revenueGoal.targetAmount && !goal.revenueGoal.isAchieved) {
-      goal.revenueGoal.isAchieved = true;
-      goal.revenueGoal.achievedAt = new Date();
+    const Order = getOrderModel();
+    if (!Order) {
+      console.log('⚠️ Order model not available for sync');
+      return goal;
     }
     
-    goal.status = 'active';
-    await goal.save();
-    
-    console.log(`✅ Goal synced: $${totals.totalRevenue} / $${goal.revenueGoal.targetAmount} (${goal.revenueGoal.percentComplete.toFixed(1)}%)`);
+    try {
+      // Obtener total de órdenes en el período del goal
+      const orders = await Order.aggregate([
+        {
+          $match: {
+            orderDate: { $gte: goal.startDate, $lte: goal.endDate },
+            financialStatus: { $in: ['paid', 'partially_paid', 'partially_refunded'] }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            totalRevenue: { $sum: '$totalPrice' },
+            ordersCount: { $sum: 1 }
+          }
+        }
+      ]);
+      
+      const totals = orders[0] || { totalRevenue: 0, ordersCount: 0 };
+      
+      // Actualizar goal
+      goal.revenueGoal.currentAmount = totals.totalRevenue;
+      goal.revenueGoal.percentComplete = goal.revenueGoal.targetAmount > 0
+        ? (totals.totalRevenue / goal.revenueGoal.targetAmount) * 100
+        : 0;
+      
+      if (goal.revenueGoal.currentAmount >= goal.revenueGoal.targetAmount && !goal.revenueGoal.isAchieved) {
+        goal.revenueGoal.isAchieved = true;
+        goal.revenueGoal.achievedAt = new Date();
+      }
+      
+      goal.status = 'active';
+      await goal.save();
+      
+      console.log(`✅ Goal synced: $${totals.totalRevenue.toFixed(2)} / $${goal.revenueGoal.targetAmount} (${goal.revenueGoal.percentComplete.toFixed(1)}%)`);
+      
+    } catch (error) {
+      console.error('Error syncing goal with orders:', error.message);
+    }
     
     return goal;
   }
