@@ -48,20 +48,53 @@ class ClaudeService {
 
     try {
       console.log('🧠 Llamando a Claude API para análisis profundo...');
+      console.log(`   Model: ${this.model}`);
+      console.log(`   System prompt length: ${systemPrompt.length} chars`);
+      console.log(`   User prompt length: ${userPrompt.length} chars`);
+      
       const startTime = Date.now();
 
-      const response = await this.client.messages.create({
+      // Agregar timeout de 60 segundos
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Claude API timeout (60s)')), 60000);
+      });
+
+      const apiPromise = this.client.messages.create({
         model: this.model,
-        max_tokens: 3000, // Más tokens para análisis detallado
+        max_tokens: 2500,
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }]
       });
 
+      const response = await Promise.race([apiPromise, timeoutPromise]);
+
       const duration = Date.now() - startTime;
       console.log(`✅ Claude respondió en ${duration}ms`);
+      console.log(`   Input tokens: ${response.usage?.input_tokens || 'N/A'}`);
+      console.log(`   Output tokens: ${response.usage?.output_tokens || 'N/A'}`);
 
-      const content = response.content[0].text;
+      const content = response.content[0]?.text;
+      
+      if (!content) {
+        console.error('❌ Claude devolvió respuesta vacía');
+        return this.getFallbackInsights(metricsData);
+      }
+
+      console.log(`   Response length: ${content.length} chars`);
+      console.log(`   Response preview: ${content.substring(0, 100)}...`);
+
       const analysis = this.parseResponse(content);
+      
+      if (!analysis || analysis.parseError) {
+        console.error('❌ Error parseando respuesta de Claude, usando fallback');
+        return this.getFallbackInsights(metricsData);
+      }
+
+      console.log(`✅ Análisis parseado correctamente`);
+      console.log(`   - Executive summary: ${analysis.executiveSummary ? 'Sí' : 'No'}`);
+      console.log(`   - Deep analysis sections: ${Object.keys(analysis.deepAnalysis || {}).length}`);
+      console.log(`   - Action plan items: ${analysis.actionPlan?.length || 0}`);
+      console.log(`   - Quick wins: ${analysis.quickWins?.length || 0}`);
 
       return {
         success: true,
@@ -77,6 +110,14 @@ class ClaudeService {
 
     } catch (error) {
       console.error('❌ Error llamando a Claude API:', error.message);
+      console.error('   Stack:', error.stack?.substring(0, 300));
+      
+      // Log más detalles si es un error de API
+      if (error.status) {
+        console.error(`   Status: ${error.status}`);
+        console.error(`   Type: ${error.type || 'unknown'}`);
+      }
+      
       return this.getFallbackInsights(metricsData);
     }
   }
@@ -85,95 +126,83 @@ class ClaudeService {
    * System prompt optimizado para análisis profundo
    */
   buildSystemPrompt() {
-    return `Eres el consultor de email marketing más experimentado para Jersey Pickles, un e-commerce premium de pickles artesanales y olives gourmet en New Jersey.
+    return `Eres el consultor de email marketing de Jersey Pickles, un e-commerce de pickles artesanales y olives gourmet en New Jersey.
 
-## TU ROL
-No eres un bot que genera bullets genéricos. Eres un estratega de email marketing que ha visto miles de campañas y sabe exactamente qué funciona y qué no. Tu trabajo es analizar los datos y dar recomendaciones ESPECÍFICAS y ACCIONABLES que realmente muevan el negocio.
+TU ROL: Analizar datos y dar recomendaciones ESPECÍFICAS y ACCIONABLES, no genéricas.
 
-## CONTEXTO DEL NEGOCIO
-- **Producto**: Pickles artesanales, olives marinadas, productos gourmet (high margin)
-- **Clientes**: Mix de consumidores directos (D2C), restaurantes, delis, wholesale
-- **Diferenciador**: Calidad artesanal, recetas familiares, New Jersey pride
-- **Ticket promedio**: ~$35-50 por orden
-- **Estacionalidad**: Picos en BBQ season (Mayo-Sept), holidays (Nov-Dic)
+CONTEXTO DEL NEGOCIO:
+- Productos: Pickles artesanales, olives marinadas, productos gourmet
+- Clientes: Consumidores D2C, restaurantes, delis, wholesale
+- Ticket promedio: $35-50 por orden
+- Estacionalidad: Picos en BBQ season (Mayo-Sept) y holidays (Nov-Dic)
 
-## CÓMO ANALIZAR
-1. **Mira los patrones, no los números aislados**: Si el open rate bajó, ¿por qué? ¿Cambió algo en los subjects? ¿El timing?
-2. **Conecta los puntos**: Si una lista tiene alto engagement pero bajo revenue, hay una oportunidad de conversión
-3. **Sé específico**: No digas "mejora tus subjects" - di exactamente QUÉ tipo de subject funciona para ESTE negocio
-4. **Prioriza por impacto**: ¿Qué cambio generaría más revenue con menos esfuerzo?
+BENCHMARKS INDUSTRIA FOOD & BEVERAGE:
+- Open Rate bueno: 20-25%
+- Click Rate bueno: 2-4%
+- Bounce Rate saludable: <2%
+- Unsub Rate saludable: <0.5%
 
-## FORMATO DE RESPUESTA (JSON)
+INSTRUCCIONES:
+1. Responde SOLO con JSON válido (sin markdown, sin \`\`\`)
+2. Todo en ESPAÑOL
+3. Sé específico - menciona datos reales del input
+4. Prioriza acciones por impacto en revenue
+
+FORMATO JSON REQUERIDO:
 {
-  "executiveSummary": "Párrafo de 3-4 oraciones con el estado general y las 1-2 acciones más importantes a tomar AHORA",
-  
+  "executiveSummary": "2-3 oraciones con el estado general y la acción más importante a tomar",
   "deepAnalysis": {
     "health": {
-      "status": "healthy|warning|critical",
-      "analysis": "Párrafo detallado analizando las métricas de salud, comparando con benchmarks de la industria food/gourmet, y explicando qué significan estos números para el negocio"
+      "status": "healthy o warning o critical",
+      "analysis": "Párrafo analizando las métricas vs benchmarks"
     },
     "subjects": {
-      "analysis": "Párrafo analizando qué está funcionando en los subject lines, por qué el top performer funcionó, qué evitar basado en el peor performer, y patrones específicos para productos gourmet"
+      "analysis": "Párrafo sobre qué funciona en subjects y qué evitar"
     },
     "lists": {
-      "analysis": "Párrafo sobre el performance de cada lista, identificando cuáles son gold mines vs cuáles necesitan trabajo, oportunidades de segmentación"
+      "analysis": "Párrafo sobre performance de listas y oportunidades"
     },
     "timing": {
-      "analysis": "Párrafo sobre cuándo la audiencia está más receptiva, por qué ese timing hace sentido para el tipo de producto, y cómo optimizar el schedule"
+      "analysis": "Párrafo sobre mejores horarios"
     },
     "revenue": {
-      "analysis": "Párrafo sobre la efectividad del email como canal de revenue, comparación con benchmarks de e-commerce, y oportunidades de mejora"
+      "analysis": "Párrafo sobre efectividad de email como canal de revenue"
     }
   },
-  
   "actionPlan": [
     {
       "priority": 1,
-      "title": "Título corto de la acción",
-      "what": "Descripción específica de qué hacer",
-      "why": "Por qué esto importa basado en los datos",
-      "how": "Pasos concretos para implementar",
-      "expectedImpact": "Qué mejora esperar y en qué timeframe"
+      "title": "Título corto",
+      "what": "Qué hacer específicamente",
+      "why": "Por qué importa basado en los datos",
+      "how": "Pasos concretos",
+      "expectedImpact": "Resultado esperado"
     }
   ],
-  
-  "quickWins": [
-    "Cambio pequeño que se puede hacer hoy y tendrá impacto inmediato"
-  ],
-  
+  "quickWins": ["Acción rápida 1", "Acción rápida 2"],
   "warnings": [
     {
-      "severity": "critical|warning",
-      "issue": "Qué está mal",
+      "severity": "critical o warning",
+      "issue": "Problema",
       "consequence": "Qué pasa si no se arregla",
       "solution": "Cómo arreglarlo"
     }
   ],
-  
   "opportunities": [
     {
-      "opportunity": "Oportunidad identificada en los datos",
-      "potential": "Potencial de impacto",
-      "effort": "low|medium|high"
+      "opportunity": "Oportunidad identificada",
+      "potential": "Impacto potencial",
+      "effort": "low o medium o high"
     }
   ],
-  
   "nextCampaignSuggestion": {
-    "type": "Tipo de campaña sugerida",
-    "targetList": "A qué lista enviar",
-    "subjectIdeas": ["3 ideas de subject basadas en lo que funciona"],
-    "bestTime": "Cuándo enviar basado en los datos",
+    "type": "Tipo de campaña",
+    "targetList": "Lista recomendada",
+    "subjectIdeas": ["Idea 1", "Idea 2", "Idea 3"],
+    "bestTime": "Día y hora recomendados",
     "rationale": "Por qué esta campaña ahora"
   }
-}
-
-## REGLAS CRÍTICAS
-1. Responde SOLO en JSON válido, sin markdown
-2. Todo en ESPAÑOL
-3. Sé específico - menciona números, listas, y subjects reales de los datos
-4. No uses frases genéricas como "mejora tu estrategia" - di exactamente QUÉ hacer
-5. Relaciona todo con el negocio de pickles/gourmet food
-6. Si los datos son insuficientes para una sección, dilo honestamente en lugar de inventar`;
+}`;
   }
 
   /**
@@ -288,48 +317,73 @@ Genera un análisis profundo y accionable. Recuerda:
   }
 
   /**
-   * Parsear respuesta de Claude
+   * Parsear respuesta de Claude con mejor manejo de errores
    */
   parseResponse(content) {
     try {
       let jsonStr = content;
       
-      // Extraer JSON si viene en code block
-      const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (jsonMatch) {
-        jsonStr = jsonMatch[1];
+      // Limpiar posibles wrappers de markdown
+      if (jsonStr.includes('```')) {
+        const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (jsonMatch) {
+          jsonStr = jsonMatch[1];
+        }
       }
       
+      // Limpiar espacios y newlines extras
       jsonStr = jsonStr.trim();
+      
+      // Si empieza con texto antes del JSON, intentar encontrar el inicio
+      if (!jsonStr.startsWith('{')) {
+        const jsonStart = jsonStr.indexOf('{');
+        if (jsonStart !== -1) {
+          jsonStr = jsonStr.substring(jsonStart);
+        }
+      }
+      
+      // Si termina con texto después del JSON, intentar encontrar el final
+      if (!jsonStr.endsWith('}')) {
+        const jsonEnd = jsonStr.lastIndexOf('}');
+        if (jsonEnd !== -1) {
+          jsonStr = jsonStr.substring(0, jsonEnd + 1);
+        }
+      }
+      
+      console.log(`   Parsing JSON of ${jsonStr.length} chars`);
+      
       const parsed = JSON.parse(jsonStr);
       
       // Validar estructura mínima
-      if (!parsed.executiveSummary && !parsed.deepAnalysis) {
-        throw new Error('Respuesta no tiene la estructura esperada');
+      if (!parsed.executiveSummary && !parsed.deepAnalysis && !parsed.actionPlan) {
+        console.warn('⚠️  Respuesta parseada pero sin estructura esperada');
+        console.log('   Keys encontrados:', Object.keys(parsed));
       }
       
       return parsed;
       
     } catch (error) {
-      console.error('⚠️  Error parseando respuesta de Claude:', error.message);
-      console.log('Respuesta raw (primeros 500 chars):', content.substring(0, 500));
+      console.error('⚠️  Error parseando JSON:', error.message);
+      console.log('   Content preview:', content.substring(0, 300));
+      console.log('   Content end:', content.substring(Math.max(0, content.length - 100)));
       
-      // Intentar extraer algo útil del texto
+      // Intentar extraer al menos el executive summary del texto
+      const summaryMatch = content.match(/"executiveSummary"\s*:\s*"([^"]+)"/);
+      
       return {
-        executiveSummary: 'Error procesando análisis de AI. Los datos fueron enviados correctamente pero la respuesta no pudo ser parseada.',
+        executiveSummary: summaryMatch ? summaryMatch[1] : 'Error procesando análisis de AI. Revisa los logs.',
         deepAnalysis: {
-          health: { status: 'unknown', analysis: content.substring(0, 500) }
+          health: { 
+            status: 'unknown', 
+            analysis: 'No se pudo procesar la respuesta de Claude correctamente. El sistema usará el análisis de fallback.' 
+          }
         },
         actionPlan: [],
-        quickWins: ['Revisar logs del servidor para más detalles'],
-        warnings: [{
-          severity: 'warning',
-          issue: 'Error de parsing en respuesta AI',
-          consequence: 'Análisis incompleto',
-          solution: 'El sistema reintentará en el próximo ciclo'
-        }],
+        quickWins: ['Revisar configuración de Claude API', 'Verificar logs del servidor'],
+        warnings: [],
         opportunities: [],
-        parseError: true
+        parseError: true,
+        rawContent: content.substring(0, 500)
       };
     }
   }

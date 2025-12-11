@@ -1,20 +1,16 @@
 // backend/src/routes/ai.js
 // 🧠 AI Analytics Routes - Solo LEE de MongoDB, nunca calcula en request
+// 🔧 UPDATED: New response structure for Claude insights
 const express = require('express');
 const router = express.Router();
 const { auth, authorize } = require('../middleware/auth');
 const AIInsight = require('../models/AIInsight');
 const aiCalculator = require('../services/aiCalculator');
 
-// Aplicar autenticación
 router.use(auth);
 
 // ==================== DASHBOARD / OVERVIEW ====================
 
-/**
- * GET /api/ai/dashboard
- * Resumen rápido de todos los análisis
- */
 router.get('/dashboard', authorize('admin', 'manager'), async (req, res) => {
   try {
     const summary = await AIInsight.getDashboardSummary();
@@ -25,14 +21,9 @@ router.get('/dashboard', authorize('admin', 'manager'), async (req, res) => {
   }
 });
 
-/**
- * GET /api/ai/insights
- * Reporte completo de insights (lee de MongoDB)
- */
 router.get('/insights', authorize('admin', 'manager'), async (req, res) => {
   try {
     const { days = 30 } = req.query;
-    
     const insight = await AIInsight.getLatest('comprehensive_report', parseInt(days));
     
     if (!insight) {
@@ -59,10 +50,6 @@ router.get('/insights', authorize('admin', 'manager'), async (req, res) => {
   }
 });
 
-/**
- * GET /api/ai/insights/quick
- * Top 5 insights rápidos
- */
 router.get('/insights/quick', authorize('admin', 'manager'), async (req, res) => {
   try {
     const insight = await AIInsight.getLatest('comprehensive_report', 30);
@@ -89,11 +76,11 @@ router.get('/insights/quick', authorize('admin', 'manager'), async (req, res) =>
   }
 });
 
-// ==================== 🆕 CLAUDE AI INSIGHTS ====================
+// ==================== 🆕 CLAUDE AI INSIGHTS (UPDATED) ====================
 
 /**
  * GET /api/ai/claude
- * Obtener insights generados por Claude (lee de MongoDB)
+ * Obtener insights generados por Claude (nuevo formato)
  */
 router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
   try {
@@ -104,24 +91,46 @@ router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
         success: false,
         message: 'Insights de Claude pendientes. El sistema los generará automáticamente.',
         status: 'pending',
-        insights: [],
-        summary: '',
-        recommendations: []
+        // Estructura vacía para el frontend
+        executiveSummary: '',
+        deepAnalysis: {},
+        actionPlan: [],
+        quickWins: [],
+        warnings: [],
+        opportunities: [],
+        nextCampaignSuggestion: null
       });
     }
     
+    // Extraer datos del insight guardado
+    const data = insight.data || {};
+    
     res.json({
-      success: true,
-      insights: insight.data?.insights || [],
-      summary: insight.data?.summary || '',
-      recommendations: insight.data?.recommendations || [],
-      model: insight.data?.model || 'unknown',
-      tokensUsed: insight.data?.tokensUsed || { input: 0, output: 0 },
+      success: data.success !== false,
+      // Nuevo formato
+      executiveSummary: data.executiveSummary || '',
+      deepAnalysis: data.deepAnalysis || {},
+      actionPlan: data.actionPlan || [],
+      quickWins: data.quickWins || [],
+      warnings: data.warnings || [],
+      opportunities: data.opportunities || [],
+      nextCampaignSuggestion: data.nextCampaignSuggestion || null,
+      // Compatibilidad con formato anterior (por si acaso)
+      insights: data.insights || data.actionPlan || [],
+      summary: data.summary || data.executiveSummary || '',
+      recommendations: data.recommendations || data.quickWins || [],
+      // Metadata
+      model: data.model || 'unknown',
+      tokensUsed: data.tokensUsed || { input: 0, output: 0 },
+      isFallback: data.isFallback || false,
+      parseError: data.parseError || false,
       _meta: {
-        generatedAt: insight.data?.generatedAt || insight.createdAt,
+        generatedAt: data.generatedAt || insight.createdAt,
         calculatedAt: insight.createdAt,
         ageHours: Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60)),
-        nextCalculation: insight.nextCalculationAt
+        nextCalculation: insight.nextCalculationAt,
+        inputDataSize: data.inputDataSize,
+        duration: data.duration
       }
     });
     
@@ -131,14 +140,9 @@ router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
   }
 });
 
-/**
- * GET /api/ai/claude/status
- * Estado del servicio de Claude
- */
 router.get('/claude/status', authorize('admin', 'manager'), async (req, res) => {
   try {
     const claudeService = require('../services/claudeService');
-    
     const latestInsight = await AIInsight.getLatest('ai_generated_insights', 30);
     
     res.json({
@@ -146,7 +150,10 @@ router.get('/claude/status', authorize('admin', 'manager'), async (req, res) => 
       model: claudeService.model,
       lastGenerated: latestInsight?.createdAt || null,
       lastTokensUsed: latestInsight?.data?.tokensUsed || null,
-      insightsCount: latestInsight?.data?.insights?.length || 0
+      hasExecutiveSummary: !!latestInsight?.data?.executiveSummary,
+      actionPlanCount: latestInsight?.data?.actionPlan?.length || 0,
+      isFallback: latestInsight?.data?.isFallback || false,
+      parseError: latestInsight?.data?.parseError || false
     });
     
   } catch (error) {
@@ -157,28 +164,22 @@ router.get('/claude/status', authorize('admin', 'manager'), async (req, res) => 
 
 // ==================== SUBJECT LINE ANALYSIS ====================
 
-/**
- * GET /api/ai/subjects/analyze
- * Análisis de patterns en subject lines (lee de MongoDB)
- */
 router.get('/subjects/analyze', authorize('admin', 'manager'), async (req, res) => {
   try {
     const { days = 30 } = req.query;
-    
-    const insight = await AIInsight.getLatest('subject_analysis', parseInt(days));
+    let insight = await AIInsight.getLatest('subject_analysis', parseInt(days));
     
     if (!insight) {
-      // Intentar con 90 días si no hay de 30
-      const insight90 = await AIInsight.getLatest('subject_analysis', 90);
+      insight = await AIInsight.getLatest('subject_analysis', 90);
       
-      if (insight90) {
+      if (insight) {
         return res.json({
           success: true,
-          ...insight90.data,
+          ...insight.data,
           _meta: {
             requestedDays: parseInt(days),
             actualDays: 90,
-            calculatedAt: insight90.createdAt
+            calculatedAt: insight.createdAt
           }
         });
       }
@@ -205,10 +206,6 @@ router.get('/subjects/analyze', authorize('admin', 'manager'), async (req, res) 
   }
 });
 
-/**
- * POST /api/ai/subjects/suggest
- * Genera sugerencias para un subject (esto SÍ calcula en tiempo real, es rápido)
- */
 router.post('/subjects/suggest', authorize('admin', 'manager'), async (req, res) => {
   try {
     const { subject } = req.body;
@@ -219,7 +216,6 @@ router.post('/subjects/suggest', authorize('admin', 'manager'), async (req, res)
       });
     }
     
-    // Obtener análisis guardado para basarse en él
     const analysis = await AIInsight.getLatest('subject_analysis', 90);
     
     if (!analysis) {
@@ -233,12 +229,9 @@ router.post('/subjects/suggest', authorize('admin', 'manager'), async (req, res)
     const insights = analysis.data?.insights || {};
     const suggestions = [];
     
-    // Analizar subject actual
     const hasEmoji = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]/u.test(subject);
     const hasNumber = /\d+%?/.test(subject);
-    const length = subject.length;
     
-    // Sugerir emoji si ayuda
     if (!hasEmoji && parseFloat(insights.hasEmoji?.lift || 0) > 10) {
       const emojis = ['🥒', '✨', '🎉', '💚', '🔥', '⚡'];
       const emoji = emojis[Math.floor(Math.random() * emojis.length)];
@@ -249,7 +242,6 @@ router.post('/subjects/suggest', authorize('admin', 'manager'), async (req, res)
       });
     }
     
-    // Sugerir número si ayuda
     if (!hasNumber && parseFloat(insights.hasNumber?.lift || 0) > 10) {
       suggestions.push({
         subject: subject.replace(/descuento|off|ahorra/gi, '15% OFF'),
@@ -258,7 +250,6 @@ router.post('/subjects/suggest', authorize('admin', 'manager'), async (req, res)
       });
     }
     
-    // Original siempre primero
     suggestions.unshift({
       subject,
       reason: 'Subject original',
@@ -283,14 +274,9 @@ router.post('/subjects/suggest', authorize('admin', 'manager'), async (req, res)
 
 // ==================== SEND TIMING ====================
 
-/**
- * GET /api/ai/timing/best
- * Mejores horarios de envío (lee de MongoDB)
- */
 router.get('/timing/best', authorize('admin', 'manager'), async (req, res) => {
   try {
     const { segmentId } = req.query;
-    
     const insight = await AIInsight.getLatest('send_timing', 90, segmentId || null);
     
     if (!insight) {
@@ -316,14 +302,9 @@ router.get('/timing/best', authorize('admin', 'manager'), async (req, res) => {
   }
 });
 
-/**
- * GET /api/ai/timing/heatmap
- * Heatmap de engagement (lee de MongoDB)
- */
 router.get('/timing/heatmap', authorize('admin', 'manager'), async (req, res) => {
   try {
     const { segmentId } = req.query;
-    
     const insight = await AIInsight.getLatest('send_timing', 90, segmentId || null);
     
     if (!insight) {
@@ -350,14 +331,9 @@ router.get('/timing/heatmap', authorize('admin', 'manager'), async (req, res) =>
 
 // ==================== LIST PERFORMANCE ====================
 
-/**
- * GET /api/ai/lists/performance
- * Performance por lista (lee de MongoDB)
- */
 router.get('/lists/performance', authorize('admin', 'manager'), async (req, res) => {
   try {
     const { days = 30 } = req.query;
-    
     let insight = await AIInsight.getLatest('list_performance', parseInt(days));
     
     if (!insight) {
@@ -389,10 +365,6 @@ router.get('/lists/performance', authorize('admin', 'manager'), async (req, res)
 
 // ==================== HEALTH CHECK ====================
 
-/**
- * GET /api/ai/health
- * Estado de salud del email marketing (lee de MongoDB)
- */
 router.get('/health', authorize('admin', 'manager'), async (req, res) => {
   try {
     const insight = await AIInsight.getLatest('health_check', 7);
@@ -420,10 +392,6 @@ router.get('/health', authorize('admin', 'manager'), async (req, res) => {
   }
 });
 
-/**
- * GET /api/ai/health/alerts
- * Solo alertas activas
- */
 router.get('/health/alerts', authorize('admin', 'manager'), async (req, res) => {
   try {
     const insight = await AIInsight.getLatest('health_check', 7);
@@ -448,10 +416,6 @@ router.get('/health/alerts', authorize('admin', 'manager'), async (req, res) => 
 
 // ==================== CAMPAIGN PREDICTION ====================
 
-/**
- * POST /api/ai/campaigns/predict
- * Predecir performance de una campaña (usa datos históricos de MongoDB)
- */
 router.post('/campaigns/predict', authorize('admin', 'manager'), async (req, res) => {
   try {
     const { subject, listId, sendHour, sendDay } = req.body;
@@ -462,7 +426,6 @@ router.post('/campaigns/predict', authorize('admin', 'manager'), async (req, res
       });
     }
     
-    // Obtener insights históricos de MongoDB
     const [listInsight, subjectInsight, timingInsight] = await Promise.all([
       AIInsight.getLatest('list_performance', 90),
       AIInsight.getLatest('subject_analysis', 90),
@@ -476,7 +439,6 @@ router.post('/campaigns/predict', authorize('admin', 'manager'), async (req, res
       });
     }
     
-    // Usar el calculator con los datos históricos
     const prediction = await aiCalculator.predictCampaignPerformance(
       { subject, listId, sendHour, sendDay },
       {
@@ -496,10 +458,6 @@ router.post('/campaigns/predict', authorize('admin', 'manager'), async (req, res
 
 // ==================== HISTORY / TRENDS ====================
 
-/**
- * GET /api/ai/history/:type
- * Historial de scores de un tipo de análisis
- */
 router.get('/history/:type', authorize('admin', 'manager'), async (req, res) => {
   try {
     const { type } = req.params;
@@ -527,14 +485,9 @@ router.get('/history/:type', authorize('admin', 'manager'), async (req, res) => 
 
 // ==================== ADMIN / MANAGEMENT ====================
 
-/**
- * POST /api/ai/recalculate
- * Forzar recálculo de todos los análisis
- */
 router.post('/recalculate', authorize('admin'), async (req, res) => {
   try {
     const { type } = req.body;
-    
     const aiAnalyticsJob = require('../jobs/aiAnalyticsJob');
     
     if (type) {
@@ -548,7 +501,6 @@ router.post('/recalculate', authorize('admin'), async (req, res) => {
     } else {
       console.log('🔄 Forzando recálculo de todos los análisis...');
       
-      // Ejecutar en background
       setImmediate(async () => {
         await aiAnalyticsJob.forceRecalculate();
       });
@@ -566,14 +518,9 @@ router.post('/recalculate', authorize('admin'), async (req, res) => {
   }
 });
 
-/**
- * POST /api/ai/invalidate
- * Invalidar análisis (marcar como stale)
- */
 router.post('/invalidate', authorize('admin'), async (req, res) => {
   try {
     const { type } = req.body;
-    
     const count = await AIInsight.invalidate(type || null);
     
     res.json({
@@ -588,10 +535,6 @@ router.post('/invalidate', authorize('admin'), async (req, res) => {
   }
 });
 
-/**
- * GET /api/ai/status
- * Estado del sistema de AI Analytics
- */
 router.get('/status', authorize('admin', 'manager'), async (req, res) => {
   try {
     const aiAnalyticsJob = require('../jobs/aiAnalyticsJob');
@@ -616,14 +559,9 @@ router.get('/status', authorize('admin', 'manager'), async (req, res) => {
   }
 });
 
-/**
- * DELETE /api/ai/cleanup
- * Limpiar análisis antiguos
- */
 router.delete('/cleanup', authorize('admin'), async (req, res) => {
   try {
     const { daysToKeep = 90 } = req.body;
-    
     const deleted = await AIInsight.cleanup(parseInt(daysToKeep));
     
     res.json({

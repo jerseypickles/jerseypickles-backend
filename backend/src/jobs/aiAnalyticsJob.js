@@ -1,17 +1,10 @@
 // backend/src/jobs/aiAnalyticsJob.js
 // 🧠 AI Analytics Cron Job - Calcula insights y genera análisis con Claude
+// 🔧 UPDATED: Better error handling and logging for Claude integration
 const cron = require('node-cron');
 const AIInsight = require('../models/AIInsight');
 const aiCalculator = require('../services/aiCalculator');
 const claudeService = require('../services/claudeService');
-
-/**
- * AI Analytics Job
- * 
- * Ejecuta análisis de IA en segundo plano y guarda resultados en MongoDB.
- * NUEVO: Integra Claude API para generar insights inteligentes.
- * Los endpoints solo leen de la DB, nunca calculan en tiempo real.
- */
 
 class AIAnalyticsJob {
   constructor() {
@@ -21,30 +14,24 @@ class AIAnalyticsJob {
     this.claudeEnabled = false;
   }
 
-  /**
-   * Inicializar el job con schedule
-   * Por defecto: cada 6 horas
-   */
   init(cronExpression = '0 */6 * * *') {
     console.log('🧠 AI Analytics Job inicializado');
     console.log(`   Schedule: ${cronExpression}`);
     
-    // Inicializar Claude Service
     claudeService.init();
     this.claudeEnabled = claudeService.isAvailable();
     
     if (this.claudeEnabled) {
       console.log('   🤖 Claude API: ✅ Habilitado');
+      console.log(`   🤖 Model: ${claudeService.model}`);
     } else {
       console.log('   🤖 Claude API: ⚠️  No configurado (usando análisis básico)');
     }
     
-    // Schedule regular
     this.schedule = cron.schedule(cronExpression, () => {
       this.runAllAnalyses();
     });
     
-    // También correr análisis al iniciar (después de 30 segundos)
     setTimeout(() => {
       this.checkAndRunIfNeeded();
     }, 30000);
@@ -52,9 +39,6 @@ class AIAnalyticsJob {
     console.log('✅ AI Analytics Job listo');
   }
 
-  /**
-   * Verificar si hay análisis pendientes y correr si es necesario
-   */
   async checkAndRunIfNeeded() {
     try {
       const dueAnalyses = await AIInsight.getDueForRecalculation();
@@ -63,7 +47,6 @@ class AIAnalyticsJob {
         console.log(`\n🔄 ${dueAnalyses.length} análisis pendientes, ejecutando...`);
         await this.runAllAnalyses();
       } else {
-        // Verificar si hay análisis guardados
         const summary = await AIInsight.getDashboardSummary();
         const hasData = Object.values(summary.analyses).some(a => a !== null);
         
@@ -79,9 +62,6 @@ class AIAnalyticsJob {
     }
   }
 
-  /**
-   * Ejecutar todos los análisis
-   */
   async runAllAnalyses() {
     if (this.isRunning) {
       console.log('⚠️  AI Analytics ya está ejecutándose, saltando...');
@@ -103,7 +83,6 @@ class AIAnalyticsJob {
       failed: []
     };
     
-    // Guardar resultados de análisis para Claude
     const analysisResults = {
       healthCheck: null,
       subjectAnalysis: null,
@@ -112,49 +91,38 @@ class AIAnalyticsJob {
     };
 
     try {
-      // ==================== FASE 1: CALCULAR MÉTRICAS ====================
-      
-      // 1. Health Check (siempre primero)
+      // FASE 1: CALCULAR MÉTRICAS
       analysisResults.healthCheck = await this.runAnalysis('health_check', 7, async () => {
         return await aiCalculator.calculateHealthCheck();
       }, results);
 
-      // 2. Subject Analysis (30 días)
       analysisResults.subjectAnalysis = await this.runAnalysis('subject_analysis', 30, async () => {
         return await aiCalculator.calculateSubjectAnalysis({ days: 30 });
       }, results);
 
-      // 3. Subject Analysis (90 días) - solo guardar, no usar para Claude
       await this.runAnalysis('subject_analysis', 90, async () => {
         return await aiCalculator.calculateSubjectAnalysis({ days: 90 });
       }, results);
 
-      // 4. Send Timing (90 días - más data mejor)
       analysisResults.sendTiming = await this.runAnalysis('send_timing', 90, async () => {
         return await aiCalculator.calculateSendTiming({ days: 90 });
       }, results);
 
-      // 5. List Performance (30 días)
       analysisResults.listPerformance = await this.runAnalysis('list_performance', 30, async () => {
         return await aiCalculator.calculateListPerformance({ days: 30 });
       }, results);
 
-      // 6. List Performance (90 días) - solo guardar
       await this.runAnalysis('list_performance', 90, async () => {
         return await aiCalculator.calculateListPerformance({ days: 90 });
       }, results);
 
-      // ==================== FASE 2: GENERAR INSIGHTS CON CLAUDE ====================
-      
+      // FASE 2: GENERAR INSIGHTS CON CLAUDE
       await this.generateClaudeInsights(analysisResults, results);
 
-      // ==================== FASE 3: COMPREHENSIVE REPORT ====================
-      
-      // 7. Comprehensive Report (incluye insights de Claude si están disponibles)
+      // FASE 3: COMPREHENSIVE REPORT
       await this.runAnalysis('comprehensive_report', 30, async () => {
         const report = await aiCalculator.calculateComprehensiveReport({ days: 30 });
         
-        // Agregar insights de Claude al reporte si existen
         const claudeInsight = await AIInsight.getLatest('ai_generated_insights', 30);
         if (claudeInsight?.data?.insights) {
           report.aiInsights = claudeInsight.data.insights;
@@ -165,11 +133,11 @@ class AIAnalyticsJob {
         return report;
       }, results);
 
-      // Cleanup old insights
       await AIInsight.cleanup(90);
 
     } catch (error) {
       console.error('❌ Error crítico en AI Analytics Job:', error);
+      console.error('   Stack:', error.stack);
     } finally {
       this.isRunning = false;
       
@@ -191,57 +159,134 @@ class AIAnalyticsJob {
   }
 
   /**
-   * Generar insights usando Claude API
+   * Generar insights usando Claude API - Con mejor manejo de errores
    */
   async generateClaudeInsights(analysisResults, results) {
     console.log('\n   🤖 Generando insights con Claude...');
     
     try {
+      // Verificar que tenemos datos para enviar
+      if (!analysisResults.healthCheck && !analysisResults.subjectAnalysis && !analysisResults.listPerformance) {
+        console.log('      ⚠️  No hay datos suficientes para enviar a Claude');
+        results.failed.push('ai_generated_insights (no data)');
+        return;
+      }
+
       // Preparar datos compactos para Claude
       const dataForClaude = aiCalculator.prepareDataForClaude(analysisResults);
+      const dataSize = JSON.stringify(dataForClaude).length;
       
-      console.log(`      📦 Datos preparados: ${JSON.stringify(dataForClaude).length} bytes`);
+      console.log(`      📦 Datos preparados: ${dataSize} bytes`);
+      console.log(`      📊 Health data: ${dataForClaude.health ? 'Sí' : 'No'}`);
+      console.log(`      📊 Subjects data: ${dataForClaude.subjects?.top ? 'Sí' : 'No'}`);
+      console.log(`      📊 Lists data: ${dataForClaude.lists?.length || 0} listas`);
+      console.log(`      📊 Timing data: ${dataForClaude.timing?.best ? 'Sí' : 'No'}`);
       
       // Llamar a Claude
+      console.log('      🔄 Llamando a Claude API...');
+      const claudeStartTime = Date.now();
+      
       const claudeResponse = await claudeService.generateEmailInsights(dataForClaude);
       
+      const claudeDuration = ((Date.now() - claudeStartTime) / 1000).toFixed(2);
+      console.log(`      ⏱️  Claude respondió en ${claudeDuration}s`);
+      
       if (claudeResponse.success) {
+        // Verificar que tenemos contenido útil
+        const hasContent = claudeResponse.executiveSummary || 
+                          claudeResponse.deepAnalysis || 
+                          claudeResponse.actionPlan?.length > 0;
+        
+        if (!hasContent) {
+          console.log('      ⚠️  Claude respondió pero sin contenido útil');
+          console.log('      Response keys:', Object.keys(claudeResponse));
+        }
+        
         // Guardar insights generados por Claude
         await AIInsight.saveAnalysis('ai_generated_insights', 30, {
           success: true,
-          insights: claudeResponse.insights,
-          summary: claudeResponse.summary,
-          recommendations: claudeResponse.recommendations,
+          executiveSummary: claudeResponse.executiveSummary || '',
+          deepAnalysis: claudeResponse.deepAnalysis || {},
+          actionPlan: claudeResponse.actionPlan || [],
+          quickWins: claudeResponse.quickWins || [],
+          warnings: claudeResponse.warnings || [],
+          opportunities: claudeResponse.opportunities || [],
+          nextCampaignSuggestion: claudeResponse.nextCampaignSuggestion || null,
+          // Metadata
           model: claudeResponse.model,
           tokensUsed: claudeResponse.tokensUsed,
           generatedAt: claudeResponse.generatedAt,
-          inputData: dataForClaude // Guardar para referencia
+          duration: claudeResponse.duration,
+          isFallback: claudeResponse.isFallback || false,
+          // Debug info
+          inputDataSize: dataSize,
+          parseError: claudeResponse.parseError || false
         }, {
           recalculateHours: 6
         });
         
-        results.success.push('ai_generated_insights (Claude)');
-        console.log(`      ✅ Claude generó ${claudeResponse.insights?.length || 0} insights`);
-        console.log(`      📊 Tokens: ${claudeResponse.tokensUsed?.input || 0} in / ${claudeResponse.tokensUsed?.output || 0} out`);
+        results.success.push(`ai_generated_insights (${claudeResponse.isFallback ? 'fallback' : 'Claude'})`);
         
-        if (claudeResponse.summary) {
-          console.log(`      📝 Resumen: ${claudeResponse.summary.substring(0, 100)}...`);
+        console.log(`      ✅ Insights guardados correctamente`);
+        console.log(`      📝 Executive Summary: ${claudeResponse.executiveSummary ? 'Sí' : 'No'}`);
+        console.log(`      📝 Action Plan: ${claudeResponse.actionPlan?.length || 0} items`);
+        console.log(`      📝 Quick Wins: ${claudeResponse.quickWins?.length || 0} items`);
+        console.log(`      📝 Warnings: ${claudeResponse.warnings?.length || 0} items`);
+        
+        if (claudeResponse.tokensUsed) {
+          console.log(`      📊 Tokens: ${claudeResponse.tokensUsed.input || 0} in / ${claudeResponse.tokensUsed.output || 0} out`);
+        }
+        
+        if (claudeResponse.executiveSummary) {
+          const preview = claudeResponse.executiveSummary.substring(0, 100);
+          console.log(`      📝 Resumen: ${preview}...`);
         }
       } else {
-        console.log('      ⚠️  Claude no disponible, usando insights básicos');
+        console.log('      ⚠️  Claude no disponible o falló, guardando fallback');
+        console.log(`      Message: ${claudeResponse.message || 'No message'}`);
+        
+        // Guardar el fallback de todas formas
+        await AIInsight.saveAnalysis('ai_generated_insights', 30, claudeResponse, {
+          recalculateHours: 1 // Reintentar más pronto si falló
+        });
+        
         results.success.push('ai_generated_insights (fallback)');
       }
       
     } catch (error) {
       console.error(`      ❌ Error generando insights con Claude: ${error.message}`);
+      console.error(`      Stack: ${error.stack?.substring(0, 300)}`);
       results.failed.push('ai_generated_insights');
+      
+      // Intentar guardar un fallback básico para que el frontend tenga algo
+      try {
+        const fallbackData = {
+          success: false,
+          executiveSummary: `Error generando análisis: ${error.message}`,
+          deepAnalysis: {},
+          actionPlan: [],
+          quickWins: [],
+          warnings: [{
+            severity: 'warning',
+            issue: 'Error en Claude API',
+            consequence: 'Análisis AI no disponible temporalmente',
+            solution: 'El sistema reintentará automáticamente'
+          }],
+          error: error.message,
+          generatedAt: new Date().toISOString()
+        };
+        
+        await AIInsight.saveAnalysis('ai_generated_insights', 30, fallbackData, {
+          recalculateHours: 1
+        });
+        
+        console.log('      💾 Fallback de error guardado');
+      } catch (saveError) {
+        console.error(`      ❌ Error guardando fallback: ${saveError.message}`);
+      }
     }
   }
 
-  /**
-   * Ejecutar un análisis específico
-   * @returns {Object} El resultado del análisis para usar en Claude
-   */
   async runAnalysis(type, periodDays, calculator, results) {
     const label = `${type} (${periodDays}d)`;
     console.log(`   📊 Calculando: ${label}...`);
@@ -255,7 +300,7 @@ class AIAnalyticsJob {
       if (analysisResult && analysisResult.success !== false) {
         await AIInsight.saveAnalysis(type, periodDays, analysisResult, {
           calculationStartTime: startTime,
-          recalculateHours: type === 'health_check' ? 1 : 6 // Health check más frecuente
+          recalculateHours: type === 'health_check' ? 1 : 6
         });
         
         results.success.push(label);
@@ -263,14 +308,13 @@ class AIAnalyticsJob {
       } else {
         console.log(`      ⚠️  ${label}: datos insuficientes`);
         
-        // Guardar igual para que el frontend sepa que no hay data
         await AIInsight.saveAnalysis(type, periodDays, {
           success: false,
           message: analysisResult?.message || 'Insufficient data',
           summary: { status: 'insufficient_data', score: 0 }
         }, {
           calculationStartTime: startTime,
-          recalculateHours: 1 // Reintentar pronto
+          recalculateHours: 1
         });
         
         results.success.push(label);
@@ -281,27 +325,19 @@ class AIAnalyticsJob {
       results.failed.push(label);
     }
     
-    // Retornar resultado para usar en Claude
     return analysisResult;
   }
 
-  /**
-   * Forzar recálculo de todos los análisis
-   */
   async forceRecalculate() {
     console.log('🔄 Forzando recálculo de todos los análisis...');
     await AIInsight.invalidate();
     await this.runAllAnalyses();
   }
 
-  /**
-   * Forzar recálculo de un tipo específico
-   */
   async forceRecalculateType(type) {
     console.log(`🔄 Forzando recálculo de: ${type}...`);
     await AIInsight.invalidate(type);
     
-    // Correr solo ese tipo
     const results = { success: [], failed: [] };
     
     switch (type) {
@@ -342,7 +378,6 @@ class AIAnalyticsJob {
         break;
         
       case 'ai_generated_insights':
-        // Para regenerar insights de Claude, necesitamos recalcular todo
         await this.runAllAnalyses();
         break;
     }
@@ -350,25 +385,18 @@ class AIAnalyticsJob {
     return results;
   }
 
-  /**
-   * Obtener estado del job
-   */
   getStatus() {
     return {
       isRunning: this.isRunning,
       lastRun: this.lastRun,
       nextScheduledRun: this.getNextRun(),
-      schedule: '0 */6 * * *', // Cada 6 horas
+      schedule: '0 */6 * * *',
       claudeEnabled: this.claudeEnabled,
       claudeModel: claudeService.model
     };
   }
 
-  /**
-   * Obtener próxima ejecución
-   */
   getNextRun() {
-    // Calcular próxima hora múltiplo de 6
     const now = new Date();
     const nextHour = Math.ceil(now.getHours() / 6) * 6;
     const next = new Date(now);
@@ -383,9 +411,6 @@ class AIAnalyticsJob {
     return next;
   }
 
-  /**
-   * Detener el job
-   */
   stop() {
     if (this.schedule) {
       this.schedule.stop();
@@ -394,7 +419,5 @@ class AIAnalyticsJob {
   }
 }
 
-// Singleton
 const aiAnalyticsJob = new AIAnalyticsJob();
-
 module.exports = aiAnalyticsJob;
