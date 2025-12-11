@@ -1091,6 +1091,7 @@ class WebhooksController {
 
   /**
    * Process an abandoned cart - called after timeout
+   * INCLUYE DEDUPLICACIÓN para evitar múltiples emails al mismo cliente
    */
   async processAbandonedCart(checkoutToken, email, checkoutData) {
     console.log(`\n🛒 ==================== ABANDONED CART ====================`);
@@ -1098,6 +1099,48 @@ class WebhooksController {
     console.log(`   Email: ${email}`);
     
     try {
+      // ==================== DEDUPLICACIÓN ====================
+      // Verificar si ya procesamos este checkout o este email recientemente
+      
+      const FlowExecution = require('../models/FlowExecution');
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      
+      // 1. Verificar si ya procesamos este checkout token en las últimas 24h
+      const existingByToken = await WebhookLog.findOne({
+        topic: 'cart_abandoned',
+        'cartDetails.token': checkoutToken,
+        createdAt: { $gte: twentyFourHoursAgo }
+      });
+      
+      if (existingByToken) {
+        console.log(`   ⏭️  Checkout ${checkoutToken} ya procesado - saltando`);
+        abandonedCartTracker.delete(checkoutToken);
+        return;
+      }
+      
+      // 2. Verificar si este email ya tiene un flow de abandoned cart activo en 24h
+      if (email) {
+        const existingByEmail = await FlowExecution.findOne({
+          'triggerData.email': { $regex: new RegExp(`^${email}$`, 'i') },
+          status: { $in: ['active', 'waiting', 'completed'] },
+          createdAt: { $gte: twentyFourHoursAgo },
+          $or: [
+            { 'triggerData.trigger': 'cart_abandoned' },
+            { 'triggerData.cart.token': { $exists: true } }
+          ]
+        });
+        
+        if (existingByEmail) {
+          console.log(`   ⏭️  Email ${email} ya tiene flow de abandoned cart activo - saltando`);
+          abandonedCartTracker.delete(checkoutToken);
+          return;
+        }
+      }
+      
+      console.log(`   ✅ Deduplicación pasada - procesando carrito abandonado`);
+      
+      // ==================== FIN DEDUPLICACIÓN ====================
+      
       // Log the abandonment
       const webhookLog = await WebhookLog.logWebhook({
         topic: 'cart_abandoned',
@@ -1157,6 +1200,7 @@ class WebhooksController {
           customerId: customer?._id,
           email: customer?.email || email,
           firstName: customer?.firstName,
+          trigger: 'cart_abandoned', // Para identificación en deduplicación
           cart: {
             token: checkoutToken,
             checkoutUrl: checkoutData.abandoned_checkout_url || 
@@ -1211,6 +1255,8 @@ class WebhooksController {
       
     } catch (error) {
       console.error('❌ Error processing abandoned cart:', error.message);
+      // Clean up tracker even on error
+      abandonedCartTracker.delete(checkoutToken);
     }
   }
 
