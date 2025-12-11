@@ -1,6 +1,6 @@
 // backend/src/services/aiCalculator.js
 // 🧠 AI Calculator - Lógica de cálculo de insights
-// 🔧 UPDATED: Enfocado en últimos 15 días + Detección de contexto de campañas
+// 🔧 UPDATED: Enfocado en últimos 15 días + Detección de contexto con fecha actual
 
 const Campaign = require('../models/Campaign');
 const Customer = require('../models/Customer');
@@ -14,28 +14,133 @@ class AICalculator {
   // ==================== CAMPAIGN CONTEXT DETECTION ====================
   
   /**
-   * Detecta el contexto/propósito de una campaña basado en su subject
-   * Esto ayuda a interpretar métricas en contexto
+   * Obtener el contexto temporal actual (qué época/evento es relevante AHORA)
    */
-  detectCampaignContext(subject, campaignName = '') {
+  getCurrentSeasonalContext() {
+    const now = new Date();
+    const month = now.getMonth(); // 0-11
+    const day = now.getDate();
+    
+    // Determinar la temporada/evento actual
+    const contexts = [];
+    
+    // Diciembre: Pre-Holiday / Holiday Season
+    if (month === 11) { // Diciembre
+      if (day <= 15) {
+        contexts.push({ event: 'Pre-Holiday Season', type: 'seasonal', priority: 1 });
+        contexts.push({ event: 'Holiday Shopping', type: 'seasonal', priority: 2 });
+      } else if (day <= 24) {
+        contexts.push({ event: 'Last-Minute Holiday Shopping', type: 'seasonal', priority: 1 });
+        contexts.push({ event: 'Christmas', type: 'holiday', priority: 2 });
+      } else {
+        contexts.push({ event: 'Post-Christmas Sales', type: 'seasonal', priority: 1 });
+        contexts.push({ event: 'New Year', type: 'holiday', priority: 2 });
+      }
+    }
+    
+    // Noviembre: Thanksgiving / Black Friday / Cyber Monday
+    if (month === 10) { // Noviembre
+      if (day >= 20 && day <= 30) {
+        contexts.push({ event: 'Black Friday/Cyber Monday', type: 'major_event', priority: 1 });
+        contexts.push({ event: 'Thanksgiving', type: 'holiday', priority: 2 });
+      } else if (day < 20) {
+        contexts.push({ event: 'Pre-Black Friday', type: 'buildup', priority: 1 });
+      }
+    }
+    
+    // Enero: New Year / Post-Holiday
+    if (month === 0) {
+      if (day <= 7) {
+        contexts.push({ event: 'New Year', type: 'holiday', priority: 1 });
+      } else {
+        contexts.push({ event: 'Post-Holiday', type: 'seasonal', priority: 1 });
+      }
+    }
+    
+    // Febrero: Valentine's Day
+    if (month === 1) {
+      if (day <= 14) {
+        contexts.push({ event: 'Valentine\'s Day', type: 'holiday', priority: 1 });
+      }
+    }
+    
+    // Mayo-Septiembre: BBQ Season (importante para pickles!)
+    if (month >= 4 && month <= 8) {
+      contexts.push({ event: 'BBQ Season', type: 'seasonal', priority: 2 });
+      contexts.push({ event: 'Grilling Season', type: 'seasonal', priority: 3 });
+    }
+    
+    // Memorial Day (último lunes de mayo)
+    if (month === 4 && day >= 25) {
+      contexts.push({ event: 'Memorial Day', type: 'holiday', priority: 1 });
+    }
+    
+    // July 4th
+    if (month === 6 && day <= 7) {
+      contexts.push({ event: 'July 4th', type: 'holiday', priority: 1 });
+    }
+    
+    // Labor Day (primer lunes de septiembre)
+    if (month === 8 && day <= 7) {
+      contexts.push({ event: 'Labor Day', type: 'holiday', priority: 1 });
+    }
+    
+    // Halloween
+    if (month === 9 && day >= 15) {
+      contexts.push({ event: 'Halloween', type: 'holiday', priority: 1 });
+    }
+    
+    // National Pickle Day (14 de noviembre)
+    if (month === 10 && day >= 10 && day <= 18) {
+      contexts.push({ event: 'National Pickle Day', type: 'brand_event', priority: 1 });
+    }
+    
+    return contexts.sort((a, b) => a.priority - b.priority);
+  }
+
+  /**
+   * Detecta el contexto/propósito de una campaña basado en su subject
+   * Ahora considera la fecha actual para ser más inteligente
+   */
+  detectCampaignContext(subject, campaignName = '', campaignDate = null) {
     const subjectLower = (subject || '').toLowerCase();
     const nameLower = (campaignName || '').toLowerCase();
     const combined = `${subjectLower} ${nameLower}`;
+    
+    // Obtener contexto temporal actual
+    const currentSeasonalContexts = this.getCurrentSeasonalContext();
+    const currentEvent = currentSeasonalContexts[0]?.event || null;
 
-    // === EVENTOS/FECHAS IMPORTANTES ===
+    // === EVENTOS/FECHAS IMPORTANTES (ordenados por especificidad) ===
     const eventKeywords = {
-      // Holidays
+      // Específicos primero
+      'national pickle': { type: 'brand_event', event: 'National Pickle Day', expectation: 'high_engagement' },
+      'pickle day': { type: 'brand_event', event: 'National Pickle Day', expectation: 'high_engagement' },
+      'pickle week': { type: 'brand_event', event: 'Pickle Week', expectation: 'high_engagement' },
+      
+      // Major sales events
       'black friday': { type: 'major_event', event: 'Black Friday', expectation: 'high_revenue' },
       'cyber monday': { type: 'major_event', event: 'Cyber Monday', expectation: 'high_revenue' },
-      'thanksgiving': { type: 'holiday', event: 'Thanksgiving', expectation: 'moderate_revenue' },
+      
+      // Holidays - Winter
       'christmas': { type: 'holiday', event: 'Christmas', expectation: 'high_revenue' },
       'navidad': { type: 'holiday', event: 'Navidad', expectation: 'high_revenue' },
+      'holiday': { type: 'holiday', event: 'Holiday Season', expectation: 'high_revenue' },
+      'holidays': { type: 'holiday', event: 'Holiday Season', expectation: 'high_revenue' },
+      'festive': { type: 'holiday', event: 'Holiday Season', expectation: 'high_revenue' },
+      'gift': { type: 'holiday', event: 'Gift-Giving Season', expectation: 'high_revenue' },
+      'regalo': { type: 'holiday', event: 'Gift-Giving Season', expectation: 'high_revenue' },
       'new year': { type: 'holiday', event: 'New Year', expectation: 'moderate_revenue' },
       'año nuevo': { type: 'holiday', event: 'Año Nuevo', expectation: 'moderate_revenue' },
+      
+      // Other holidays
+      'thanksgiving': { type: 'holiday', event: 'Thanksgiving', expectation: 'moderate_revenue' },
       'valentine': { type: 'holiday', event: 'Valentine\'s Day', expectation: 'moderate_revenue' },
       'san valentin': { type: 'holiday', event: 'San Valentín', expectation: 'moderate_revenue' },
       'mother\'s day': { type: 'holiday', event: 'Mother\'s Day', expectation: 'moderate_revenue' },
+      'dia de la madre': { type: 'holiday', event: 'Día de la Madre', expectation: 'moderate_revenue' },
       'father\'s day': { type: 'holiday', event: 'Father\'s Day', expectation: 'moderate_revenue' },
+      'dia del padre': { type: 'holiday', event: 'Día del Padre', expectation: 'moderate_revenue' },
       'july 4': { type: 'holiday', event: 'July 4th', expectation: 'moderate_revenue' },
       '4th of july': { type: 'holiday', event: 'July 4th', expectation: 'moderate_revenue' },
       'independence day': { type: 'holiday', event: 'July 4th', expectation: 'moderate_revenue' },
@@ -45,20 +150,21 @@ class AICalculator {
       'easter': { type: 'holiday', event: 'Easter', expectation: 'low_revenue' },
       'super bowl': { type: 'event', event: 'Super Bowl', expectation: 'moderate_revenue' },
       
-      // Industry specific - Jersey Pickles
-      'pickle day': { type: 'brand_event', event: 'National Pickle Day', expectation: 'high_engagement' },
-      'national pickle': { type: 'brand_event', event: 'National Pickle Day', expectation: 'high_engagement' },
-      'pickle week': { type: 'brand_event', event: 'Pickle Week', expectation: 'high_engagement' },
-      
-      // Seasons
+      // Seasons (para pickles: BBQ es clave)
       'summer': { type: 'seasonal', event: 'Summer Season', expectation: 'bbq_season' },
       'verano': { type: 'seasonal', event: 'Summer Season', expectation: 'bbq_season' },
       'bbq': { type: 'seasonal', event: 'BBQ Season', expectation: 'bbq_season' },
+      'barbecue': { type: 'seasonal', event: 'BBQ Season', expectation: 'bbq_season' },
       'grilling': { type: 'seasonal', event: 'Grilling Season', expectation: 'bbq_season' },
+      'grill': { type: 'seasonal', event: 'Grilling Season', expectation: 'bbq_season' },
       'cookout': { type: 'seasonal', event: 'Cookout Season', expectation: 'bbq_season' },
+      'picnic': { type: 'seasonal', event: 'Picnic Season', expectation: 'bbq_season' },
       'spring': { type: 'seasonal', event: 'Spring', expectation: 'moderate_revenue' },
+      'primavera': { type: 'seasonal', event: 'Spring', expectation: 'moderate_revenue' },
       'fall': { type: 'seasonal', event: 'Fall Season', expectation: 'moderate_revenue' },
-      'winter': { type: 'seasonal', event: 'Winter', expectation: 'moderate_revenue' }
+      'otoño': { type: 'seasonal', event: 'Fall Season', expectation: 'moderate_revenue' },
+      'winter': { type: 'seasonal', event: 'Winter', expectation: 'moderate_revenue' },
+      'invierno': { type: 'seasonal', event: 'Winter', expectation: 'moderate_revenue' }
     };
 
     // === BUILD-UP / ANTICIPACIÓN ===
@@ -68,7 +174,8 @@ class AICalculator {
       'sneak peek', 'preview', 'adelanto', 'early access', 'acceso anticipado',
       'be the first', 'sé el primero', 'launching soon', 'coming', 'arrives',
       'announcement', 'anuncio', 'exciting news', 'big news', 'wait for it',
-      'something special', 'algo especial', 'get excited', 'stay tuned'
+      'something special', 'algo especial', 'get excited', 'stay tuned',
+      'almost here', 'ya casi', 'preparing', 'preparando'
     ];
 
     // === PROMOCIONES DIRECTAS ===
@@ -79,12 +186,13 @@ class AICalculator {
       'expires', 'vence', 'last chance', 'última oportunidad', 'final hours',
       'ending soon', 'termina pronto', 'act now', 'actúa ahora', 'hurry',
       'exclusive offer', 'oferta exclusiva', 'special price', 'precio especial',
-      'code:', 'código:', 'use code', 'usa el código', 'coupon', 'cupón'
+      'code:', 'código:', 'use code', 'usa el código', 'coupon', 'cupón',
+      'promo', 'promoción'
     ];
 
     // === LANZAMIENTOS ===
     const launchKeywords = [
-      'new', 'nuevo', 'just arrived', 'recién llegado', 'introducing', 'presentamos',
+      'new', 'nuevo', 'nueva', 'just arrived', 'recién llegado', 'introducing', 'presentamos',
       'meet', 'conoce', 'fresh', 'fresco', 'now available', 'ya disponible',
       'just dropped', 'launch', 'lanzamiento', 'debut', 'first time', 'primera vez',
       'never before', 'brand new', 'hot off', 'just in'
@@ -95,7 +203,8 @@ class AICalculator {
       'recipe', 'receta', 'how to', 'cómo', 'tips', 'consejos', 'guide', 'guía',
       'story', 'historia', 'behind', 'detrás', 'meet the', 'conoce a',
       'learn', 'aprende', 'discover', 'descubre', 'did you know', 'sabías',
-      'weekly', 'semanal', 'monthly', 'mensual', 'newsletter', 'digest'
+      'weekly', 'semanal', 'monthly', 'mensual', 'newsletter', 'digest',
+      'update', 'actualización'
     ];
 
     // === REENGAGEMENT ===
@@ -110,7 +219,8 @@ class AICalculator {
       'today only', 'solo hoy', 'ends tonight', 'termina esta noche',
       'last day', 'último día', 'hours left', 'horas restantes', 'almost gone',
       'selling fast', 'se agota', 'limited stock', 'stock limitado',
-      'don\'t wait', 'no esperes', 'now or never', 'ahora o nunca'
+      'don\'t wait', 'no esperes', 'now or never', 'ahora o nunca',
+      'ending', 'final', 'last'
     ];
 
     // Detectar contexto
@@ -125,7 +235,8 @@ class AICalculator {
       isContent: false,
       isReengage: false,
       hasUrgency: false,
-      detectedKeywords: []
+      detectedKeywords: [],
+      currentSeasonalContext: currentEvent // 🔧 NUEVO: contexto temporal actual
     };
 
     // Check for events first (highest priority)
@@ -143,7 +254,12 @@ class AICalculator {
     for (const keyword of buildupKeywords) {
       if (combined.includes(keyword)) {
         context.isBuildup = true;
-        context.subType = 'buildup';
+        if (!context.subType) context.subType = 'buildup';
+        if (!context.event && currentEvent) {
+          // Si no detectamos evento específico pero hay contexto temporal, usarlo
+          context.event = `Pre-${currentEvent}`;
+          context.type = 'buildup';
+        }
         context.expectation = 'engagement_focus';
         context.detectedKeywords.push(keyword);
         break;
@@ -200,6 +316,15 @@ class AICalculator {
       }
     }
 
+    // 🔧 Si no detectamos nada específico, usar contexto temporal actual
+    if (context.type === 'general' && !context.event && currentEvent) {
+      // Solo si hay señales de que es relevante al contexto actual
+      if (context.isBuildup || context.isPromo) {
+        context.event = currentEvent;
+        context.type = 'seasonal';
+      }
+    }
+
     // Determine final type if still general
     if (context.type === 'general' && context.subType) {
       context.type = context.subType;
@@ -213,8 +338,13 @@ class AICalculator {
    * Detecta si estamos en período de build-up hacia algo importante
    */
   analyzeStrategicContext(campaigns) {
+    // Obtener contexto temporal actual
+    const currentSeasonalContexts = this.getCurrentSeasonalContext();
+    const currentEvent = currentSeasonalContexts[0]?.event || null;
+    const currentEventType = currentSeasonalContexts[0]?.type || null;
+    
     const contexts = campaigns.map(c => ({
-      ...this.detectCampaignContext(c.subject, c.name),
+      ...this.detectCampaignContext(c.subject, c.name, c.sentAt),
       campaign: c.name,
       subject: c.subject,
       sentAt: c.sentAt,
@@ -241,7 +371,7 @@ class AICalculator {
       if (ctx.isContent) contentCount++;
     });
 
-    // Detectar evento dominante
+    // Detectar evento dominante de las campañas
     let dominantEvent = null;
     let maxEventCount = 0;
     for (const [event, count] of Object.entries(eventMentions)) {
@@ -250,12 +380,33 @@ class AICalculator {
         maxEventCount = count;
       }
     }
+    
+    // 🔧 Si no hay evento dominante en campañas, usar el contexto temporal actual
+    if (!dominantEvent && currentEvent) {
+      dominantEvent = currentEvent;
+    }
 
     // Determinar fase estratégica
     let strategicPhase = 'normal';
     let phaseDescription = 'Operación normal de email marketing';
 
-    if (dominantEvent && buildupCount >= 2) {
+    // 🔧 Lógica mejorada considerando fecha actual
+    if (currentEventType === 'major_event' || currentEventType === 'holiday') {
+      // Estamos en una temporada importante
+      if (buildupCount >= 2 || (buildupCount >= 1 && promoCount === 0)) {
+        strategicPhase = 'buildup';
+        phaseDescription = `Período de anticipación hacia ${dominantEvent}. Alto engagement esperado, el revenue principal vendrá con las promociones.`;
+      } else if (promoCount >= 2) {
+        strategicPhase = 'event_active';
+        phaseDescription = `${dominantEvent} activo. Momento de máximo revenue esperado.`;
+      } else if (buildupCount > 0 && promoCount > 0) {
+        strategicPhase = 'transition';
+        phaseDescription = `Transición de build-up a ventas para ${dominantEvent}. Mix de engagement y conversión.`;
+      } else {
+        strategicPhase = 'pre_event';
+        phaseDescription = `Preparándose para ${dominantEvent}. Buen momento para calentar a la audiencia.`;
+      }
+    } else if (dominantEvent && buildupCount >= 2) {
       strategicPhase = 'buildup';
       phaseDescription = `Período de anticipación hacia ${dominantEvent}. Alto engagement esperado, revenue vendrá después.`;
     } else if (dominantEvent && promoCount >= 2) {
@@ -282,26 +433,46 @@ class AICalculator {
     let metricsInterpretation = '';
     let isHealthy = true;
 
-    if (strategicPhase === 'buildup' || strategicPhase === 'anticipation') {
+    if (strategicPhase === 'buildup' || strategicPhase === 'anticipation' || strategicPhase === 'pre_event') {
       if (avgOpenRate > 20 && avgRevenue < 50) {
-        metricsInterpretation = '✅ NORMAL: Alto engagement con bajo revenue es esperado en fase de anticipación. Tu audiencia está atenta y lista para la oferta principal.';
+        metricsInterpretation = `✅ NORMAL para fase de ${strategicPhase}: Alto engagement (${avgOpenRate.toFixed(1)}%) con bajo revenue es esperado. Tu audiencia está atenta y lista para ${dominantEvent || 'la oferta principal'}.`;
         isHealthy = true;
       } else if (avgOpenRate < 15) {
-        metricsInterpretation = '⚠️ El engagement está bajo para una fase de build-up. Considera subjects más intrigantes.';
+        metricsInterpretation = `⚠️ El engagement (${avgOpenRate.toFixed(1)}%) está bajo para una fase de anticipación. Considera subjects más intrigantes para calentar a tu audiencia antes de ${dominantEvent || 'las promociones'}.`;
         isHealthy = false;
+      } else {
+        metricsInterpretation = `✅ Buen engagement en fase de build-up hacia ${dominantEvent || 'próximo evento'}.`;
+        isHealthy = true;
       }
     } else if (strategicPhase === 'event_active' || strategicPhase === 'sales_push') {
       if (avgOpenRate > 20 && avgRevenue < 100) {
-        metricsInterpretation = '⚠️ Alto engagement pero bajo revenue durante promoción activa. Revisa: ofertas, landing pages, proceso de checkout.';
+        metricsInterpretation = `⚠️ Alto engagement (${avgOpenRate.toFixed(1)}%) pero bajo revenue durante ${dominantEvent || 'promoción activa'}. Revisa: ofertas, landing pages, proceso de checkout.`;
         isHealthy = false;
       } else if (avgOpenRate > 20 && avgRevenue > 200) {
-        metricsInterpretation = '✅ Excelente! Alto engagement convirtiendo en ventas. La promoción está funcionando.';
+        metricsInterpretation = `✅ Excelente! Alto engagement (${avgOpenRate.toFixed(1)}%) convirtiendo en $${totalRevenue.toFixed(0)} revenue. ${dominantEvent || 'La promoción'} está funcionando.`;
+        isHealthy = true;
+      } else {
+        metricsInterpretation = `📊 Performance mixto durante ${dominantEvent || 'promoción'}. Monitorea conversión.`;
         isHealthy = true;
       }
     } else if (strategicPhase === 'nurturing') {
       if (avgOpenRate > 18) {
-        metricsInterpretation = '✅ Buen engagement en contenido. Estás construyendo relación con tu audiencia.';
+        metricsInterpretation = `✅ Buen engagement (${avgOpenRate.toFixed(1)}%) en contenido. Estás construyendo relación con tu audiencia.`;
         isHealthy = true;
+      } else {
+        metricsInterpretation = `📊 Engagement moderado en fase de nurturing. Prueba contenido más relevante.`;
+        isHealthy = true;
+      }
+    } else {
+      if (avgOpenRate > 20) {
+        metricsInterpretation = `✅ Buen engagement general (${avgOpenRate.toFixed(1)}%).`;
+        isHealthy = true;
+      } else if (avgOpenRate > 15) {
+        metricsInterpretation = `📊 Engagement aceptable (${avgOpenRate.toFixed(1)}%). Hay espacio para mejorar subjects.`;
+        isHealthy = true;
+      } else {
+        metricsInterpretation = `⚠️ Engagement bajo (${avgOpenRate.toFixed(1)}%). Revisa subjects y timing de envío.`;
+        isHealthy = false;
       }
     }
 
@@ -315,6 +486,9 @@ class AICalculator {
         promoCampaigns: promoCount,
         contentCampaigns: contentCount
       },
+      // 🔧 Info temporal actual
+      currentDate: new Date().toISOString(),
+      currentSeasonalContext: currentSeasonalContexts[0] || null,
       strategicPhase,
       phaseDescription,
       dominantEvent,
