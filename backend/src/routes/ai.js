@@ -83,7 +83,11 @@ router.get('/insights/quick', authorize('admin', 'manager'), async (req, res) =>
 
 router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
   try {
-    // Primero buscar insights frescos
+    // Obtener contexto temporal actual
+    const currentSeasonalContext = aiCalculator.getCurrentSeasonalContext();
+    const currentEvent = currentSeasonalContext[0]?.event || null;
+    
+    // Buscar insights de Claude
     let insight = await AIInsight.getLatest('ai_generated_insights', 15);
     
     // Si no hay frescos, buscar aunque estén stale
@@ -92,10 +96,6 @@ router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
         type: 'ai_generated_insights',
         'summary.status': { $ne: 'error' }
       }).sort({ createdAt: -1 });
-      
-      if (insight) {
-        console.log('📦 Usando Claude insight (posiblemente stale):', insight.createdAt);
-      }
     }
     
     if (!insight) {
@@ -107,6 +107,67 @@ router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
       });
     }
     
+    // 🔧 VALIDAR SI LOS INSIGHTS SON RELEVANTES AL CONTEXTO ACTUAL
+    // Detectar si mencionan eventos pasados que ya no son relevantes
+    const insightText = JSON.stringify(insight.data || {}).toLowerCase();
+    const pastEvents = ['black friday', 'cyber monday', 'thanksgiving'];
+    const currentEvents = ['holiday', 'christmas', 'pre-holiday', 'navidad', 'gift'];
+    
+    let isOutdated = false;
+    let outdatedReason = null;
+    
+    // Si estamos en temporada holiday (Diciembre) y los insights mencionan Black Friday
+    const now = new Date();
+    const isDecember = now.getMonth() === 11;
+    
+    if (isDecember) {
+      for (const pastEvent of pastEvents) {
+        if (insightText.includes(pastEvent)) {
+          // Verificar si también menciona eventos actuales
+          const mentionsCurrentEvent = currentEvents.some(e => insightText.includes(e));
+          if (!mentionsCurrentEvent) {
+            isOutdated = true;
+            outdatedReason = `Los insights mencionan "${pastEvent}" pero estamos en temporada Holiday/Christmas`;
+            break;
+          }
+        }
+      }
+    }
+    
+    // Si los insights están desactualizados, marcarlos y sugerir recálculo
+    if (isOutdated) {
+      console.log(`⚠️ Claude insights desactualizados: ${outdatedReason}`);
+      
+      // Marcar como stale si no lo está
+      if (!insight.isStale) {
+        await AIInsight.updateOne(
+          { _id: insight._id },
+          { $set: { isStale: true } }
+        );
+      }
+      
+      // Iniciar recálculo automático en background si no está corriendo
+      if (!aiAnalyticsJob.isRunning) {
+        console.log('🔄 Iniciando recálculo automático por contexto desactualizado...');
+        setImmediate(() => aiAnalyticsJob.forceRecalculateType('ai_generated_insights'));
+      }
+      
+      return res.json({
+        success: true,
+        data: insight.data,
+        _meta: {
+          calculatedAt: insight.createdAt,
+          ageHours: Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60)),
+          isStale: true,
+          isOutdated: true,
+          outdatedReason,
+          currentSeasonalContext: currentEvent,
+          recalculationStarted: !aiAnalyticsJob.isRunning,
+          source: 'claude-ai'
+        }
+      });
+    }
+    
     res.json({
       success: true,
       data: insight.data,
@@ -114,6 +175,8 @@ router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
         calculatedAt: insight.createdAt,
         ageHours: Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60)),
         isStale: insight.isStale || false,
+        isOutdated: false,
+        currentSeasonalContext: currentEvent,
         source: 'claude-ai'
       }
     });
