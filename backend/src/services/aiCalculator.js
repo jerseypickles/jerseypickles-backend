@@ -1,6 +1,6 @@
 // backend/src/services/aiCalculator.js
 // 🧠 AI Calculator - Lógica de cálculo de insights
-// Este servicio SOLO calcula, no guarda. El Job se encarga de guardar.
+// 🔧 UPDATED: Enfocado en últimos 15 días + Detección de contexto de campañas
 
 const Campaign = require('../models/Campaign');
 const Customer = require('../models/Customer');
@@ -10,6 +10,324 @@ const Segment = require('../models/Segment');
 const mongoose = require('mongoose');
 
 class AICalculator {
+
+  // ==================== CAMPAIGN CONTEXT DETECTION ====================
+  
+  /**
+   * Detecta el contexto/propósito de una campaña basado en su subject
+   * Esto ayuda a interpretar métricas en contexto
+   */
+  detectCampaignContext(subject, campaignName = '') {
+    const subjectLower = (subject || '').toLowerCase();
+    const nameLower = (campaignName || '').toLowerCase();
+    const combined = `${subjectLower} ${nameLower}`;
+
+    // === EVENTOS/FECHAS IMPORTANTES ===
+    const eventKeywords = {
+      // Holidays
+      'black friday': { type: 'major_event', event: 'Black Friday', expectation: 'high_revenue' },
+      'cyber monday': { type: 'major_event', event: 'Cyber Monday', expectation: 'high_revenue' },
+      'thanksgiving': { type: 'holiday', event: 'Thanksgiving', expectation: 'moderate_revenue' },
+      'christmas': { type: 'holiday', event: 'Christmas', expectation: 'high_revenue' },
+      'navidad': { type: 'holiday', event: 'Navidad', expectation: 'high_revenue' },
+      'new year': { type: 'holiday', event: 'New Year', expectation: 'moderate_revenue' },
+      'año nuevo': { type: 'holiday', event: 'Año Nuevo', expectation: 'moderate_revenue' },
+      'valentine': { type: 'holiday', event: 'Valentine\'s Day', expectation: 'moderate_revenue' },
+      'san valentin': { type: 'holiday', event: 'San Valentín', expectation: 'moderate_revenue' },
+      'mother\'s day': { type: 'holiday', event: 'Mother\'s Day', expectation: 'moderate_revenue' },
+      'father\'s day': { type: 'holiday', event: 'Father\'s Day', expectation: 'moderate_revenue' },
+      'july 4': { type: 'holiday', event: 'July 4th', expectation: 'moderate_revenue' },
+      '4th of july': { type: 'holiday', event: 'July 4th', expectation: 'moderate_revenue' },
+      'independence day': { type: 'holiday', event: 'July 4th', expectation: 'moderate_revenue' },
+      'memorial day': { type: 'holiday', event: 'Memorial Day', expectation: 'moderate_revenue' },
+      'labor day': { type: 'holiday', event: 'Labor Day', expectation: 'moderate_revenue' },
+      'halloween': { type: 'holiday', event: 'Halloween', expectation: 'moderate_revenue' },
+      'easter': { type: 'holiday', event: 'Easter', expectation: 'low_revenue' },
+      'super bowl': { type: 'event', event: 'Super Bowl', expectation: 'moderate_revenue' },
+      
+      // Industry specific - Jersey Pickles
+      'pickle day': { type: 'brand_event', event: 'National Pickle Day', expectation: 'high_engagement' },
+      'national pickle': { type: 'brand_event', event: 'National Pickle Day', expectation: 'high_engagement' },
+      'pickle week': { type: 'brand_event', event: 'Pickle Week', expectation: 'high_engagement' },
+      
+      // Seasons
+      'summer': { type: 'seasonal', event: 'Summer Season', expectation: 'bbq_season' },
+      'verano': { type: 'seasonal', event: 'Summer Season', expectation: 'bbq_season' },
+      'bbq': { type: 'seasonal', event: 'BBQ Season', expectation: 'bbq_season' },
+      'grilling': { type: 'seasonal', event: 'Grilling Season', expectation: 'bbq_season' },
+      'cookout': { type: 'seasonal', event: 'Cookout Season', expectation: 'bbq_season' },
+      'spring': { type: 'seasonal', event: 'Spring', expectation: 'moderate_revenue' },
+      'fall': { type: 'seasonal', event: 'Fall Season', expectation: 'moderate_revenue' },
+      'winter': { type: 'seasonal', event: 'Winter', expectation: 'moderate_revenue' }
+    };
+
+    // === BUILD-UP / ANTICIPACIÓN ===
+    const buildupKeywords = [
+      'coming soon', 'próximamente', 'get ready', 'prepárate', 'mark your calendar',
+      'save the date', 'don\'t miss', 'no te pierdas', 'countdown', 'cuenta regresiva',
+      'sneak peek', 'preview', 'adelanto', 'early access', 'acceso anticipado',
+      'be the first', 'sé el primero', 'launching soon', 'coming', 'arrives',
+      'announcement', 'anuncio', 'exciting news', 'big news', 'wait for it',
+      'something special', 'algo especial', 'get excited', 'stay tuned'
+    ];
+
+    // === PROMOCIONES DIRECTAS ===
+    const promoKeywords = [
+      '% off', '%off', 'discount', 'descuento', 'sale', 'oferta', 'deal',
+      'save $', 'ahorra', 'free shipping', 'envío gratis', 'bogo', 'buy one',
+      'clearance', 'liquidación', 'flash sale', 'limited time', 'tiempo limitado',
+      'expires', 'vence', 'last chance', 'última oportunidad', 'final hours',
+      'ending soon', 'termina pronto', 'act now', 'actúa ahora', 'hurry',
+      'exclusive offer', 'oferta exclusiva', 'special price', 'precio especial',
+      'code:', 'código:', 'use code', 'usa el código', 'coupon', 'cupón'
+    ];
+
+    // === LANZAMIENTOS ===
+    const launchKeywords = [
+      'new', 'nuevo', 'just arrived', 'recién llegado', 'introducing', 'presentamos',
+      'meet', 'conoce', 'fresh', 'fresco', 'now available', 'ya disponible',
+      'just dropped', 'launch', 'lanzamiento', 'debut', 'first time', 'primera vez',
+      'never before', 'brand new', 'hot off', 'just in'
+    ];
+
+    // === NEWSLETTER / CONTENIDO ===
+    const contentKeywords = [
+      'recipe', 'receta', 'how to', 'cómo', 'tips', 'consejos', 'guide', 'guía',
+      'story', 'historia', 'behind', 'detrás', 'meet the', 'conoce a',
+      'learn', 'aprende', 'discover', 'descubre', 'did you know', 'sabías',
+      'weekly', 'semanal', 'monthly', 'mensual', 'newsletter', 'digest'
+    ];
+
+    // === REENGAGEMENT ===
+    const reengageKeywords = [
+      'miss you', 'te extrañamos', 'come back', 'vuelve', 'haven\'t seen',
+      'it\'s been', 'ha pasado', 'still there', 'sigues ahí', 'we miss',
+      'return', 'regresa', 'where have you', 'dónde has estado'
+    ];
+
+    // === URGENCIA ===
+    const urgencyKeywords = [
+      'today only', 'solo hoy', 'ends tonight', 'termina esta noche',
+      'last day', 'último día', 'hours left', 'horas restantes', 'almost gone',
+      'selling fast', 'se agota', 'limited stock', 'stock limitado',
+      'don\'t wait', 'no esperes', 'now or never', 'ahora o nunca'
+    ];
+
+    // Detectar contexto
+    let context = {
+      type: 'general',
+      subType: null,
+      event: null,
+      expectation: 'standard',
+      isBuildup: false,
+      isPromo: false,
+      isLaunch: false,
+      isContent: false,
+      isReengage: false,
+      hasUrgency: false,
+      detectedKeywords: []
+    };
+
+    // Check for events first (highest priority)
+    for (const [keyword, data] of Object.entries(eventKeywords)) {
+      if (combined.includes(keyword)) {
+        context.type = data.type;
+        context.event = data.event;
+        context.expectation = data.expectation;
+        context.detectedKeywords.push(keyword);
+        break;
+      }
+    }
+
+    // Check for build-up
+    for (const keyword of buildupKeywords) {
+      if (combined.includes(keyword)) {
+        context.isBuildup = true;
+        context.subType = 'buildup';
+        context.expectation = 'engagement_focus';
+        context.detectedKeywords.push(keyword);
+        break;
+      }
+    }
+
+    // Check for promo
+    for (const keyword of promoKeywords) {
+      if (combined.includes(keyword)) {
+        context.isPromo = true;
+        if (!context.subType) context.subType = 'promotional';
+        context.detectedKeywords.push(keyword);
+        break;
+      }
+    }
+
+    // Check for launch
+    for (const keyword of launchKeywords) {
+      if (combined.includes(keyword)) {
+        context.isLaunch = true;
+        if (!context.subType) context.subType = 'launch';
+        context.detectedKeywords.push(keyword);
+        break;
+      }
+    }
+
+    // Check for content
+    for (const keyword of contentKeywords) {
+      if (combined.includes(keyword)) {
+        context.isContent = true;
+        if (!context.subType) context.subType = 'content';
+        context.expectation = 'engagement_focus';
+        context.detectedKeywords.push(keyword);
+        break;
+      }
+    }
+
+    // Check for reengage
+    for (const keyword of reengageKeywords) {
+      if (combined.includes(keyword)) {
+        context.isReengage = true;
+        if (!context.subType) context.subType = 'reengagement';
+        context.detectedKeywords.push(keyword);
+        break;
+      }
+    }
+
+    // Check for urgency
+    for (const keyword of urgencyKeywords) {
+      if (combined.includes(keyword)) {
+        context.hasUrgency = true;
+        context.detectedKeywords.push(keyword);
+        break;
+      }
+    }
+
+    // Determine final type if still general
+    if (context.type === 'general' && context.subType) {
+      context.type = context.subType;
+    }
+
+    return context;
+  }
+
+  /**
+   * Analiza el contexto estratégico de todas las campañas recientes
+   * Detecta si estamos en período de build-up hacia algo importante
+   */
+  analyzeStrategicContext(campaigns) {
+    const contexts = campaigns.map(c => ({
+      ...this.detectCampaignContext(c.subject, c.name),
+      campaign: c.name,
+      subject: c.subject,
+      sentAt: c.sentAt,
+      openRate: c.stats?.openRate || 0,
+      clickRate: c.stats?.clickRate || 0,
+      revenue: c.stats?.totalRevenue || 0,
+      conversionRate: c.stats?.conversionRate || 0
+    }));
+
+    // Contar tipos
+    const typeCounts = {};
+    const eventMentions = {};
+    let buildupCount = 0;
+    let promoCount = 0;
+    let contentCount = 0;
+
+    contexts.forEach(ctx => {
+      typeCounts[ctx.type] = (typeCounts[ctx.type] || 0) + 1;
+      if (ctx.event) {
+        eventMentions[ctx.event] = (eventMentions[ctx.event] || 0) + 1;
+      }
+      if (ctx.isBuildup) buildupCount++;
+      if (ctx.isPromo) promoCount++;
+      if (ctx.isContent) contentCount++;
+    });
+
+    // Detectar evento dominante
+    let dominantEvent = null;
+    let maxEventCount = 0;
+    for (const [event, count] of Object.entries(eventMentions)) {
+      if (count > maxEventCount && count >= 2) {
+        dominantEvent = event;
+        maxEventCount = count;
+      }
+    }
+
+    // Determinar fase estratégica
+    let strategicPhase = 'normal';
+    let phaseDescription = 'Operación normal de email marketing';
+
+    if (dominantEvent && buildupCount >= 2) {
+      strategicPhase = 'buildup';
+      phaseDescription = `Período de anticipación hacia ${dominantEvent}. Alto engagement esperado, revenue vendrá después.`;
+    } else if (dominantEvent && promoCount >= 2) {
+      strategicPhase = 'event_active';
+      phaseDescription = `${dominantEvent} activo. Momento de máximo revenue esperado.`;
+    } else if (buildupCount > promoCount && buildupCount >= 2) {
+      strategicPhase = 'anticipation';
+      phaseDescription = 'Construyendo anticipación. Normal ver alto engagement con bajo revenue.';
+    } else if (contentCount > promoCount) {
+      strategicPhase = 'nurturing';
+      phaseDescription = 'Fase de nurturing/contenido. El foco es engagement, no revenue inmediato.';
+    } else if (promoCount >= 3) {
+      strategicPhase = 'sales_push';
+      phaseDescription = 'Push de ventas activo. Se espera conversión directa.';
+    }
+
+    // Analizar métricas en contexto
+    const avgOpenRate = contexts.reduce((sum, c) => sum + c.openRate, 0) / contexts.length || 0;
+    const avgClickRate = contexts.reduce((sum, c) => sum + c.clickRate, 0) / contexts.length || 0;
+    const totalRevenue = contexts.reduce((sum, c) => sum + c.revenue, 0);
+    const avgRevenue = totalRevenue / contexts.length || 0;
+
+    // Interpretación contextual
+    let metricsInterpretation = '';
+    let isHealthy = true;
+
+    if (strategicPhase === 'buildup' || strategicPhase === 'anticipation') {
+      if (avgOpenRate > 20 && avgRevenue < 50) {
+        metricsInterpretation = '✅ NORMAL: Alto engagement con bajo revenue es esperado en fase de anticipación. Tu audiencia está atenta y lista para la oferta principal.';
+        isHealthy = true;
+      } else if (avgOpenRate < 15) {
+        metricsInterpretation = '⚠️ El engagement está bajo para una fase de build-up. Considera subjects más intrigantes.';
+        isHealthy = false;
+      }
+    } else if (strategicPhase === 'event_active' || strategicPhase === 'sales_push') {
+      if (avgOpenRate > 20 && avgRevenue < 100) {
+        metricsInterpretation = '⚠️ Alto engagement pero bajo revenue durante promoción activa. Revisa: ofertas, landing pages, proceso de checkout.';
+        isHealthy = false;
+      } else if (avgOpenRate > 20 && avgRevenue > 200) {
+        metricsInterpretation = '✅ Excelente! Alto engagement convirtiendo en ventas. La promoción está funcionando.';
+        isHealthy = true;
+      }
+    } else if (strategicPhase === 'nurturing') {
+      if (avgOpenRate > 18) {
+        metricsInterpretation = '✅ Buen engagement en contenido. Estás construyendo relación con tu audiencia.';
+        isHealthy = true;
+      }
+    }
+
+    return {
+      campaigns: contexts,
+      summary: {
+        totalCampaigns: campaigns.length,
+        typeCounts,
+        eventMentions,
+        buildupCampaigns: buildupCount,
+        promoCampaigns: promoCount,
+        contentCampaigns: contentCount
+      },
+      strategicPhase,
+      phaseDescription,
+      dominantEvent,
+      metrics: {
+        avgOpenRate: parseFloat(avgOpenRate.toFixed(2)),
+        avgClickRate: parseFloat(avgClickRate.toFixed(2)),
+        totalRevenue: parseFloat(totalRevenue.toFixed(2)),
+        avgRevenuePerCampaign: parseFloat(avgRevenue.toFixed(2))
+      },
+      interpretation: metricsInterpretation,
+      isHealthyForPhase: isHealthy
+    };
+  }
 
   // ==================== HELPERS ====================
   
@@ -24,7 +342,7 @@ class AICalculator {
     return { start, end };
   }
 
-  // ==================== 1. HEALTH CHECK ====================
+  // ==================== 1. HEALTH CHECK (últimos 7 días) ====================
 
   async calculateHealthCheck(options = {}) {
     const { alertThresholds = {} } = options;
@@ -152,6 +470,12 @@ class AICalculator {
     // Bounce stats
     const bounceStats = await Customer.getBounceStats();
 
+    // Contar campañas recientes
+    const recentCampaigns = await Campaign.countDocuments({
+      status: 'sent',
+      sentAt: { $gte: currentStart }
+    });
+
     return {
       success: true,
       period: { days: 7, start: currentStart, end: new Date() },
@@ -170,6 +494,8 @@ class AICalculator {
       },
       metrics: {
         current,
+        campaigns: { sent: recentCampaigns },
+        totals: { sent: current.sent },
         rates: {
           deliveryRate: rates.deliveryRate.toFixed(2),
           bounceRate: rates.bounceRate.toFixed(2),
@@ -189,10 +515,10 @@ class AICalculator {
     };
   }
 
-  // ==================== 2. SUBJECT LINE ANALYSIS ====================
+  // ==================== 2. SUBJECT LINE ANALYSIS (últimos 15 días) ====================
 
   async calculateSubjectAnalysis(options = {}) {
-    const { days = 90, minSent = 100 } = options;
+    const { days = 15, minSent = 50 } = options;
     
     const { start } = this.getDateRange(days);
 
@@ -200,19 +526,26 @@ class AICalculator {
       status: 'sent',
       sentAt: { $gte: start },
       'stats.sent': { $gte: minSent }
-    }).select('name subject stats sentAt').lean();
+    }).select('name subject stats sentAt').sort({ sentAt: -1 }).lean();
 
-    if (campaigns.length < 5) {
+    if (campaigns.length < 3) {
       return {
         success: false,
-        message: 'Necesitas al menos 5 campañas con +100 envíos para análisis',
+        message: `Necesitas al menos 3 campañas con +${minSent} envíos en los últimos ${days} días para análisis`,
         summary: { status: 'insufficient_data', campaignsAnalyzed: campaigns.length }
       };
     }
 
+    // === AGREGAR CONTEXTO A CADA CAMPAÑA ===
+    const campaignsWithContext = campaigns.map(c => ({
+      ...c,
+      context: this.detectCampaignContext(c.subject, c.name)
+    }));
+
     // Patterns a analizar
     const urgencyWords = ['hoy', 'ahora', 'último', 'última', 'urgente', 'limitado', 
-                          'today', 'now', 'last', 'urgent', 'limited', 'ends', 'flash'];
+                          'today', 'now', 'last', 'urgent', 'limited', 'ends', 'flash',
+                          'only', 'solo', 'ending', 'final'];
     
     const patterns = {
       length: { short: [], medium: [], long: [] },
@@ -222,10 +555,17 @@ class AICalculator {
       hasQuestion: { yes: [], no: [] }
     };
 
-    campaigns.forEach(campaign => {
+    campaignsWithContext.forEach(campaign => {
       const subject = campaign.subject || '';
       const openRate = campaign.stats?.openRate || 0;
-      const data = { subject, openRate, sent: campaign.stats?.sent || 0 };
+      const data = { 
+        subject, 
+        openRate, 
+        sent: campaign.stats?.sent || 0,
+        sentAt: campaign.sentAt,
+        name: campaign.name,
+        context: campaign.context
+      };
 
       // Length
       if (subject.length <= 30) patterns.length.short.push(data);
@@ -276,19 +616,30 @@ class AICalculator {
     });
 
     // Top/Low performers
-    const sorted = [...campaigns].sort((a, b) => (b.stats?.openRate || 0) - (a.stats?.openRate || 0));
+    const sorted = [...campaignsWithContext].sort((a, b) => (b.stats?.openRate || 0) - (a.stats?.openRate || 0));
     const topPerformers = sorted.slice(0, 5).map(c => ({
       subject: c.subject,
       openRate: c.stats?.openRate || 0,
-      sent: c.stats?.sent || 0
+      clickRate: c.stats?.clickRate || 0,
+      sent: c.stats?.sent || 0,
+      sentAt: c.sentAt,
+      name: c.name,
+      context: c.context
     }));
     const lowPerformers = sorted.slice(-5).reverse().map(c => ({
       subject: c.subject,
       openRate: c.stats?.openRate || 0,
-      sent: c.stats?.sent || 0
+      clickRate: c.stats?.clickRate || 0,
+      sent: c.stats?.sent || 0,
+      sentAt: c.sentAt,
+      name: c.name,
+      context: c.context
     }));
 
-    const avgOpenRate = calcAvg(campaigns.map(c => ({ openRate: c.stats?.openRate || 0 })));
+    const avgOpenRate = calcAvg(campaignsWithContext.map(c => ({ openRate: c.stats?.openRate || 0 })));
+
+    // === ANÁLISIS ESTRATÉGICO ===
+    const strategicContext = this.analyzeStrategicContext(campaigns);
 
     // Generar recomendaciones
     const recommendations = [];
@@ -301,7 +652,7 @@ class AICalculator {
 
     ['hasEmoji', 'hasNumber', 'hasUrgency', 'hasQuestion'].forEach(pattern => {
       const lift = parseFloat(insights[pattern].lift);
-      if (Math.abs(lift) > 10 && insights[pattern].withPattern.count >= 3) {
+      if (Math.abs(lift) > 10 && insights[pattern].withPattern.count >= 2) {
         recommendations.push({
           type: pattern,
           priority: lift > 20 ? 'high' : lift > 0 ? 'medium' : 'low',
@@ -317,7 +668,7 @@ class AICalculator {
 
     // Best length recommendation
     const bestLength = Object.entries(insights.length)
-      .filter(([_, v]) => v.count >= 3)
+      .filter(([_, v]) => v.count >= 2)
       .sort((a, b) => b[1].avgOpenRate - a[1].avgOpenRate)[0];
     
     if (bestLength) {
@@ -343,10 +694,12 @@ class AICalculator {
         avgOpenRate: avgOpenRate.toFixed(2),
         bestOpenRate: topPerformers[0]?.openRate?.toFixed(2) || 0,
         worstOpenRate: lowPerformers[0]?.openRate?.toFixed(2) || 0,
-        score: Math.round(avgOpenRate * 3), // Score simple basado en open rate
+        score: Math.round(avgOpenRate * 3),
         status: avgOpenRate > 25 ? 'healthy' : avgOpenRate > 15 ? 'warning' : 'critical',
         primaryMetric: { name: 'avgOpenRate', value: avgOpenRate }
       },
+      // === NUEVO: Contexto estratégico ===
+      strategicContext,
       insights,
       topPerformers,
       lowPerformers,
@@ -360,10 +713,10 @@ class AICalculator {
     };
   }
 
-  // ==================== 3. SEND TIMING ====================
+  // ==================== 3. SEND TIMING (últimos 15 días) ====================
 
   async calculateSendTiming(options = {}) {
-    const { days = 90, segmentId = null, metric = 'opened' } = options;
+    const { days = 15, segmentId = null, metric = 'opened' } = options;
     
     const { start } = this.getDateRange(days);
 
@@ -418,8 +771,8 @@ class AICalculator {
       }
     }
 
-    // Best times (mínimo 50 envíos)
-    const significant = heatmap.filter(h => h.sent >= 50);
+    // Best times
+    const significant = heatmap.filter(h => h.sent >= 20);
     const sorted = [...significant].sort((a, b) => b.score - a.score);
 
     const bestTimes = sorted.slice(0, 5).map(t => ({
@@ -440,7 +793,7 @@ class AICalculator {
 
     // Day averages
     const dayAverages = dayNames.map((name, idx) => {
-      const daySlots = heatmap.filter(h => h.day === idx && h.sent >= 10);
+      const daySlots = heatmap.filter(h => h.day === idx && h.sent >= 5);
       const avgScore = daySlots.length > 0 
         ? daySlots.reduce((sum, s) => sum + s.score, 0) / daySlots.length 
         : 0;
@@ -484,10 +837,10 @@ class AICalculator {
     };
   }
 
-  // ==================== 4. LIST PERFORMANCE ====================
+  // ==================== 4. LIST PERFORMANCE (últimos 15 días) ====================
 
   async calculateListPerformance(options = {}) {
-    const { days = 90 } = options;
+    const { days = 15 } = options;
     
     const { start } = this.getDateRange(days);
 
@@ -515,6 +868,7 @@ class AICalculator {
           listName: { $first: '$listData.name' },
           listMemberCount: { $first: '$listData.memberCount' },
           campaigns: { $sum: 1 },
+          campaignNames: { $push: '$name' },
           totalSent: { $sum: '$stats.sent' },
           totalOpened: { $sum: '$stats.opened' },
           totalClicked: { $sum: '$stats.clicked' },
@@ -530,7 +884,7 @@ class AICalculator {
     if (campaignData.length === 0) {
       return {
         success: false,
-        message: 'No hay suficientes datos de campañas por lista',
+        message: `No hay suficientes datos de campañas por lista en los últimos ${days} días`,
         summary: { status: 'insufficient_data' }
       };
     }
@@ -548,6 +902,7 @@ class AICalculator {
         name: list.listName,
         memberCount: list.listMemberCount,
         campaigns: list.campaigns,
+        recentCampaigns: list.campaignNames?.slice(0, 3) || [],
         metrics: {
           sent: list.totalSent,
           opened: list.totalOpened,
@@ -630,7 +985,7 @@ class AICalculator {
         avgRevenuePerEmail: parseFloat(avgRevenue.toFixed(3)),
         totalRevenue: totalRevenue.toFixed(2),
         score: Math.round(avgOpenRate * 2 + avgRevenue * 100),
-        status: lists.length >= 2 ? 'healthy' : 'warning',
+        status: lists.length >= 1 ? 'healthy' : 'warning',
         primaryMetric: { name: 'totalRevenue', value: totalRevenue }
       },
       lists,
@@ -646,12 +1001,12 @@ class AICalculator {
   // ==================== 5. COMPREHENSIVE REPORT ====================
 
   async calculateComprehensiveReport(options = {}) {
-    const { days = 30 } = options;
+    const { days = 15 } = options;
 
     const [healthCheck, subjectAnalysis, sendTiming, listPerf] = await Promise.all([
       this.calculateHealthCheck(),
       this.calculateSubjectAnalysis({ days }),
-      this.calculateSendTiming({ days: 90 }), // Timing siempre con más data
+      this.calculateSendTiming({ days }),
       this.calculateListPerformance({ days })
     ]);
 
@@ -695,6 +1050,8 @@ class AICalculator {
       success: true,
       generatedAt: new Date().toISOString(),
       period: { days },
+      // === NUEVO: Contexto estratégico del comprehensive report ===
+      strategicContext: subjectAnalysis.strategicContext || null,
       summary: {
         healthScore: healthCheck.health?.score || 0,
         healthStatus: healthCheck.health?.status || 'unknown',
@@ -730,148 +1087,18 @@ class AICalculator {
     };
   }
 
-  // ==================== 6. CAMPAIGN PREDICTION ====================
+  // ==================== 6. PREPARE DATA FOR CLAUDE (últimos 15 días) ====================
 
-  async predictCampaignPerformance(campaignData, historicalInsights) {
-    const { subject, listId, sendHour, sendDay } = campaignData;
-
-    if (!subject || !listId) {
-      return {
-        success: false,
-        message: 'Se requiere subject y listId para predicción'
-      };
-    }
-
-    // Buscar datos de la lista en los insights
-    const listPerf = historicalInsights.list_performance;
-    const subjectAnalysis = historicalInsights.subject_analysis;
-    const timingAnalysis = historicalInsights.send_timing;
-
-    if (!listPerf?.data?.lists) {
-      return {
-        success: false,
-        message: 'No hay datos históricos suficientes para predicción'
-      };
-    }
-
-    const list = listPerf.data.lists.find(l => 
-      l.listId.toString() === listId.toString()
-    );
-
-    if (!list) {
-      return {
-        success: false,
-        message: 'Lista no encontrada en datos históricos'
-      };
-    }
-
-    // Base prediction
-    let predictedOpenRate = list.rates.openRate;
-    let predictedClickRate = list.rates.clickRate;
-    let predictedConversionRate = list.rates.conversionRate;
-
-    // Ajustes por subject patterns
-    const hasEmoji = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]/u.test(subject);
-    const hasNumber = /\d+%?/.test(subject);
-    const subjectLength = subject.length;
-
-    const insights = subjectAnalysis?.data?.insights || {};
-
-    if (hasEmoji && insights.hasEmoji) {
-      const lift = parseFloat(insights.hasEmoji.lift) || 0;
-      predictedOpenRate *= (1 + lift / 100);
-    }
-
-    if (hasNumber && insights.hasNumber) {
-      const lift = parseFloat(insights.hasNumber.lift) || 0;
-      predictedOpenRate *= (1 + lift / 100);
-    }
-
-    // Calcular revenue estimado
-    const listSize = list.metrics.sent / list.campaigns;
-    const predictedRevenue = (predictedConversionRate / 100) * listSize * list.revenue.avgOrderValue;
-
-    // Confidence
-    let confidence = 'low';
-    if (list.campaigns >= 5 && list.metrics.sent >= 1000) confidence = 'high';
-    else if (list.campaigns >= 3 && list.metrics.sent >= 500) confidence = 'medium';
-
-    // Recommendations
-    const recommendations = [];
-
-    if (!hasEmoji && parseFloat(insights.hasEmoji?.lift || 0) > 10) {
-      recommendations.push({
-        type: 'subject',
-        suggestion: 'Considera agregar un emoji al subject',
-        potentialLift: `+${insights.hasEmoji.lift}% opens`
-      });
-    }
-
-    if (timingAnalysis?.data?.bestTimes?.[0] && sendHour !== undefined) {
-      const bestHour = parseInt(timingAnalysis.data.bestTimes[0].hour);
-      if (Math.abs(sendHour - bestHour) > 2) {
-        recommendations.push({
-          type: 'timing',
-          suggestion: `Mejor horario: ${timingAnalysis.data.bestTimes[0].day} ${timingAnalysis.data.bestTimes[0].hour}`,
-          potentialLift: 'Mejor engagement'
-        });
-      }
-    }
-
-    return {
-      success: true,
-      prediction: {
-        openRate: {
-          predicted: parseFloat(predictedOpenRate.toFixed(2)),
-          listAvg: list.rates.openRate,
-          range: {
-            low: parseFloat((predictedOpenRate * 0.8).toFixed(2)),
-            high: parseFloat((predictedOpenRate * 1.2).toFixed(2))
-          }
-        },
-        clickRate: {
-          predicted: parseFloat(predictedClickRate.toFixed(2)),
-          listAvg: list.rates.clickRate
-        },
-        conversionRate: {
-          predicted: parseFloat(predictedConversionRate.toFixed(3)),
-          listAvg: list.rates.conversionRate
-        },
-        estimatedRevenue: {
-          predicted: parseFloat(predictedRevenue.toFixed(2)),
-          perEmail: parseFloat((predictedRevenue / listSize).toFixed(3))
-        }
-      },
-      confidence,
-      basedOn: {
-        listCampaigns: list.campaigns,
-        listEmails: list.metrics.sent
-      },
-      subjectAnalysis: {
-        length: subjectLength,
-        hasEmoji,
-        hasNumber
-      },
-      recommendations
-    };
-  }
-
-  // ==================== 7. PREPARE DATA FOR CLAUDE ====================
-
-  /**
-   * Prepara un resumen compacto de todas las métricas para enviar a Claude
-   * Esto minimiza tokens mientras mantiene la información relevante
-   */
   prepareDataForClaude(analysisResults) {
     const { healthCheck, subjectAnalysis, sendTiming, listPerformance } = analysisResults;
 
     // === HEALTH ===
     const health = {
-      openRate: healthCheck?.metrics?.rates?.openRate || 0,
-      clickRate: healthCheck?.metrics?.rates?.clickRate || 0,
-      bounceRate: healthCheck?.metrics?.rates?.bounceRate || 0,
-      unsubRate: healthCheck?.metrics?.rates?.unsubRate || 0,
-      deliveryRate: healthCheck?.metrics?.rates?.deliveryRate || 0,
+      openRate: parseFloat(healthCheck?.metrics?.rates?.openRate) || 0,
+      clickRate: parseFloat(healthCheck?.metrics?.rates?.clickRate) || 0,
+      bounceRate: parseFloat(healthCheck?.metrics?.rates?.bounceRate) || 0,
+      unsubRate: parseFloat(healthCheck?.metrics?.rates?.unsubRate) || 0,
+      deliveryRate: parseFloat(healthCheck?.metrics?.rates?.deliveryRate) || 0,
       campaignsSent: healthCheck?.metrics?.campaigns?.sent || 0,
       totalSent: healthCheck?.metrics?.totals?.sent || 0,
       healthScore: healthCheck?.health?.score || 0,
@@ -882,13 +1109,19 @@ class AICalculator {
     const subjects = {
       top: subjectAnalysis?.topPerformers?.[0] ? {
         subject: subjectAnalysis.topPerformers[0].subject,
-        openRate: subjectAnalysis.topPerformers[0].openRate
+        openRate: subjectAnalysis.topPerformers[0].openRate,
+        clickRate: subjectAnalysis.topPerformers[0].clickRate,
+        sentAt: subjectAnalysis.topPerformers[0].sentAt,
+        context: subjectAnalysis.topPerformers[0].context
       } : null,
       bottom: subjectAnalysis?.lowPerformers?.[0] ? {
         subject: subjectAnalysis.lowPerformers[0].subject,
-        openRate: subjectAnalysis.lowPerformers[0].openRate
+        openRate: subjectAnalysis.lowPerformers[0].openRate,
+        sentAt: subjectAnalysis.lowPerformers[0].sentAt,
+        context: subjectAnalysis.lowPerformers[0].context
       } : null,
-      patterns: {}
+      patterns: {},
+      campaignsAnalyzed: subjectAnalysis?.summary?.campaignsAnalyzed || 0
     };
 
     // Extraer patrones de subjects
@@ -900,22 +1133,27 @@ class AICalculator {
       if (ins.hasQuestion) subjects.patterns.questions = `${ins.hasQuestion.lift}% lift`;
     }
 
+    // === CONTEXTO ESTRATÉGICO ===
+    const strategicContext = subjectAnalysis?.strategicContext || null;
+
     // === LISTS ===
     const lists = (listPerformance?.lists || []).slice(0, 5).map(list => ({
       name: list.name,
       openRate: list.rates?.openRate || 0,
       clickRate: list.rates?.clickRate || 0,
       revenue: list.revenue?.total || 0,
+      revenuePerEmail: list.revenue?.perEmail || 0,
       unsubRate: list.rates?.unsubRate || 0,
-      campaigns: list.campaigns || 0
+      campaigns: list.campaigns || 0,
+      recentCampaigns: list.recentCampaigns || []
     }));
 
     // === TIMING ===
     const timing = {
       best: sendTiming?.bestTimes?.[0] ? 
         `${sendTiming.bestTimes[0].day} ${sendTiming.bestTimes[0].hour}` : null,
-      worst: sendTiming?.bestTimes?.length > 4 ?
-        `${sendTiming.bestTimes[4].day} ${sendTiming.bestTimes[4].hour}` : null,
+      worst: sendTiming?.worstTimes?.[0] ?
+        `${sendTiming.worstTimes[0].day} ${sendTiming.worstTimes[0].hour}` : null,
       topHours: (sendTiming?.bestTimes || []).slice(0, 3).map(t => ({
         day: t.day,
         hour: t.hour,
@@ -925,12 +1163,12 @@ class AICalculator {
 
     // === REVENUE ===
     const revenue = {
-      total: listPerformance?.summary?.totalRevenue || 0,
+      total: parseFloat(listPerformance?.summary?.totalRevenue) || 0,
       perEmail: listPerformance?.summary?.avgRevenuePerEmail || 0,
-      orders: 0 // Se puede calcular si hay datos
+      orders: 0
     };
 
-    // Calcular órdenes totales de las listas
+    // Calcular órdenes totales
     if (listPerformance?.lists) {
       revenue.orders = listPerformance.lists.reduce((sum, l) => 
         sum + (l.metrics?.purchased || 0), 0
@@ -944,10 +1182,11 @@ class AICalculator {
     }));
 
     return {
-      period: `últimos ${subjectAnalysis?.period?.days || 30} días`,
+      period: `últimos 15 días`,
       generatedAt: new Date().toISOString(),
       health,
       subjects,
+      strategicContext, // <-- NUEVO
       lists,
       timing,
       revenue,

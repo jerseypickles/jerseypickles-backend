@@ -40,36 +40,22 @@ class AIAnalyticsJob {
   }
 
   async checkAndRunIfNeeded() {
-    // Prevent concurrent runs
-    if (this.isRunning) {
-      console.log('✅ Análisis ya en progreso, saltando verificación');
-      return;
-    }
-    
     try {
-      // Check if we have recent Claude insights (less than 6 hours old)
-      const claudeInsight = await AIInsight.findOne({
-        type: 'ai_generated_insights',
-        periodDays: 30,
-        segmentId: null,
-        createdAt: { $gte: new Date(Date.now() - 6 * 60 * 60 * 1000) }
-      }).lean();
+      const dueAnalyses = await AIInsight.getDueForRecalculation();
       
-      if (claudeInsight) {
-        console.log('✅ Análisis de IA reciente encontrado, no es necesario recalcular');
-        return;
-      }
-      
-      // Check if we have any analysis at all
-      const summary = await AIInsight.getDashboardSummary();
-      const hasData = Object.values(summary.analyses).some(a => a !== null);
-      
-      if (!hasData) {
-        console.log('\n🧠 No hay análisis guardados, ejecutando cálculo inicial...');
+      if (dueAnalyses.length > 0) {
+        console.log(`\n🔄 ${dueAnalyses.length} análisis pendientes, ejecutando...`);
         await this.runAllAnalyses();
       } else {
-        console.log('\n🔄 Análisis de Claude no encontrado o expirado, ejecutando...');
-        await this.runAllAnalyses();
+        const summary = await AIInsight.getDashboardSummary();
+        const hasData = Object.values(summary.analyses).some(a => a !== null);
+        
+        if (!hasData) {
+          console.log('\n🧠 No hay análisis guardados, ejecutando cálculo inicial...');
+          await this.runAllAnalyses();
+        } else {
+          console.log('✅ Análisis de IA al día');
+        }
       }
     } catch (error) {
       console.error('❌ Error verificando análisis:', error.message);
@@ -79,13 +65,6 @@ class AIAnalyticsJob {
   async runAllAnalyses() {
     if (this.isRunning) {
       console.log('⚠️  AI Analytics ya está ejecutándose, saltando...');
-      return;
-    }
-
-    // Doble verificación con timestamp para evitar race conditions
-    const now = Date.now();
-    if (this.lastRun && (now - this.lastRun.getTime()) < 30000) {
-      console.log('⚠️  AI Analytics ejecutado hace menos de 30s, saltando...');
       return;
     }
 
@@ -112,37 +91,32 @@ class AIAnalyticsJob {
     };
 
     try {
-      // FASE 1: CALCULAR MÉTRICAS
+      // FASE 1: CALCULAR MÉTRICAS (enfocado en últimos 15 días)
       analysisResults.healthCheck = await this.runAnalysis('health_check', 7, async () => {
         return await aiCalculator.calculateHealthCheck();
       }, results);
 
-      analysisResults.subjectAnalysis = await this.runAnalysis('subject_analysis', 30, async () => {
-        return await aiCalculator.calculateSubjectAnalysis({ days: 30 });
+      // Subject Analysis - solo 15 días (datos recientes)
+      analysisResults.subjectAnalysis = await this.runAnalysis('subject_analysis', 15, async () => {
+        return await aiCalculator.calculateSubjectAnalysis({ days: 15 });
       }, results);
 
-      await this.runAnalysis('subject_analysis', 90, async () => {
-        return await aiCalculator.calculateSubjectAnalysis({ days: 90 });
+      // Send Timing - 15 días
+      analysisResults.sendTiming = await this.runAnalysis('send_timing', 15, async () => {
+        return await aiCalculator.calculateSendTiming({ days: 15 });
       }, results);
 
-      analysisResults.sendTiming = await this.runAnalysis('send_timing', 90, async () => {
-        return await aiCalculator.calculateSendTiming({ days: 90 });
-      }, results);
-
-      analysisResults.listPerformance = await this.runAnalysis('list_performance', 30, async () => {
-        return await aiCalculator.calculateListPerformance({ days: 30 });
-      }, results);
-
-      await this.runAnalysis('list_performance', 90, async () => {
-        return await aiCalculator.calculateListPerformance({ days: 90 });
+      // List Performance - 15 días
+      analysisResults.listPerformance = await this.runAnalysis('list_performance', 15, async () => {
+        return await aiCalculator.calculateListPerformance({ days: 15 });
       }, results);
 
       // FASE 2: GENERAR INSIGHTS CON CLAUDE
       await this.generateClaudeInsights(analysisResults, results);
 
-      // FASE 3: COMPREHENSIVE REPORT
-      await this.runAnalysis('comprehensive_report', 30, async () => {
-        const report = await aiCalculator.calculateComprehensiveReport({ days: 30 });
+      // FASE 3: COMPREHENSIVE REPORT (15 días)
+      await this.runAnalysis('comprehensive_report', 15, async () => {
+        const report = await aiCalculator.calculateComprehensiveReport({ days: 15 });
         
         const claudeInsight = await AIInsight.getLatest('ai_generated_insights', 30);
         if (claudeInsight?.data?.insights) {
@@ -351,8 +325,7 @@ class AIAnalyticsJob {
 
   async forceRecalculate() {
     console.log('🔄 Forzando recálculo de todos los análisis...');
-    // NO invalidar primero - esto causa race conditions cuando hay múltiples instancias
-    // Los nuevos análisis automáticamente marcarán los viejos como stale en saveAnalysis
+    await AIInsight.invalidate();
     await this.runAllAnalyses();
   }
 
@@ -370,32 +343,26 @@ class AIAnalyticsJob {
         break;
         
       case 'subject_analysis':
-        await this.runAnalysis('subject_analysis', 30, async () => {
-          return await aiCalculator.calculateSubjectAnalysis({ days: 30 });
-        }, results);
-        await this.runAnalysis('subject_analysis', 90, async () => {
-          return await aiCalculator.calculateSubjectAnalysis({ days: 90 });
+        await this.runAnalysis('subject_analysis', 15, async () => {
+          return await aiCalculator.calculateSubjectAnalysis({ days: 15 });
         }, results);
         break;
         
       case 'send_timing':
-        await this.runAnalysis('send_timing', 90, async () => {
-          return await aiCalculator.calculateSendTiming({ days: 90 });
+        await this.runAnalysis('send_timing', 15, async () => {
+          return await aiCalculator.calculateSendTiming({ days: 15 });
         }, results);
         break;
         
       case 'list_performance':
-        await this.runAnalysis('list_performance', 30, async () => {
-          return await aiCalculator.calculateListPerformance({ days: 30 });
-        }, results);
-        await this.runAnalysis('list_performance', 90, async () => {
-          return await aiCalculator.calculateListPerformance({ days: 90 });
+        await this.runAnalysis('list_performance', 15, async () => {
+          return await aiCalculator.calculateListPerformance({ days: 15 });
         }, results);
         break;
         
       case 'comprehensive_report':
-        await this.runAnalysis('comprehensive_report', 30, async () => {
-          return await aiCalculator.calculateComprehensiveReport({ days: 30 });
+        await this.runAnalysis('comprehensive_report', 15, async () => {
+          return await aiCalculator.calculateComprehensiveReport({ days: 15 });
         }, results);
         break;
         
