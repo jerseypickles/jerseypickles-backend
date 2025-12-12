@@ -1,5 +1,6 @@
 // backend/src/routes/webhooks.js
 // 📡 COMPLETE WEBHOOK ROUTES - Shopify, Resend, Monitoring, Testing
+// ✅ FIXED: Unique opens/clicks counting for accurate rates
 const express = require('express');
 const router = express.Router();
 const webhooksController = require('../controllers/webhooksController');
@@ -63,7 +64,7 @@ router.post('/test', webhooksController.testWebhook);
  * IMPORTANTE - Lógica de stats:
  * - 'sent' → Se incrementa en emailQueue.js worker (NO aquí)
  * - 'delivered' → Se incrementa AQUÍ vía webhook
- * - 'opened', 'clicked', etc → Se incrementan AQUÍ vía webhook
+ * - 'opened', 'clicked', etc → Se incrementan AQUÍ vía webhook (✅ ÚNICOS solamente)
  * - 'bounced' → ✅ Auto-marca customer como bounced
  */
 router.post('/resend', async (req, res) => {
@@ -119,7 +120,7 @@ router.post('/resend', async (req, res) => {
       return res.status(200).json({ received: true });
     }
     
-    // ========== IDEMPOTENCIA: Verificar duplicados ==========
+    // ========== IDEMPOTENCIA: Verificar duplicados exactos ==========
     const resendEventId = data.email_id || data.id;
     const idempotencyKey = `${resendEventId}:${eventType}`;
     
@@ -164,7 +165,38 @@ router.post('/resend', async (req, res) => {
       try {
         await webhookLog.markProcessing();
         
-        // 1. Crear EmailEvent
+        // ✅ VERIFICAR SI ES PRIMER OPEN/CLICK PARA ESTE EMAIL EN ESTA CAMPAÑA
+        let isFirstOpenForEmail = true;
+        let isFirstClickForEmail = true;
+        
+        if (campaignId && (eventType === 'opened' || eventType === 'clicked')) {
+          // Buscar eventos PREVIOS (antes de crear el nuevo)
+          if (eventType === 'opened') {
+            const previousOpen = await EmailEvent.findOne({
+              campaign: campaignId,
+              email: emailAddress,
+              eventType: 'opened'
+            });
+            isFirstOpenForEmail = !previousOpen;
+            if (!isFirstOpenForEmail) {
+              console.log(`   ℹ️  Open repetido para ${emailAddress} (no cuenta para stats)`);
+            }
+          }
+          
+          if (eventType === 'clicked') {
+            const previousClick = await EmailEvent.findOne({
+              campaign: campaignId,
+              email: emailAddress,
+              eventType: 'clicked'
+            });
+            isFirstClickForEmail = !previousClick;
+            if (!isFirstClickForEmail) {
+              console.log(`   ℹ️  Click repetido para ${emailAddress} (no cuenta para stats)`);
+            }
+          }
+        }
+        
+        // 1. Crear EmailEvent (siempre se crea para historial completo)
         const eventData = {
           customer: customerId || null,
           email: emailAddress,
@@ -178,7 +210,9 @@ router.post('/resend', async (req, res) => {
             idempotencyKey: idempotencyKey,
             timestamp: data.created_at,
             rawTags: data.tags,
-            bounceType: data.bounce?.type || null
+            bounceType: data.bounce?.type || null,
+            isUniqueOpen: eventType === 'opened' ? isFirstOpenForEmail : undefined,
+            isUniqueClick: eventType === 'clicked' ? isFirstClickForEmail : undefined
           }
         };
         
@@ -247,7 +281,7 @@ router.post('/resend', async (req, res) => {
           }
         }
         
-        // 3. Actualizar Campaign stats
+        // 3. Actualizar Campaign stats (✅ SOLO ÚNICOS PARA OPENS/CLICKS)
         if (campaignId) {
           const statsToIncrement = {};
           
@@ -256,10 +290,18 @@ router.post('/resend', async (req, res) => {
               statsToIncrement['stats.delivered'] = 1;
               break;
             case 'opened':
-              statsToIncrement['stats.opened'] = 1;
+              // ✅ SOLO incrementar si es el PRIMER open de este email
+              if (isFirstOpenForEmail) {
+                statsToIncrement['stats.opened'] = 1;
+                console.log(`   ✅ Unique open contado para stats`);
+              }
               break;
             case 'clicked':
-              statsToIncrement['stats.clicked'] = 1;
+              // ✅ SOLO incrementar si es el PRIMER click de este email
+              if (isFirstClickForEmail) {
+                statsToIncrement['stats.clicked'] = 1;
+                console.log(`   ✅ Unique click contado para stats`);
+              }
               break;
             case 'bounced':
               statsToIncrement['stats.bounced'] = 1;
@@ -277,17 +319,24 @@ router.post('/resend', async (req, res) => {
             
             actions.push({
               type: 'campaign_stats_updated',
-              details: { campaignId, eventType },
+              details: { campaignId, eventType, unique: eventType === 'opened' ? isFirstOpenForEmail : (eventType === 'clicked' ? isFirstClickForEmail : true) },
               success: true
             });
           }
           
           // Actualizar rates
           if (['delivered', 'opened', 'clicked'].includes(eventType)) {
-            const campaign = await Campaign.findById(campaignId);
-            if (campaign && typeof campaign.updateRates === 'function') {
-              campaign.updateRates();
-              await campaign.save();
+            // Solo recalcular si realmente se incrementó algo
+            const shouldRecalculate = eventType === 'delivered' || 
+              (eventType === 'opened' && isFirstOpenForEmail) ||
+              (eventType === 'clicked' && isFirstClickForEmail);
+            
+            if (shouldRecalculate) {
+              const campaign = await Campaign.findById(campaignId);
+              if (campaign && typeof campaign.updateRates === 'function') {
+                campaign.updateRates();
+                await campaign.save();
+              }
             }
           }
           
@@ -313,7 +362,7 @@ router.post('/resend', async (req, res) => {
           }
         }
         
-        // 5. Actualizar Flow stats
+        // 5. Actualizar Flow stats (también solo únicos)
         if (flowId) {
           try {
             const Flow = require('../models/Flow');
@@ -328,15 +377,23 @@ router.post('/resend', async (req, res) => {
             
             const metricName = metricMap[eventType];
             if (metricName) {
-              await Flow.findByIdAndUpdate(flowId, {
-                $inc: { [`metrics.${metricName}`]: 1 }
-              });
+              // Para flows, también solo contar únicos
+              const shouldIncrementFlow = 
+                (eventType === 'opened' && isFirstOpenForEmail) ||
+                (eventType === 'clicked' && isFirstClickForEmail) ||
+                !['opened', 'clicked'].includes(eventType);
               
-              actions.push({
-                type: 'flow_stats_updated',
-                details: { flowId, metric: metricName },
-                success: true
-              });
+              if (shouldIncrementFlow) {
+                await Flow.findByIdAndUpdate(flowId, {
+                  $inc: { [`metrics.${metricName}`]: 1 }
+                });
+                
+                actions.push({
+                  type: 'flow_stats_updated',
+                  details: { flowId, metric: metricName },
+                  success: true
+                });
+              }
             }
           } catch (err) {
             console.log(`   ⚠️  Flow not available: ${err.message}`);
