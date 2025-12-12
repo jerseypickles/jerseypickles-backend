@@ -110,6 +110,9 @@ shopifyWebhookPaths.forEach(path => {
   app.use(path, express.raw({ type: 'application/json', limit: '10mb' }));
 });
 
+// 🔧 AGREGAR ESTA LÍNEA:
+app.use('/api/webhooks/resend', express.json({ limit: '10mb' }));
+
 // Montar webhook routes ANTES de express.json()
 app.use('/api/webhooks', webhookRoutes);
 
