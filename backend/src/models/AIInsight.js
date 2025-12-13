@@ -12,7 +12,7 @@ const mongoose = require('mongoose');
 
 const aiInsightSchema = new mongoose.Schema({
   // ==================== IDENTIFICACIÓN ====================
-  
+
   // Tipo de análisis
   type: {
     type: String,
@@ -22,19 +22,19 @@ const aiInsightSchema = new mongoose.Schema({
       'list_performance',      // Performance por lista
       'health_check',          // Estado de salud
       'comprehensive_report',  // Reporte completo
-      'ai_generated_insights'  // 🆕 Insights generados por Claude
+      'ai_generated_insights'  // 🆕 Insights generados por AI Engine (no depende de Claude)
     ],
     required: true,
     index: true
   },
-  
+
   // Período analizado (en días)
   periodDays: {
     type: Number,
     required: true,
     index: true
   },
-  
+
   // Segmento específico (si aplica)
   segmentId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -42,15 +42,38 @@ const aiInsightSchema = new mongoose.Schema({
     default: null,
     index: true
   },
-  
+
   // ==================== DATOS DEL ANÁLISIS ====================
-  
+
   // Resultado del análisis (schema flexible)
   data: {
     type: mongoose.Schema.Types.Mixed,
     required: true
   },
-  
+
+  // ==================== AI METADATA (PROVIDER-AGNOSTIC) ====================
+  // Guarda info del engine/modelo usado (OpenAI, Anthropic, fallback, etc.)
+  aiMeta: {
+    provider: { // 'openai' | 'anthropic' | 'fallback' | 'unknown'
+      type: String,
+      index: true
+    },
+    model: String,
+    tokensUsed: {
+      input: Number,
+      output: Number
+    },
+    durationMs: Number,
+    isFallback: {
+      type: Boolean,
+      default: false
+    },
+    parseError: {
+      type: Boolean,
+      default: false
+    }
+  },
+
   // Resumen ejecutivo (para queries rápidas)
   summary: {
     primaryMetric: {
@@ -66,7 +89,7 @@ const aiInsightSchema = new mongoose.Schema({
     insightsCount: Number,
     alertsCount: Number
   },
-  
+
   // Top insights (para mostrar rápido)
   topInsights: [{
     category: String,
@@ -78,7 +101,7 @@ const aiInsightSchema = new mongoose.Schema({
     action: String,
     metric: mongoose.Schema.Types.Mixed
   }],
-  
+
   // Alertas activas
   alerts: [{
     type: { type: String },
@@ -91,9 +114,9 @@ const aiInsightSchema = new mongoose.Schema({
     threshold: Number,
     currentValue: Number
   }],
-  
+
   // ==================== METADATA ====================
-  
+
   dataStats: {
     campaignsAnalyzed: { type: Number, default: 0 },
     emailsAnalyzed: { type: Number, default: 0 },
@@ -101,26 +124,26 @@ const aiInsightSchema = new mongoose.Schema({
     dateRangeStart: Date,
     dateRangeEnd: Date
   },
-  
+
   calculationTime: {
     startedAt: Date,
     completedAt: Date,
     durationMs: Number
   },
-  
+
   algorithmVersion: {
     type: String,
     default: '1.0.0'
   },
-  
+
   // ==================== HISTÓRICO ====================
-  
+
   previousPeriod: {
     calculatedAt: Date,
     primaryMetricValue: mongoose.Schema.Types.Mixed,
     score: Number
   },
-  
+
   changes: {
     scoreChange: Number,
     primaryMetricChange: Number,
@@ -129,32 +152,32 @@ const aiInsightSchema = new mongoose.Schema({
       enum: ['improving', 'declining', 'stable', 'unknown']
     }
   },
-  
+
   // ==================== ESTADO ====================
-  
+
   isStale: {
     type: Boolean,
     default: false,
     index: true
   },
-  
+
   staleReason: String,
-  
+
   nextCalculationAt: {
     type: Date,
     index: true
   },
-  
+
   lastAccessedAt: {
     type: Date,
     default: Date.now
   },
-  
+
   accessCount: {
     type: Number,
     default: 0
   }
-  
+
 }, {
   timestamps: true,
   collection: 'ai_insights'
@@ -172,6 +195,12 @@ aiInsightSchema.index(
   { name: 'recalculation_queue_idx' }
 );
 
+// Útil para auditoría por engine/modelo (opcional pero recomendado)
+aiInsightSchema.index(
+  { 'aiMeta.provider': 1, 'aiMeta.model': 1 },
+  { name: 'ai_provider_model_idx' }
+);
+
 // ==================== MÉTODOS ESTÁTICOS ====================
 
 /**
@@ -183,28 +212,28 @@ aiInsightSchema.statics.getLatest = async function(type, periodDays = 30, segmen
     periodDays,
     isStale: false
   };
-  
+
   if (segmentId) {
     query.segmentId = segmentId;
   } else {
     query.segmentId = null;
   }
-  
+
   const insight = await this.findOne(query)
     .sort({ createdAt: -1 })
     .lean();
-  
+
   if (insight) {
     // Actualizar acceso (fire and forget)
     this.updateOne(
       { _id: insight._id },
-      { 
+      {
         $set: { lastAccessedAt: new Date() },
         $inc: { accessCount: 1 }
       }
     ).exec();
   }
-  
+
   return insight;
 };
 
@@ -218,61 +247,79 @@ aiInsightSchema.statics.saveAnalysis = async function(type, periodDays, analysis
     calculationStartTime = new Date(),
     recalculateHours = 6
   } = options;
-  
+
   // Buscar análisis anterior para comparación
   const previousAnalysis = await this.getLatest(type, periodDays, segmentId);
-  
+
   // Preparar datos históricos
   let previousPeriod = null;
   let changes = null;
-  
+
   if (previousAnalysis) {
     previousPeriod = {
       calculatedAt: previousAnalysis.createdAt,
       primaryMetricValue: previousAnalysis.summary?.primaryMetric?.value,
       score: previousAnalysis.summary?.score
     };
-    
-    const currentScore = analysisResult.summary?.score || analysisResult.health?.score || 0;
+
+    const currentScore = analysisResult?.summary?.score || analysisResult?.health?.score || 0;
     const prevScore = previousAnalysis.summary?.score || 0;
     const scoreChange = currentScore - prevScore;
-    
+
     let trend = 'stable';
     if (scoreChange > 5) trend = 'improving';
     else if (scoreChange < -5) trend = 'declining';
-    
+
     changes = { scoreChange, trend };
   }
-  
+
   // Preparar summary
-  const summary = analysisResult.summary || {
-    score: analysisResult.health?.score || 0,
-    status: analysisResult.success === false ? 'insufficient_data' : 
-            (analysisResult.health?.status || 'healthy'),
-    insightsCount: analysisResult.topInsights?.length || 0,
-    alertsCount: analysisResult.alerts?.length || 0
+  const summary = analysisResult?.summary || {
+    score: analysisResult?.health?.score || 0,
+    status: analysisResult?.success === false
+      ? 'insufficient_data'
+      : (analysisResult?.health?.status || 'healthy'),
+    insightsCount: analysisResult?.topInsights?.length || 0,
+    alertsCount: analysisResult?.alerts?.length || 0
   };
-  
+
+  // Preparar aiMeta (si viene en el result)
+  // Soporta varias formas: provider/model en root, o aiMeta ya armado
+  const aiMeta = analysisResult?.aiMeta || (
+    (analysisResult?.provider || analysisResult?.model || analysisResult?.tokensUsed || analysisResult?.duration || analysisResult?.isFallback || analysisResult?.parseError)
+      ? {
+          provider: analysisResult?.provider,
+          model: analysisResult?.model,
+          tokensUsed: analysisResult?.tokensUsed,
+          durationMs: typeof analysisResult?.duration === 'number' ? analysisResult.duration : undefined,
+          isFallback: !!analysisResult?.isFallback,
+          parseError: !!analysisResult?.parseError
+        }
+      : undefined
+  );
+
   // Marcar anteriores como stale
   await this.updateMany(
     { type, periodDays, segmentId: segmentId || null, isStale: false },
     { $set: { isStale: true, staleReason: 'Superseded by newer analysis' } }
   );
-  
+
   // Crear nuevo
   const newInsight = await this.create({
     type,
     periodDays,
     segmentId,
     data: analysisResult,
+    aiMeta,
     summary,
-    topInsights: analysisResult.topInsights || [],
-    alerts: analysisResult.alerts || [],
+    topInsights: analysisResult?.topInsights || [],
+    alerts: analysisResult?.alerts || [],
     dataStats: {
-      campaignsAnalyzed: analysisResult.summary?.campaignsAnalyzed || 0,
-      emailsAnalyzed: analysisResult.totalEventsAnalyzed || 0,
-      dateRangeStart: analysisResult.period?.startDate || analysisResult.period?.start,
-      dateRangeEnd: analysisResult.period?.endDate || analysisResult.period?.end
+      campaignsAnalyzed: analysisResult?.summary?.campaignsAnalyzed || 0,
+      emailsAnalyzed: analysisResult?.totalEventsAnalyzed || 0,
+      segmentsAnalyzed: analysisResult?.summary?.segmentsAnalyzed || 0,
+      dateRangeStart: analysisResult?.period?.startDate || analysisResult?.period?.start,
+      dateRangeEnd: analysisResult?.period?.endDate || analysisResult?.period?.end
     },
     calculationTime: {
       startedAt: calculationStartTime,
@@ -285,7 +332,7 @@ aiInsightSchema.statics.saveAnalysis = async function(type, periodDays, analysis
     isStale: false,
     nextCalculationAt: new Date(Date.now() + recalculateHours * 60 * 60 * 1000)
   });
-  
+
   console.log(`✅ AI Insight saved: ${type} (${periodDays}d) - Score: ${summary.score}`);
   return newInsight;
 };
@@ -309,12 +356,12 @@ aiInsightSchema.statics.getDueForRecalculation = async function() {
  */
 aiInsightSchema.statics.invalidate = async function(type = null) {
   const query = type ? { type } : {};
-  
+
   const result = await this.updateMany(
     query,
     { $set: { isStale: true, staleReason: 'Manual invalidation' } }
   );
-  
+
   console.log(`🔄 Invalidated ${result.modifiedCount} AI insights`);
   return result.modifiedCount;
 };
@@ -336,14 +383,14 @@ aiInsightSchema.statics.getScoreHistory = async function(type, periodDays = 30, 
 aiInsightSchema.statics.getDashboardSummary = async function() {
   const types = [
     'subject_analysis',
-    'send_timing', 
+    'send_timing',
     'list_performance',
     'health_check',
-    'ai_generated_insights'  // 🆕 Incluir insights de Claude
+    'ai_generated_insights' // AI Engine insights (provider-agnostic)
   ];
-  
+
   const summary = {};
-  
+
   for (const type of types) {
     const latest = await this.getLatest(type, 30);
     summary[type] = latest ? {
@@ -355,14 +402,14 @@ aiInsightSchema.statics.getDashboardSummary = async function() {
       ageHours: Math.round((Date.now() - new Date(latest.createdAt).getTime()) / (1000 * 60 * 60))
     } : null;
   }
-  
+
   const scores = Object.values(summary)
     .filter(s => s?.score !== undefined)
     .map(s => s.score);
-  
+
   return {
-    globalScore: scores.length > 0 
-      ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) 
+    globalScore: scores.length > 0
+      ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
       : 0,
     totalAlerts: Object.values(summary).reduce((sum, s) => sum + (s?.alertsCount || 0), 0),
     analyses: summary,
@@ -376,7 +423,7 @@ aiInsightSchema.statics.getDashboardSummary = async function() {
 aiInsightSchema.statics.cleanup = async function(daysToKeep = 90) {
   const cutoffDate = new Date();
   cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
-  
+
   // Obtener IDs de los más recientes de cada tipo
   const latestByType = await this.aggregate([
     { $match: { isStale: false } },
@@ -388,18 +435,18 @@ aiInsightSchema.statics.cleanup = async function(daysToKeep = 90) {
       }
     }
   ]);
-  
+
   const keepIds = latestByType.map(item => item.latestId);
-  
+
   const result = await this.deleteMany({
     _id: { $nin: keepIds },
     createdAt: { $lt: cutoffDate }
   });
-  
+
   if (result.deletedCount > 0) {
     console.log(`🧹 Cleaned up ${result.deletedCount} old AI insights`);
   }
-  
+
   return result.deletedCount;
 };
 

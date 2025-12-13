@@ -6,7 +6,7 @@ const router = express.Router();
 const { auth, authorize } = require('../middleware/auth');
 const AIInsight = require('../models/AIInsight');
 const aiCalculator = require('../services/aiCalculator');
-const claudeService = require('../services/claudeService');
+const aiService = require('../services/aiService');
 const aiAnalyticsJob = require('../jobs/aiAnalyticsJob');
 const Campaign = require('../models/Campaign');
 
@@ -188,28 +188,18 @@ router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
 });
 
 router.get('/claude/status', authorize('admin', 'manager'), async (req, res) => {
-  try {
-    claudeService.init();
-    
-    const latestInsight = await AIInsight.findOne({ 
-      type: 'ai_generated_insights' 
-    }).sort({ createdAt: -1 });
-    
-    res.json({
-      available: claudeService.isAvailable(),
-      model: claudeService.model,
-      lastGenerated: latestInsight?.createdAt || null,
-      lastTokensUsed: latestInsight?.data?.tokensUsed || null,
-      hasExecutiveSummary: !!latestInsight?.data?.executiveSummary,
-      actionPlanCount: latestInsight?.data?.actionPlan?.length || 0,
-      isFallback: latestInsight?.data?.isFallback || false,
-      parseError: latestInsight?.data?.parseError || false
-    });
-    
-  } catch (error) {
-    console.error('Error obteniendo estado de Claude:', error);
-    res.status(500).json({ error: error.message });
-  }
+  aiService.init();
+
+  const latestInsight = await AIInsight.findOne({ 
+    type: 'ai_generated_insights' 
+  }).sort({ createdAt: -1 });
+
+  res.json({
+    available: aiService.isAvailable(),
+    provider: process.env.AI_PROVIDER || 'openai',
+    model: aiService.model,
+    lastGenerated: latestInsight?.createdAt || null
+  });
 });
 
 // ==================== SUBJECT LINE ANALYSIS ====================

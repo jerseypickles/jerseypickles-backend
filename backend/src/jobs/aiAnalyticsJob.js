@@ -1,61 +1,57 @@
-// backend/src/jobs/aiAnalyticsJob.js
-// 🧠 AI Analytics Cron Job - Calcula insights y genera análisis con Claude
-// 🔧 UPDATED: Better error handling and logging for Claude integration
+// 🧠 AI Analytics Cron Job - Calcula insights y genera análisis con AI Router
 const cron = require('node-cron');
 const AIInsight = require('../models/AIInsight');
 const aiCalculator = require('../services/aiCalculator');
-const claudeService = require('../services/claudeService');
+const aiService = require('../services/aiService');
 
 class AIAnalyticsJob {
   constructor() {
     this.isRunning = false;
     this.lastRun = null;
     this.schedule = null;
-    this.claudeEnabled = false;
+    this.aiEnabled = false;
   }
 
   init(cronExpression = '0 */6 * * *') {
     console.log('🧠 AI Analytics Job inicializado');
     console.log(`   Schedule: ${cronExpression}`);
-    
-    claudeService.init();
-    this.claudeEnabled = claudeService.isAvailable();
-    
-    if (this.claudeEnabled) {
-      console.log('   🤖 Claude API: ✅ Habilitado');
-      console.log(`   🤖 Model: ${claudeService.model}`);
-    } else {
-      console.log('   🤖 Claude API: ⚠️  No configurado (usando análisis básico)');
-    }
-    
+
+    aiService.init();
+    this.aiEnabled = aiService.isAvailable();
+
+    console.log(`   🤖 AI Engine: ${this.aiEnabled ? '✅ Enabled' : '❌ Disabled'}`);
+    console.log(`   🤖 Provider: ${process.env.AI_PROVIDER || 'openai'}`);
+    console.log(`   🤖 Model: ${aiService.model}`);
+
     this.schedule = cron.schedule(cronExpression, () => {
       this.runAllAnalyses();
     });
-    
+
     setTimeout(() => {
       this.checkAndRunIfNeeded();
     }, 30000);
-    
+
     console.log('✅ AI Analytics Job listo');
   }
 
   async checkAndRunIfNeeded() {
     try {
       const dueAnalyses = await AIInsight.getDueForRecalculation();
-      
+
       if (dueAnalyses.length > 0) {
         console.log(`\n🔄 ${dueAnalyses.length} análisis pendientes, ejecutando...`);
         await this.runAllAnalyses();
+        return;
+      }
+
+      const summary = await AIInsight.getDashboardSummary();
+      const hasData = Object.values(summary.analyses).some(a => a !== null);
+
+      if (!hasData) {
+        console.log('\n🧠 No hay análisis guardados, ejecutando cálculo inicial...');
+        await this.runAllAnalyses();
       } else {
-        const summary = await AIInsight.getDashboardSummary();
-        const hasData = Object.values(summary.analyses).some(a => a !== null);
-        
-        if (!hasData) {
-          console.log('\n🧠 No hay análisis guardados, ejecutando cálculo inicial...');
-          await this.runAllAnalyses();
-        } else {
-          console.log('✅ Análisis de IA al día');
-        }
+        console.log('✅ Análisis de IA al día');
       }
     } catch (error) {
       console.error('❌ Error verificando análisis:', error.message);
@@ -70,19 +66,16 @@ class AIAnalyticsJob {
 
     this.isRunning = true;
     this.lastRun = new Date();
-    
+
     console.log('\n╔════════════════════════════════════════════════╗');
     console.log('║  🧠 AI ANALYTICS - CALCULANDO INSIGHTS          ║');
     console.log('╚════════════════════════════════════════════════╝');
     console.log(`   Inicio: ${this.lastRun.toISOString()}`);
-    console.log(`   Claude API: ${this.claudeEnabled ? '✅' : '❌'}\n`);
+    console.log(`   AI Enabled: ${this.aiEnabled ? '✅' : '❌'}\n`);
 
     const startTime = Date.now();
-    const results = {
-      success: [],
-      failed: []
-    };
-    
+    const results = { success: [], failed: [] };
+
     const analysisResults = {
       healthCheck: null,
       subjectAnalysis: null,
@@ -91,313 +84,132 @@ class AIAnalyticsJob {
     };
 
     try {
-      // FASE 1: CALCULAR MÉTRICAS (enfocado en últimos 15 días)
-      analysisResults.healthCheck = await this.runAnalysis('health_check', 7, async () => {
-        return await aiCalculator.calculateHealthCheck();
-      }, results);
+      // ===== FASE 1: MÉTRICAS =====
+      analysisResults.healthCheck = await this.runAnalysis(
+        'health_check',
+        7,
+        () => aiCalculator.calculateHealthCheck(),
+        results
+      );
 
-      // Subject Analysis - solo 15 días (datos recientes)
-      analysisResults.subjectAnalysis = await this.runAnalysis('subject_analysis', 15, async () => {
-        return await aiCalculator.calculateSubjectAnalysis({ days: 15 });
-      }, results);
+      analysisResults.subjectAnalysis = await this.runAnalysis(
+        'subject_analysis',
+        15,
+        () => aiCalculator.calculateSubjectAnalysis({ days: 15 }),
+        results
+      );
 
-      // Send Timing - 15 días
-      analysisResults.sendTiming = await this.runAnalysis('send_timing', 15, async () => {
-        return await aiCalculator.calculateSendTiming({ days: 15 });
-      }, results);
+      analysisResults.sendTiming = await this.runAnalysis(
+        'send_timing',
+        15,
+        () => aiCalculator.calculateSendTiming({ days: 15 }),
+        results
+      );
 
-      // List Performance - 15 días
-      analysisResults.listPerformance = await this.runAnalysis('list_performance', 15, async () => {
-        return await aiCalculator.calculateListPerformance({ days: 15 });
-      }, results);
+      analysisResults.listPerformance = await this.runAnalysis(
+        'list_performance',
+        15,
+        () => aiCalculator.calculateListPerformance({ days: 15 }),
+        results
+      );
 
-      // FASE 2: GENERAR INSIGHTS CON CLAUDE
-      await this.generateClaudeInsights(analysisResults, results);
+      // ===== FASE 2: INSIGHTS AI =====
+      await this.generateAIInsights(analysisResults, results);
 
-      // FASE 3: COMPREHENSIVE REPORT (15 días)
-      await this.runAnalysis('comprehensive_report', 15, async () => {
-        const report = await aiCalculator.calculateComprehensiveReport({ days: 15 });
-        
-        const claudeInsight = await AIInsight.getLatest('ai_generated_insights', 30);
-        if (claudeInsight?.data?.insights) {
-          report.aiInsights = claudeInsight.data.insights;
-          report.aiSummary = claudeInsight.data.summary;
-          report.aiRecommendations = claudeInsight.data.recommendations;
-        }
-        
-        return report;
-      }, results);
+      // ===== FASE 3: REPORT =====
+      await this.runAnalysis(
+        'comprehensive_report',
+        15,
+        async () => {
+          const report = await aiCalculator.calculateComprehensiveReport({ days: 15 });
+          const aiInsight = await AIInsight.getLatest('ai_generated_insights', 30);
+
+          if (aiInsight?.data) {
+            report.aiInsights = aiInsight.data.deepAnalysis;
+            report.aiSummary = aiInsight.data.executiveSummary;
+            report.aiRecommendations = aiInsight.data.actionPlan;
+          }
+
+          return report;
+        },
+        results
+      );
 
       await AIInsight.cleanup(90);
 
     } catch (error) {
       console.error('❌ Error crítico en AI Analytics Job:', error);
-      console.error('   Stack:', error.stack);
     } finally {
       this.isRunning = false;
-      
       const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-      
+
       console.log('\n╔════════════════════════════════════════════════╗');
       console.log('║  ✅ AI ANALYTICS - COMPLETADO                   ║');
       console.log('╚════════════════════════════════════════════════╝');
       console.log(`   Duración: ${duration}s`);
       console.log(`   Exitosos: ${results.success.length}`);
       console.log(`   Fallidos: ${results.failed.length}`);
-      
-      if (results.failed.length > 0) {
-        console.log(`   ⚠️  Fallos: ${results.failed.join(', ')}`);
-      }
-      
       console.log('════════════════════════════════════════════════\n');
     }
   }
 
-  /**
-   * Generar insights usando Claude API - Con mejor manejo de errores
-   */
-  async generateClaudeInsights(analysisResults, results) {
-    console.log('\n   🤖 Generando insights con Claude...');
-    
+  // 🔥 YA NO ES CLAUDE, ES AI
+  async generateAIInsights(analysisResults, results) {
+    console.log('\n   🤖 Generando insights con AI Engine...');
+
     try {
-      // Verificar que tenemos datos para enviar
-      if (!analysisResults.healthCheck && !analysisResults.subjectAnalysis && !analysisResults.listPerformance) {
-        console.log('      ⚠️  No hay datos suficientes para enviar a Claude');
+      if (!analysisResults.healthCheck &&
+          !analysisResults.subjectAnalysis &&
+          !analysisResults.listPerformance) {
+        console.log('      ⚠️  No hay datos suficientes');
         results.failed.push('ai_generated_insights (no data)');
         return;
       }
 
-      // Preparar datos compactos para Claude
-      const dataForClaude = aiCalculator.prepareDataForClaude(analysisResults);
-      const dataSize = JSON.stringify(dataForClaude).length;
-      
-      console.log(`      📦 Datos preparados: ${dataSize} bytes`);
-      console.log(`      📊 Health data: ${dataForClaude.health ? 'Sí' : 'No'}`);
-      console.log(`      📊 Subjects data: ${dataForClaude.subjects?.top ? 'Sí' : 'No'}`);
-      console.log(`      📊 Lists data: ${dataForClaude.lists?.length || 0} listas`);
-      console.log(`      📊 Timing data: ${dataForClaude.timing?.best ? 'Sí' : 'No'}`);
-      
-      // Llamar a Claude
-      console.log('      🔄 Llamando a Claude API...');
-      const claudeStartTime = Date.now();
-      
-      const claudeResponse = await claudeService.generateEmailInsights(dataForClaude);
-      
-      const claudeDuration = ((Date.now() - claudeStartTime) / 1000).toFixed(2);
-      console.log(`      ⏱️  Claude respondió en ${claudeDuration}s`);
-      
-      if (claudeResponse.success) {
-        // Verificar que tenemos contenido útil
-        const hasContent = claudeResponse.executiveSummary || 
-                          claudeResponse.deepAnalysis || 
-                          claudeResponse.actionPlan?.length > 0;
-        
-        if (!hasContent) {
-          console.log('      ⚠️  Claude respondió pero sin contenido útil');
-          console.log('      Response keys:', Object.keys(claudeResponse));
-        }
-        
-        // Guardar insights generados por Claude
-        await AIInsight.saveAnalysis('ai_generated_insights', 30, {
-          success: true,
-          executiveSummary: claudeResponse.executiveSummary || '',
-          deepAnalysis: claudeResponse.deepAnalysis || {},
-          actionPlan: claudeResponse.actionPlan || [],
-          quickWins: claudeResponse.quickWins || [],
-          warnings: claudeResponse.warnings || [],
-          opportunities: claudeResponse.opportunities || [],
-          nextCampaignSuggestion: claudeResponse.nextCampaignSuggestion || null,
-          // Metadata
-          model: claudeResponse.model,
-          tokensUsed: claudeResponse.tokensUsed,
-          generatedAt: claudeResponse.generatedAt,
-          duration: claudeResponse.duration,
-          isFallback: claudeResponse.isFallback || false,
-          // Debug info
-          inputDataSize: dataSize,
-          parseError: claudeResponse.parseError || false
-        }, {
-          recalculateHours: 6
-        });
-        
-        results.success.push(`ai_generated_insights (${claudeResponse.isFallback ? 'fallback' : 'Claude'})`);
-        
-        console.log(`      ✅ Insights guardados correctamente`);
-        console.log(`      📝 Executive Summary: ${claudeResponse.executiveSummary ? 'Sí' : 'No'}`);
-        console.log(`      📝 Action Plan: ${claudeResponse.actionPlan?.length || 0} items`);
-        console.log(`      📝 Quick Wins: ${claudeResponse.quickWins?.length || 0} items`);
-        console.log(`      📝 Warnings: ${claudeResponse.warnings?.length || 0} items`);
-        
-        if (claudeResponse.tokensUsed) {
-          console.log(`      📊 Tokens: ${claudeResponse.tokensUsed.input || 0} in / ${claudeResponse.tokensUsed.output || 0} out`);
-        }
-        
-        if (claudeResponse.executiveSummary) {
-          const preview = claudeResponse.executiveSummary.substring(0, 100);
-          console.log(`      📝 Resumen: ${preview}...`);
-        }
-      } else {
-        console.log('      ⚠️  Claude no disponible o falló, guardando fallback');
-        console.log(`      Message: ${claudeResponse.message || 'No message'}`);
-        
-        // Guardar el fallback de todas formas
-        await AIInsight.saveAnalysis('ai_generated_insights', 30, claudeResponse, {
-          recalculateHours: 1 // Reintentar más pronto si falló
-        });
-        
-        results.success.push('ai_generated_insights (fallback)');
-      }
-      
+      const payload = aiCalculator.prepareDataForClaude(analysisResults); // nombre legacy OK
+      const size = JSON.stringify(payload).length;
+
+      console.log(`      📦 Payload: ${size} bytes`);
+      console.log(`      🔄 Calling AI provider...`);
+
+      const start = Date.now();
+      const aiResponse = await aiService.generateEmailInsights(payload);
+      const duration = ((Date.now() - start) / 1000).toFixed(2);
+
+      console.log(`      ⏱️  AI respondió en ${duration}s`);
+
+      await AIInsight.saveAnalysis(
+        'ai_generated_insights',
+        30,
+        {
+          success: aiResponse.success !== false,
+          ...aiResponse,
+          provider: process.env.AI_PROVIDER || 'openai',
+          model: aiService.model,
+          inputDataSize: size
+        },
+        { recalculateHours: aiResponse.success === false ? 1 : 6 }
+      );
+
+      results.success.push(`ai_generated_insights (${process.env.AI_PROVIDER || 'openai'})`);
+
     } catch (error) {
-      console.error(`      ❌ Error generando insights con Claude: ${error.message}`);
-      console.error(`      Stack: ${error.stack?.substring(0, 300)}`);
+      console.error(`      ❌ Error AI Engine: ${error.message}`);
       results.failed.push('ai_generated_insights');
-      
-      // Intentar guardar un fallback básico para que el frontend tenga algo
-      try {
-        const fallbackData = {
-          success: false,
-          executiveSummary: `Error generando análisis: ${error.message}`,
-          deepAnalysis: {},
-          actionPlan: [],
-          quickWins: [],
-          warnings: [{
-            severity: 'warning',
-            issue: 'Error en Claude API',
-            consequence: 'Análisis AI no disponible temporalmente',
-            solution: 'El sistema reintentará automáticamente'
-          }],
-          error: error.message,
-          generatedAt: new Date().toISOString()
-        };
-        
-        await AIInsight.saveAnalysis('ai_generated_insights', 30, fallbackData, {
-          recalculateHours: 1
-        });
-        
-        console.log('      💾 Fallback de error guardado');
-      } catch (saveError) {
-        console.error(`      ❌ Error guardando fallback: ${saveError.message}`);
-      }
     }
   }
 
   async runAnalysis(type, periodDays, calculator, results) {
-    const label = `${type} (${periodDays}d)`;
-    console.log(`   📊 Calculando: ${label}...`);
-    
-    const startTime = new Date();
-    let analysisResult = null;
-    
     try {
-      analysisResult = await calculator();
-      
-      if (analysisResult && analysisResult.success !== false) {
-        await AIInsight.saveAnalysis(type, periodDays, analysisResult, {
-          calculationStartTime: startTime,
-          recalculateHours: type === 'health_check' ? 1 : 6
-        });
-        
-        results.success.push(label);
-        console.log(`      ✅ ${label} completado`);
-      } else {
-        console.log(`      ⚠️  ${label}: datos insuficientes`);
-        
-        await AIInsight.saveAnalysis(type, periodDays, {
-          success: false,
-          message: analysisResult?.message || 'Insufficient data',
-          summary: { status: 'insufficient_data', score: 0 }
-        }, {
-          calculationStartTime: startTime,
-          recalculateHours: 1
-        });
-        
-        results.success.push(label);
-      }
-      
+      const data = await calculator();
+      await AIInsight.saveAnalysis(type, periodDays, data);
+      results.success.push(`${type} (${periodDays}d)`);
+      return data;
     } catch (error) {
-      console.error(`      ❌ ${label}: ${error.message}`);
-      results.failed.push(label);
+      results.failed.push(type);
+      console.error(`❌ ${type}: ${error.message}`);
+      return null;
     }
-    
-    return analysisResult;
-  }
-
-  async forceRecalculate() {
-    console.log('🔄 Forzando recálculo de todos los análisis...');
-    await AIInsight.invalidate();
-    await this.runAllAnalyses();
-  }
-
-  async forceRecalculateType(type) {
-    console.log(`🔄 Forzando recálculo de: ${type}...`);
-    await AIInsight.invalidate(type);
-    
-    const results = { success: [], failed: [] };
-    
-    switch (type) {
-      case 'health_check':
-        await this.runAnalysis('health_check', 7, async () => {
-          return await aiCalculator.calculateHealthCheck();
-        }, results);
-        break;
-        
-      case 'subject_analysis':
-        await this.runAnalysis('subject_analysis', 15, async () => {
-          return await aiCalculator.calculateSubjectAnalysis({ days: 15 });
-        }, results);
-        break;
-        
-      case 'send_timing':
-        await this.runAnalysis('send_timing', 15, async () => {
-          return await aiCalculator.calculateSendTiming({ days: 15 });
-        }, results);
-        break;
-        
-      case 'list_performance':
-        await this.runAnalysis('list_performance', 15, async () => {
-          return await aiCalculator.calculateListPerformance({ days: 15 });
-        }, results);
-        break;
-        
-      case 'comprehensive_report':
-        await this.runAnalysis('comprehensive_report', 15, async () => {
-          return await aiCalculator.calculateComprehensiveReport({ days: 15 });
-        }, results);
-        break;
-        
-      case 'ai_generated_insights':
-        await this.runAllAnalyses();
-        break;
-    }
-    
-    return results;
-  }
-
-  getStatus() {
-    return {
-      isRunning: this.isRunning,
-      lastRun: this.lastRun,
-      nextScheduledRun: this.getNextRun(),
-      schedule: '0 */6 * * *',
-      claudeEnabled: this.claudeEnabled,
-      claudeModel: claudeService.model
-    };
-  }
-
-  getNextRun() {
-    const now = new Date();
-    const nextHour = Math.ceil(now.getHours() / 6) * 6;
-    const next = new Date(now);
-    
-    if (nextHour >= 24) {
-      next.setDate(next.getDate() + 1);
-      next.setHours(0, 0, 0, 0);
-    } else {
-      next.setHours(nextHour, 0, 0, 0);
-    }
-    
-    return next;
   }
 
   stop() {
@@ -408,5 +220,4 @@ class AIAnalyticsJob {
   }
 }
 
-const aiAnalyticsJob = new AIAnalyticsJob();
-module.exports = aiAnalyticsJob;
+module.exports = new AIAnalyticsJob();
