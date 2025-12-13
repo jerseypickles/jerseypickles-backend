@@ -1,5 +1,6 @@
 // backend/src/jobs/aiAnalyticsJob.js
 // 🧠 AI Analytics Cron Job - Calcula insights y genera análisis con Claude
+// ✅ FIXED: Guarda correctamente la estructura de respuesta de Claude
 const cron = require('node-cron');
 const AIInsight = require('../models/AIInsight');
 const aiCalculator = require('../services/aiCalculator');
@@ -156,10 +157,8 @@ class AIAnalyticsJob {
         
         // Agregar insights de Claude al reporte si existen
         const claudeInsight = await AIInsight.getLatest('ai_generated_insights', 30);
-        if (claudeInsight?.data?.insights) {
-          report.aiInsights = claudeInsight.data.insights;
-          report.aiSummary = claudeInsight.data.summary;
-          report.aiRecommendations = claudeInsight.data.recommendations;
+        if (claudeInsight?.data) {
+          report.aiInsights = claudeInsight.data;
         }
         
         return report;
@@ -191,7 +190,8 @@ class AIAnalyticsJob {
   }
 
   /**
-   * Generar insights usando Claude API
+   * ✅ FIXED: Generar insights usando Claude API
+   * Ahora guarda la estructura correcta que devuelve claudeService
    */
   async generateClaudeInsights(analysisResults, results) {
     console.log('\n   🤖 Generando insights con Claude...');
@@ -206,29 +206,42 @@ class AIAnalyticsJob {
       const claudeResponse = await claudeService.generateEmailInsights(dataForClaude);
       
       if (claudeResponse.success) {
-        // Guardar insights generados por Claude
-        await AIInsight.saveAnalysis('ai_generated_insights', 30, {
-          success: true,
-          insights: claudeResponse.insights,
-          summary: claudeResponse.summary,
-          recommendations: claudeResponse.recommendations,
-          model: claudeResponse.model,
-          tokensUsed: claudeResponse.tokensUsed,
-          generatedAt: claudeResponse.generatedAt,
-          inputData: dataForClaude // Guardar para referencia
-        }, {
+        // ✅ FIXED: Guardar TODA la respuesta de Claude directamente
+        // claudeResponse ya tiene la estructura correcta:
+        // - executiveSummary
+        // - deepAnalysis
+        // - actionPlan
+        // - quickWins
+        // - warnings
+        // - opportunities
+        // - productRecommendations
+        // - revenueGoalStrategy
+        // - nextCampaignSuggestion
+        // - etc.
+        
+        await AIInsight.saveAnalysis('ai_generated_insights', 30, claudeResponse, {
           recalculateHours: 6
         });
         
         results.success.push('ai_generated_insights (Claude)');
-        console.log(`      ✅ Claude generó ${claudeResponse.insights?.length || 0} insights`);
+        console.log(`      ✅ Claude generó análisis completo`);
         console.log(`      📊 Tokens: ${claudeResponse.tokensUsed?.input || 0} in / ${claudeResponse.tokensUsed?.output || 0} out`);
+        console.log(`      📝 Action plan items: ${claudeResponse.actionPlan?.length || 0}`);
+        console.log(`      ⚡ Quick wins: ${claudeResponse.quickWins?.length || 0}`);
+        console.log(`      ⚠️ Warnings: ${claudeResponse.warnings?.length || 0}`);
         
-        if (claudeResponse.summary) {
-          console.log(`      📝 Resumen: ${claudeResponse.summary.substring(0, 100)}...`);
+        if (claudeResponse.executiveSummary) {
+          console.log(`      📋 Executive Summary: ${claudeResponse.executiveSummary.substring(0, 80)}...`);
         }
       } else {
         console.log('      ⚠️  Claude no disponible, usando insights básicos');
+        
+        // ✅ FIXED: El fallback también tiene la estructura correcta
+        // getFallbackInsights ya devuelve: executiveSummary, deepAnalysis, actionPlan, etc.
+        await AIInsight.saveAnalysis('ai_generated_insights', 30, claudeResponse, {
+          recalculateHours: 6
+        });
+        
         results.success.push('ai_generated_insights (fallback)');
       }
       

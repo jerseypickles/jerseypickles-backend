@@ -1,5 +1,6 @@
 // backend/src/routes/ai.js
 // 🧠 AI Analytics Routes - Solo LEE de MongoDB, nunca calcula en request
+// ✅ FIXED: Devuelve estructura correcta de Claude insights
 const express = require('express');
 const router = express.Router();
 const { auth, authorize } = require('../middleware/auth');
@@ -93,7 +94,18 @@ router.get('/insights/quick', authorize('admin', 'manager'), async (req, res) =>
 
 /**
  * GET /api/ai/claude
- * Obtener insights generados por Claude (lee de MongoDB)
+ * ✅ FIXED: Obtener insights generados por Claude con estructura correcta
+ * 
+ * La respuesta incluye:
+ * - executiveSummary: Resumen ejecutivo
+ * - deepAnalysis: Análisis profundo por categoría
+ * - actionPlan: Plan de acción priorizado
+ * - quickWins: Acciones rápidas
+ * - warnings: Alertas y advertencias
+ * - opportunities: Oportunidades detectadas
+ * - productRecommendations: Recomendaciones de productos
+ * - revenueGoalStrategy: Estrategia para objetivo de revenue
+ * - nextCampaignSuggestion: Sugerencia para próxima campaña
  */
 router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
   try {
@@ -104,24 +116,72 @@ router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
         success: false,
         message: 'Insights de Claude pendientes. El sistema los generará automáticamente.',
         status: 'pending',
-        insights: [],
-        summary: '',
-        recommendations: []
+        data: null
       });
+    }
+    
+    // ✅ FIXED: insight.data ya contiene la estructura correcta de Claude:
+    // executiveSummary, deepAnalysis, actionPlan, quickWins, warnings,
+    // opportunities, productRecommendations, revenueGoalStrategy, nextCampaignSuggestion
+    
+    const claudeData = insight.data || {};
+    
+    // Verificar si los datos están desactualizados (más de 12 horas)
+    const ageHours = Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60));
+    const isOutdated = ageHours > 12;
+    
+    // Si está desactualizado, verificar si hay datos nuevos que no se han procesado
+    let outdatedReason = null;
+    let recalculationStarted = false;
+    
+    if (isOutdated) {
+      outdatedReason = `Último análisis hace ${ageHours} horas`;
+      
+      // Verificar si hay campañas nuevas desde el último análisis
+      try {
+        const Campaign = require('../models/Campaign');
+        const newCampaigns = await Campaign.countDocuments({
+          status: 'sent',
+          sentAt: { $gt: insight.createdAt }
+        });
+        
+        if (newCampaigns > 0) {
+          outdatedReason = `${newCampaigns} campañas nuevas desde el último análisis`;
+          
+          // Disparar recálculo en background si hay campañas nuevas
+          const aiAnalyticsJob = require('../jobs/aiAnalyticsJob');
+          if (!aiAnalyticsJob.isRunning) {
+            recalculationStarted = true;
+            setImmediate(async () => {
+              try {
+                await aiAnalyticsJob.forceRecalculateType('ai_generated_insights');
+              } catch (e) {
+                console.error('Error en recálculo automático:', e.message);
+              }
+            });
+          }
+        }
+      } catch (e) {
+        // Si no se puede verificar, no es crítico
+      }
     }
     
     res.json({
       success: true,
-      insights: insight.data?.insights || [],
-      summary: insight.data?.summary || '',
-      recommendations: insight.data?.recommendations || [],
-      model: insight.data?.model || 'unknown',
-      tokensUsed: insight.data?.tokensUsed || { input: 0, output: 0 },
+      // ✅ FIXED: Devolver los datos de Claude directamente
+      data: claudeData,
       _meta: {
-        generatedAt: insight.data?.generatedAt || insight.createdAt,
+        generatedAt: claudeData.generatedAt || insight.createdAt,
         calculatedAt: insight.createdAt,
-        ageHours: Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60)),
-        nextCalculation: insight.nextCalculationAt
+        ageHours,
+        nextCalculation: insight.nextCalculationAt,
+        model: claudeData.model || 'unknown',
+        tokensUsed: claudeData.tokensUsed || { input: 0, output: 0 },
+        hasBusinessContext: claudeData.hasBusinessContext || false,
+        isFallback: claudeData.isFallback || false,
+        isOutdated,
+        outdatedReason,
+        recalculationStarted
       }
     });
     
@@ -146,7 +206,9 @@ router.get('/claude/status', authorize('admin', 'manager'), async (req, res) => 
       model: claudeService.model,
       lastGenerated: latestInsight?.createdAt || null,
       lastTokensUsed: latestInsight?.data?.tokensUsed || null,
-      insightsCount: latestInsight?.data?.insights?.length || 0
+      hasData: !!latestInsight?.data?.executiveSummary,
+      isFallback: latestInsight?.data?.isFallback || false,
+      dataAge: latestInsight ? Math.round((Date.now() - new Date(latestInsight.createdAt).getTime()) / (1000 * 60 * 60)) : null
     });
     
   } catch (error) {
