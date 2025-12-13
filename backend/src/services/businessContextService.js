@@ -1,7 +1,8 @@
 // backend/src/services/businessContextService.js
-// 🎯 Business Context Service - Integra todos los datos de negocio para Claude
-// ⚠️ FIXED: Safe model access without static method dependencies
-const mongoose = require('mongoose');
+// 🎯 Business Context Service - Integra datos de negocio para el LLM (Claude / GPT / etc.)
+// ⚠️ Safe model access + lazy service loading (evita circular deps)
+
+const mongoose = require("mongoose");
 
 // Safe model getters
 const getModel = (name) => {
@@ -19,61 +20,80 @@ let _businessCalendarService = null;
 
 const getProductService = () => {
   if (!_productService) {
-    try { _productService = require('./productService'); } catch (e) { }
+    try {
+      _productService = require("./productService");
+    } catch (e) {}
   }
   return _productService;
 };
 
 const getBusinessCalendarService = () => {
   if (!_businessCalendarService) {
-    try { _businessCalendarService = require('./businessCalendarService'); } catch (e) { }
+    try {
+      _businessCalendarService = require("./businessCalendarService");
+    } catch (e) {}
   }
   return _businessCalendarService;
 };
 
 class BusinessContextService {
-
   /**
-   * Obtener contexto completo de negocio para Claude
+   * Obtener contexto completo de negocio (productos + calendario + preferencias por lista)
+   * NOTA: ya no lo “amarro” a Claude en el nombre. Sirve para cualquier LLM.
    */
   async getFullBusinessContext() {
     try {
       const productService = getProductService();
       const businessCalendarService = getBusinessCalendarService();
-      
-      const [
-        productData,
-        calendarContext,
-        listProductAnalysis
-      ] = await Promise.all([
-        productService?.prepareProductDataForClaude().catch(e => {
-          console.warn('Error preparing product data:', e.message);
+
+      const [productData, calendarContext, listProductAnalysis] = await Promise.all([
+        productService?.prepareProductDataForClaude?.().catch((e) => {
+          // Si en tu productService el método se llama prepareProductDataForClaude, lo dejamos tal cual
+          console.warn("Error preparing product data:", e.message);
           return null;
         }),
-        businessCalendarService?.getBusinessContextForClaude().catch(e => {
-          console.warn('Error getting calendar context:', e.message);
+        businessCalendarService?.getBusinessContextForClaude?.().catch((e) => {
+          // Igual aquí
+          console.warn("Error getting calendar context:", e.message);
           return null;
         }),
-        this.getProductsByListAnalysis().catch(e => {
-          console.warn('Error analyzing list products:', e.message);
+        this.getProductsByListAnalysis().catch((e) => {
+          console.warn("Error analyzing list products:", e.message);
           return null;
-        })
+        }),
       ]);
-      
+
       return {
         products: productData,
         calendar: calendarContext,
-        listProductPreferences: listProductAnalysis
+        listProductPreferences: listProductAnalysis,
       };
     } catch (error) {
-      console.error('Error getting business context:', error);
+      console.error("Error getting business context:", error);
       return {
         products: null,
         calendar: null,
         listProductPreferences: null,
-        error: error.message
+        error: error.message,
       };
     }
+  }
+
+  /**
+   * 🆕 Opcional: contexto “limpio” para mandarlo como JSON a GPT-5.2 (recomendado)
+   * Esto es MUY útil si quieres meterlo al prompt como objeto, o si lo guardas para debugging.
+   */
+  async getBusinessContextForLLM() {
+    const ctx = await this.getFullBusinessContext();
+
+    // Normaliza un poquito para que no explote el prompt con cosas raras
+    return {
+      products: ctx.products || null,
+      calendar: ctx.calendar || null,
+      listProductPreferences: Array.isArray(ctx.listProductPreferences) ? ctx.listProductPreferences : [],
+      error: ctx.error || null,
+      generatedAt: new Date().toISOString(),
+    };
   }
 
   /**
@@ -81,37 +101,34 @@ class BusinessContextService {
    */
   async getProductsByListAnalysis() {
     try {
-      const List = getModel('List');
+      const List = getModel("List");
       if (!List) return [];
-      
-      const lists = await List.find({ isActive: true })
-        .select('_id name memberCount')
-        .lean();
-      
+
+      const lists = await List.find({ isActive: true }).select("_id name memberCount").lean();
       if (lists.length === 0) return [];
-      
+
       const listAnalysis = [];
-      
+
       for (const list of lists.slice(0, 5)) {
         const topProducts = await this.getTopProductsForList(list._id, list.name);
-        
+
         if (topProducts.length > 0) {
           listAnalysis.push({
             listName: list.name,
             memberCount: list.memberCount,
-            topProducts: topProducts.slice(0, 3).map(p => ({
+            topProducts: topProducts.slice(0, 3).map((p) => ({
               title: p.title,
               revenue: `$${(p.revenue || 0).toFixed(0)}`,
-              unitsSold: p.unitsSold
+              unitsSold: p.unitsSold,
             })),
-            preferredCategory: this.detectPreferredCategory(topProducts)
+            preferredCategory: this.detectPreferredCategory(topProducts),
           });
         }
       }
-      
+
       return listAnalysis;
     } catch (error) {
-      console.error('Error analyzing products by list:', error);
+      console.error("Error analyzing products by list:", error);
       return [];
     }
   }
@@ -119,33 +136,31 @@ class BusinessContextService {
   /**
    * Obtener top productos para una lista específica
    */
-  async getTopProductsForList(listId, listName) {
-    const Product = getModel('Product');
+  async getTopProductsForList(listId) {
+    const Product = getModel("Product");
     if (!Product) return [];
-    
+
     try {
       const products = await Product.find({
-        'listPerformance.listId': listId,
-        status: 'active'
+        "listPerformance.listId": listId,
+        status: "active",
       })
-      .select('title listPerformance categories')
-      .lean();
-      
-      const productStats = products.map(p => {
-        const listStats = p.listPerformance.find(
-          lp => lp.listId?.toString() === listId.toString()
-        );
+        .select("title listPerformance categories")
+        .lean();
+
+      const productStats = products.map((p) => {
+        const listStats = p.listPerformance.find((lp) => lp.listId?.toString() === listId.toString());
         return {
           title: p.title,
           revenue: listStats?.revenue || 0,
           unitsSold: listStats?.unitsSold || 0,
-          categories: p.categories
+          categories: p.categories,
         };
       });
-      
+
       return productStats.sort((a, b) => b.revenue - a.revenue);
     } catch (e) {
-      console.warn('Error getting top products for list:', e.message);
+      console.warn("Error getting top products for list:", e.message);
       return [];
     }
   }
@@ -157,80 +172,83 @@ class BusinessContextService {
     const categories = {
       gift_sets: 0,
       seasonal: 0,
-      regular: 0
+      regular: 0,
     };
-    
+
     for (const p of products) {
       if (p.categories?.isGiftSet) categories.gift_sets += p.revenue || 0;
       else if (p.categories?.isSeasonal) categories.seasonal += p.revenue || 0;
       else categories.regular += p.revenue || 0;
     }
-    
+
     const max = Math.max(categories.gift_sets, categories.seasonal, categories.regular);
-    
-    if (max === categories.gift_sets && categories.gift_sets > 0) return 'gift_sets';
-    if (max === categories.seasonal && categories.seasonal > 0) return 'seasonal';
-    return 'regular';
+
+    if (max === categories.gift_sets && categories.gift_sets > 0) return "gift_sets";
+    if (max === categories.seasonal && categories.seasonal > 0) return "seasonal";
+    return "regular";
   }
 
   /**
-   * Formatear contexto de negocio para el prompt de Claude
+   * Formatear contexto de negocio para el prompt (texto humano)
+   * Esto lo puedes seguir usando igual tanto en Claude como en GPT.
    */
   formatBusinessContextForPrompt(context) {
-    if (!context) return '';
-    
+    if (!context) return "";
+
     const sections = [];
-    
+
     // === PRODUCTOS ===
     if (context.products) {
       const p = context.products;
-      
+
       // Top selling
       if (p.topSellingProducts?.length > 0) {
         sections.push(`🛒 TOP PRODUCTOS (últimos 30 días):`);
         p.topSellingProducts.forEach((prod, i) => {
-          const stockWarning = prod.isOutOfStock ? '❌ AGOTADO' : (prod.isLowStock ? '⚠️ BAJO' : '');
-          sections.push(`${i + 1}. ${prod.title}: ${prod.revenue} | ${prod.unitsSold} vendidos | Stock: ${prod.inventory} ${stockWarning}`);
+          const stockWarning = prod.isOutOfStock ? "❌ AGOTADO" : prod.isLowStock ? "⚠️ BAJO" : "";
+          sections.push(
+            `${i + 1}. ${prod.title}: ${prod.revenue} | ${prod.unitsSold} vendidos | Stock: ${prod.inventory} ${stockWarning}`
+          );
         });
-        sections.push('');
+        sections.push("");
       }
-      
+
       // Low stock
       if (p.lowStockAlert?.length > 0) {
         sections.push(`⚠️ PRODUCTOS CON BAJO STOCK (necesitan atención):`);
-        p.lowStockAlert.forEach(prod => {
+        p.lowStockAlert.forEach((prod) => {
           sections.push(`• ${prod.title}: ${prod.currentStock} unidades (vendió ${prod.recentSales} en 30 días)`);
         });
-        sections.push('');
+        sections.push("");
       }
-      
+
       // Out of stock
       if (p.outOfStockProducts?.length > 0) {
         sections.push(`❌ PRODUCTOS AGOTADOS (NO PROMOCIONAR):`);
-        p.outOfStockProducts.forEach(prod => {
+        p.outOfStockProducts.forEach((prod) => {
           sections.push(`• ${prod.title} - Revenue previo: $${prod.previousRevenue}`);
         });
-        sections.push('');
+        sections.push("");
       }
-      
+
       // Gift sets
       if (p.giftSetsAvailable?.length > 0) {
         sections.push(`🎁 GIFT SETS DISPONIBLES (buenos para promociones):`);
-        p.giftSetsAvailable.forEach(prod => {
+        p.giftSetsAvailable.forEach((prod) => {
           sections.push(`• ${prod.title}: ${prod.inventory} unidades @ $${prod.price}`);
         });
-        sections.push('');
+        sections.push("");
       }
-      
+
       // Bundles
       if (p.frequentlyBoughtTogether?.length > 0) {
         sections.push(`🔗 PRODUCTOS QUE SE COMPRAN JUNTOS (ideas para bundles):`);
-        p.frequentlyBoughtTogether.forEach(pair => {
-          sections.push(`• ${pair.products.join(' + ')} (${pair.timesBoughtTogether} veces)`);
+        p.frequentlyBoughtTogether.forEach((pair) => {
+          sections.push(`• ${pair.products.join(" + ")} (${pair.timesBoughtTogether} veces)`);
         });
-        sections.push('');
+        sections.push("");
       }
-      
+
       // Inventory summary
       if (p.inventorySummary) {
         sections.push(`📦 RESUMEN DE INVENTARIO:`);
@@ -239,14 +257,14 @@ class BusinessContextService {
         sections.push(`• Valor estimado: ${p.inventorySummary.estimatedValue}`);
         sections.push(`• Productos con bajo stock: ${p.inventorySummary.lowStockCount}`);
         sections.push(`• Productos agotados: ${p.inventorySummary.outOfStockCount}`);
-        sections.push('');
+        sections.push("");
       }
     }
-    
+
     // === CALENDARIO / GOALS ===
     if (context.calendar) {
       const c = context.calendar;
-      
+
       // Revenue goal
       if (c.revenueGoal?.hasGoal) {
         const g = c.revenueGoal;
@@ -256,45 +274,49 @@ class BusinessContextService {
         sections.push(`• Restante: $${g.remaining.toLocaleString()}`);
         sections.push(`• Días restantes: ${g.daysRemaining}`);
         sections.push(`• Necesitas: $${g.dailyNeeded.toLocaleString()}/día`);
-        sections.push(`• Estado: ${g.status === 'achieved' ? '✅ ALCANZADO' : g.status === 'on_track' ? '📈 EN CAMINO' : '⚠️ ' + g.status.toUpperCase()}`);
-        sections.push('');
+        sections.push(
+          `• Estado: ${
+            g.status === "achieved" ? "✅ ALCANZADO" : g.status === "on_track" ? "📈 EN CAMINO" : "⚠️ " + g.status.toUpperCase()
+          }`
+        );
+        sections.push("");
       }
-      
+
       // Active promotions
       if (c.activePromotions?.length > 0) {
         sections.push(`🎟️ PROMOCIONES ACTIVAS:`);
-        c.activePromotions.forEach(promo => {
+        c.activePromotions.forEach((promo) => {
           sections.push(`• ${promo.name} (código: ${promo.discountCode})`);
           sections.push(`  Termina en: ${promo.daysRemaining} días | Canjes: ${promo.redemptionCount} | Revenue: $${promo.revenueGenerated}`);
         });
-        sections.push('');
+        sections.push("");
       }
-      
+
       // Upcoming events
       if (c.upcomingEvents?.length > 0) {
         sections.push(`📆 EVENTOS PRÓXIMOS:`);
-        c.upcomingEvents.forEach(event => {
+        c.upcomingEvents.forEach((event) => {
           sections.push(`• ${event.name}: ${event.date} (en ${event.daysUntil} días)`);
           if (event.keywords?.length > 0) {
-            sections.push(`  Keywords: ${event.keywords.join(', ')}`);
+            sections.push(`  Keywords: ${event.keywords.join(", ")}`);
           }
         });
-        sections.push('');
+        sections.push("");
       }
     }
-    
+
     // === PREFERENCIAS POR LISTA ===
     if (context.listProductPreferences?.length > 0) {
       sections.push(`👥 QUÉ COMPRA CADA LISTA:`);
-      context.listProductPreferences.forEach(list => {
+      context.listProductPreferences.forEach((list) => {
         sections.push(`📋 ${list.listName} (${list.memberCount} miembros):`);
         sections.push(`   Preferencia: ${list.preferredCategory}`);
-        sections.push(`   Top productos: ${list.topProducts.map(p => p.title).join(', ')}`);
+        sections.push(`   Top productos: ${list.topProducts.map((p) => p.title).join(", ")}`);
       });
-      sections.push('');
+      sections.push("");
     }
-    
-    return sections.join('\n');
+
+    return sections.join("\n");
   }
 
   /**
@@ -304,58 +326,54 @@ class BusinessContextService {
     try {
       const businessCalendarService = getBusinessCalendarService();
       const productService = getProductService();
-      
+
       const [revenueGoal, lowStock, upcomingEvents] = await Promise.all([
         businessCalendarService?.getCurrentGoalProgress().catch(() => null),
         productService?.getLowStock(5).catch(() => []),
-        businessCalendarService?.getUpcomingEvents(7).catch(() => [])
+        businessCalendarService?.getUpcomingEvents(7).catch(() => []),
       ]);
-      
+
       const insights = [];
-      
-      // Alerta de revenue goal
+
       if (revenueGoal?.hasGoal) {
-        if (revenueGoal.status === 'critical') {
+        if (revenueGoal.status === "critical") {
           insights.push({
-            type: 'warning',
-            icon: '🚨',
-            message: `Meta mensual en riesgo: ${revenueGoal.percentComplete}% alcanzado, necesitas $${revenueGoal.dailyNeeded}/día`
+            type: "warning",
+            icon: "🚨",
+            message: `Meta mensual en riesgo: ${revenueGoal.percentComplete}% alcanzado, necesitas $${revenueGoal.dailyNeeded}/día`,
           });
-        } else if (revenueGoal.status === 'achieved') {
+        } else if (revenueGoal.status === "achieved") {
           insights.push({
-            type: 'success',
-            icon: '🎉',
-            message: `¡Meta mensual alcanzada! $${revenueGoal.currentAmount.toLocaleString()} de $${revenueGoal.targetAmount.toLocaleString()}`
+            type: "success",
+            icon: "🎉",
+            message: `¡Meta mensual alcanzada! $${revenueGoal.currentAmount.toLocaleString()} de $${revenueGoal.targetAmount.toLocaleString()}`,
           });
         }
       }
-      
-      // Alerta de bajo stock
+
       if (lowStock?.length > 0) {
         insights.push({
-          type: 'warning',
-          icon: '📦',
-          message: `${lowStock.length} productos con bajo stock - revisar inventario`
+          type: "warning",
+          icon: "📦",
+          message: `${lowStock.length} productos con bajo stock - revisar inventario`,
         });
       }
-      
-      // Eventos próximos
+
       if (upcomingEvents?.length > 0) {
         const nextEvent = upcomingEvents[0];
         insights.push({
-          type: 'info',
-          icon: '📅',
-          message: `Próximo evento: ${nextEvent.name} en ${nextEvent.daysUntil} días`
+          type: "info",
+          icon: "📅",
+          message: `Próximo evento: ${nextEvent.name} en ${nextEvent.daysUntil} días`,
         });
       }
-      
+
       return insights;
     } catch (error) {
-      console.error('Error getting quick insights:', error);
+      console.error("Error getting quick insights:", error);
       return [];
     }
   }
 }
 
-// Singleton export
 module.exports = new BusinessContextService();
