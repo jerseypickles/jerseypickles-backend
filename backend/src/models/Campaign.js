@@ -33,12 +33,12 @@ const campaignSchema = new mongoose.Schema({
     ref: 'List'
   },
   
-  status: {
-    type: String,
-    enum: ['draft', 'scheduled', 'sending', 'sent', 'paused', 'failed'],
-    default: 'draft',
-    index: true
-  },
+status: {
+  type: String,
+  enum: ['draft', 'scheduled', 'preparing', 'sending', 'sent', 'paused', 'failed'],  // ✅ Agregado 'preparing'
+  default: 'draft',
+  index: true
+},
   
   scheduledAt: Date,
   sentAt: Date,
