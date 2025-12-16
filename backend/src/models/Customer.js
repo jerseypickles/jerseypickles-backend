@@ -116,7 +116,8 @@ const customerSchema = new mongoose.Schema({
       'black-friday-banner',
       'product-page-bf-widget',
       'website-popup-bf-live',
-      'website-popup-christmas-2025'
+      'website-popup-christmas-2025',
+      'website-popup-shipping-byb'
     ],
     default: 'shopify'
   },
