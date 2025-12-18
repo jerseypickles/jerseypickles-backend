@@ -11,14 +11,14 @@ const POPUP_LIST_CONFIG = {
 };
 
 // ═══════════════════════════════════════════════════════════
-// CHRISTMAS 2025 CONFIGURATION
+// DISCOUNT CONFIGURATION - BUILD YOUR BOX / SHIPPING POPUP
 // ═══════════════════════════════════════════════════════════
 const DISCOUNT_CONFIG = {
-  percentage: '-25.0',           // 25% OFF para Christmas
-  fallbackCode: 'XMAS25',        // Código genérico de fallback
-  codePrefix: 'XMAS',            // Prefijo para códigos únicos
-  campaignName: 'Christmas 2025', // Nombre de la campaña
-  expirationDays: 30             // Días hasta que expire el código
+  percentage: '-15.0',            // 15% OFF máximo
+  fallbackCode: 'PICKLE15',       // Código genérico de fallback
+  codePrefix: 'JP',               // Jersey Pickles prefix
+  campaignName: 'Build Your Box', // Nombre de la campaña
+  expirationDays: 30              // Días hasta que expire el código
 };
 
 // Función para generar código único
@@ -76,16 +76,16 @@ class PopupController {
             }
           }
           
-          // Agregar tag de Christmas si viene del popup de navidad
-          if (source.includes('christmas')) {
-            if (!customer.tags.includes('christmas-2025')) {
-              customer.tags.push('christmas-2025');
+          // Agregar tag basado en source
+          if (source.includes('shipping') || source.includes('byb')) {
+            if (!customer.tags.includes('byb-subscriber')) {
+              customer.tags.push('byb-subscriber');
             }
           }
           
           discountCode = await this.createShopifyDiscount(emailLower);
           customer.popupDiscountCode = discountCode;
-          customer.source = source; // Actualizar source
+          customer.source = source;
           await customer.save();
           
           console.log(`✅ Cliente existente actualizado con código: ${discountCode}`);
@@ -96,8 +96,8 @@ class PopupController {
         
         // Determinar tags basado en source
         const tags = ['popup-subscriber', 'newsletter'];
-        if (source.includes('christmas')) {
-          tags.push('christmas-2025');
+        if (source.includes('shipping') || source.includes('byb')) {
+          tags.push('byb-subscriber');
         }
         
         customer = await Customer.create({
@@ -185,7 +185,7 @@ class PopupController {
         target_selection: 'all',
         allocation_method: 'across',
         value_type: 'percentage',
-        value: DISCOUNT_CONFIG.percentage,  // ← 25% OFF
+        value: DISCOUNT_CONFIG.percentage,  // ← 15% OFF
         customer_selection: 'all',
         once_per_customer: true,
         usage_limit: 1,
@@ -246,10 +246,10 @@ class PopupController {
         }
       });
       
-      // Contar por campaña
-      const christmasSubscribers = await Customer.countDocuments({
+      // Contar por campaña BYB
+      const bybSubscribers = await Customer.countDocuments({
         _id: { $in: list.members },
-        tags: 'christmas-2025'
+        tags: 'byb-subscriber'
       });
       
       const uniqueCodes = await Customer.countDocuments({
@@ -257,7 +257,7 @@ class PopupController {
         popupDiscountCode: { 
           $exists: true, 
           $ne: null, 
-          $nin: ['WELCOME15', 'XMAS25'] // Excluir códigos genéricos
+          $nin: ['WELCOME15', 'PICKLE15'] // Excluir códigos genéricos
         }
       });
       
@@ -293,7 +293,7 @@ class PopupController {
         total,
         thisMonth,
         today,
-        christmasSubscribers, // ← Nuevo: suscriptores de Christmas
+        bybSubscribers,
         uniqueCodes,
         genericCodes: total - uniqueCodes,
         codesUsed: usedCodesSet.size,
@@ -334,10 +334,10 @@ class PopupController {
       
       // Filtro por campaña
       let campaignFilter = {};
-      if (campaign === 'christmas') {
-        campaignFilter = { tags: 'christmas-2025' };
-      } else if (campaign === 'blackfriday') {
-        campaignFilter = { source: { $regex: /black.?friday/i } };
+      if (campaign === 'byb') {
+        campaignFilter = { tags: 'byb-subscriber' };
+      } else if (campaign === 'shipping') {
+        campaignFilter = { source: { $regex: /shipping/i } };
       }
       
       const customers = await Customer.find({
@@ -350,7 +350,7 @@ class PopupController {
       const total = customers.length;
       
       const uniqueCodes = customers.filter(
-        c => c.popupDiscountCode && !['WELCOME15', 'XMAS25'].includes(c.popupDiscountCode)
+        c => c.popupDiscountCode && !['WELCOME15', 'PICKLE15'].includes(c.popupDiscountCode)
       ).length;
       
       const allCodes = customers.map(c => c.popupDiscountCode).filter(Boolean);
