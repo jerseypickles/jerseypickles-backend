@@ -1,11 +1,24 @@
 // backend/src/routes/webhooks.js
-// 📡 COMPLETE WEBHOOK ROUTES - Shopify, Resend, Monitoring, Testing
+// 📡 COMPLETE WEBHOOK ROUTES - Shopify, Resend, Telnyx SMS, Monitoring, Testing
 // ✅ FIXED: Unique opens/clicks counting for accurate rates
+// ✅ NEW: Telnyx SMS webhooks + SMS Revenue Attribution
 const express = require('express');
 const router = express.Router();
 const webhooksController = require('../controllers/webhooksController');
 const { validateShopifyWebhook } = require('../middleware/validateWebhook');
 const { webhookLimiter } = require('../middleware/rateLimiter');
+
+// ==================== SMS IMPORTS ====================
+let smsController = null;
+let SmsSubscriber = null;
+
+try {
+  smsController = require('../controllers/smsController');
+  SmsSubscriber = require('../models/SmsSubscriber');
+  console.log('📱 SMS Controller loaded for webhooks');
+} catch (err) {
+  console.log('⚠️  SMS Controller not available:', err.message);
+}
 
 // Aplicar rate limiter a todos los webhooks
 router.use(webhookLimiter);
@@ -16,12 +29,44 @@ router.use(webhookLimiter);
 router.post('/customers/create', validateShopifyWebhook, webhooksController.customerCreate);
 router.post('/customers/update', validateShopifyWebhook, webhooksController.customerUpdate);
 
-// Order webhooks
-router.post('/orders/create', validateShopifyWebhook, webhooksController.orderCreate);
+// Order webhooks (con atribución SMS)
+router.post('/orders/create', validateShopifyWebhook, async (req, res, next) => {
+  // Primero procesar el webhook normal
+  await webhooksController.orderCreate(req, res, next);
+  
+  // Luego verificar atribución SMS en background
+  if (SmsSubscriber) {
+    setImmediate(async () => {
+      try {
+        const orderData = JSON.parse(req.body.toString());
+        await checkSmsAttribution(orderData);
+      } catch (err) {
+        console.log('⚠️  SMS Attribution check failed:', err.message);
+      }
+    });
+  }
+});
+
 router.post('/orders/update', validateShopifyWebhook, webhooksController.orderUpdate);
 router.post('/orders/fulfilled', validateShopifyWebhook, webhooksController.orderFulfilled);
 router.post('/orders/cancelled', validateShopifyWebhook, webhooksController.orderCancelled);
-router.post('/orders/paid', validateShopifyWebhook, webhooksController.orderPaid);
+
+router.post('/orders/paid', validateShopifyWebhook, async (req, res, next) => {
+  // Primero procesar el webhook normal
+  await webhooksController.orderPaid(req, res, next);
+  
+  // Luego verificar atribución SMS en background (también en paid por si acaso)
+  if (SmsSubscriber) {
+    setImmediate(async () => {
+      try {
+        const orderData = JSON.parse(req.body.toString());
+        await checkSmsAttribution(orderData);
+      } catch (err) {
+        console.log('⚠️  SMS Attribution check failed:', err.message);
+      }
+    });
+  }
+});
 
 // Checkout webhooks (Abandoned Cart Tracking)
 router.post('/checkouts/create', validateShopifyWebhook, webhooksController.checkoutCreate);
@@ -36,6 +81,56 @@ router.post('/products/update', validateShopifyWebhook, webhooksController.produ
 
 // Refund webhooks
 router.post('/refunds/create', validateShopifyWebhook, webhooksController.refundCreate);
+
+// ==================== TELNYX SMS WEBHOOKS ====================
+
+/**
+ * Handler de webhooks de Telnyx SMS
+ * Eventos: message.sent, message.finalized, message.received
+ */
+router.post('/telnyx', async (req, res) => {
+  // Responder inmediatamente (Telnyx requiere respuesta rápida)
+  res.status(200).json({ received: true });
+  
+  if (!smsController) {
+    console.log('⚠️  SMS Controller not available for Telnyx webhook');
+    return;
+  }
+  
+  // Procesar en background
+  setImmediate(async () => {
+    try {
+      const telnyxService = require('../services/telnyxService');
+      const webhookData = telnyxService.processWebhook(req.body);
+      
+      if (!webhookData.valid) {
+        console.log('⚠️  Invalid Telnyx webhook:', webhookData.error);
+        return;
+      }
+      
+      if (webhookData.ignored) {
+        console.log(`📨 Telnyx webhook ignored: ${webhookData.eventType}`);
+        return;
+      }
+      
+      console.log(`📱 Telnyx webhook: ${webhookData.eventType} - ${webhookData.messageId} - ${webhookData.status}`);
+      
+      // Manejar mensaje entrante (STOP para opt-out)
+      if (webhookData.isInbound) {
+        await handleInboundSms(webhookData);
+        return;
+      }
+      
+      // Actualizar estado del SMS saliente
+      if (webhookData.messageId) {
+        await updateSmsStatus(webhookData);
+      }
+      
+    } catch (error) {
+      console.error('❌ Telnyx Webhook Error:', error);
+    }
+  });
+});
 
 // ==================== MONITORING ENDPOINTS ====================
 
@@ -415,6 +510,207 @@ router.post('/resend', async (req, res) => {
     res.status(200).json({ received: true, error: error.message });
   }
 });
+
+// ==================== SMS ATTRIBUTION FUNCTIONS ====================
+
+/**
+ * Verifica atribución SMS en una orden
+ * Busca por código de descuento O por teléfono
+ */
+async function checkSmsAttribution(orderData) {
+  if (!SmsSubscriber) return { attributed: false };
+  
+  try {
+    // 1. Buscar por código de descuento usado
+    const usedDiscountCodes = orderData.discount_codes || [];
+    
+    for (const discount of usedDiscountCodes) {
+      const code = discount.code?.toUpperCase();
+      
+      // Solo buscar códigos que parecen ser nuestros (JP-XXXXX)
+      if (!code || !code.startsWith('JP-')) continue;
+      
+      const subscriber = await SmsSubscriber.findOne({ 
+        discountCode: code 
+      });
+      
+      if (subscriber && !subscriber.converted) {
+        console.log(`🎯 SMS Attribution found! Code: ${code}, Phone: ${subscriber.phone}`);
+        
+        // Registrar conversión
+        await subscriber.recordConversion(orderData);
+        
+        return {
+          attributed: true,
+          method: 'discount_code',
+          subscriberId: subscriber._id,
+          phone: subscriber.phone,
+          discountCode: code,
+          revenue: parseFloat(orderData.total_price || 0)
+        };
+      }
+    }
+
+    // 2. Si no encontramos por código, buscar por teléfono
+    const orderPhone = orderData.phone || 
+                       orderData.customer?.phone || 
+                       orderData.billing_address?.phone ||
+                       orderData.shipping_address?.phone;
+    
+    if (orderPhone) {
+      const formattedPhone = formatPhoneForSearch(orderPhone);
+      
+      if (formattedPhone) {
+        const subscriber = await SmsSubscriber.findOne({ 
+          phone: formattedPhone,
+          status: 'active'
+        });
+        
+        if (subscriber && !subscriber.converted) {
+          // Verificar que el SMS se envió en los últimos 30 días
+          const daysSinceSubscription = (Date.now() - subscriber.subscribedAt) / (1000 * 60 * 60 * 24);
+          
+          if (daysSinceSubscription <= 30) {
+            console.log(`🎯 SMS Attribution by phone! Phone: ${formattedPhone}`);
+            
+            await subscriber.recordConversion(orderData);
+            
+            return {
+              attributed: true,
+              method: 'phone_match',
+              subscriberId: subscriber._id,
+              phone: formattedPhone,
+              discountCode: subscriber.discountCode,
+              revenue: parseFloat(orderData.total_price || 0)
+            };
+          }
+        }
+      }
+    }
+
+    return { attributed: false };
+
+  } catch (error) {
+    console.error('❌ SMS Attribution Error:', error);
+    return { attributed: false, error: error.message };
+  }
+}
+
+/**
+ * Formatea teléfono para búsqueda (E.164)
+ */
+function formatPhoneForSearch(phone) {
+  if (!phone) return null;
+  
+  let cleaned = phone.toString().replace(/[^\d+]/g, '');
+  
+  if (cleaned.startsWith('+1') && cleaned.length === 12) {
+    return cleaned;
+  }
+  
+  if (cleaned.startsWith('+')) {
+    return cleaned.length >= 11 ? cleaned : null;
+  }
+  
+  if (cleaned.startsWith('1') && cleaned.length === 11) {
+    return '+' + cleaned;
+  }
+  
+  if (cleaned.length === 10) {
+    return '+1' + cleaned;
+  }
+  
+  return null;
+}
+
+// ==================== TELNYX SMS HELPER FUNCTIONS ====================
+
+/**
+ * Actualiza el estado de un SMS en la DB
+ */
+async function updateSmsStatus(webhookData) {
+  if (!SmsSubscriber) return;
+  
+  try {
+    // Buscar por messageId en welcomeSmsId
+    let subscriber = await SmsSubscriber.findOne({ 
+      welcomeSmsId: webhookData.messageId 
+    });
+
+    if (subscriber) {
+      subscriber.welcomeSmsStatus = webhookData.status;
+      
+      if (webhookData.status === 'delivered') {
+        subscriber.welcomeSmsDeliveredAt = new Date();
+        subscriber.totalSmsDelivered = (subscriber.totalSmsDelivered || 0) + 1;
+      }
+      
+      if (webhookData.cost) {
+        subscriber.welcomeSmsCost = webhookData.cost;
+      }
+
+      if (webhookData.errors?.length > 0) {
+        subscriber.welcomeSmsError = webhookData.errors[0]?.detail || 'Unknown error';
+      }
+
+      await subscriber.save();
+      console.log(`   ✅ Updated SMS status: ${subscriber.phone} -> ${webhookData.status}`);
+      return;
+    }
+
+    // Buscar en historial de SMS
+    subscriber = await SmsSubscriber.findOne({
+      'smsHistory.messageId': webhookData.messageId
+    });
+
+    if (subscriber) {
+      await subscriber.updateSmsStatus(
+        webhookData.messageId, 
+        webhookData.status,
+        webhookData.status === 'delivered' ? new Date() : null
+      );
+      console.log(`   ✅ Updated SMS history status: ${subscriber.phone} -> ${webhookData.status}`);
+    }
+
+  } catch (error) {
+    console.error('❌ Error updating SMS status:', error);
+  }
+}
+
+/**
+ * Maneja SMS entrantes (opt-out, etc.)
+ */
+async function handleInboundSms(webhookData) {
+  if (!SmsSubscriber) return;
+  
+  try {
+    const fromPhone = formatPhoneForSearch(webhookData.fromPhone);
+    
+    if (!fromPhone) return;
+
+    const subscriber = await SmsSubscriber.findOne({ phone: fromPhone });
+    
+    if (!subscriber) {
+      console.log(`📨 Inbound SMS from unknown number: ${fromPhone}`);
+      return;
+    }
+
+    // Manejar opt-out
+    if (webhookData.isOptOut) {
+      subscriber.status = 'unsubscribed';
+      subscriber.unsubscribedAt = new Date();
+      subscriber.unsubscribeReason = 'SMS STOP';
+      await subscriber.save();
+      
+      console.log(`🚫 Unsubscribed via SMS STOP: ${fromPhone}`);
+    } else {
+      console.log(`📨 Inbound SMS from ${fromPhone}: ${webhookData.text}`);
+    }
+
+  } catch (error) {
+    console.error('❌ Error handling inbound SMS:', error);
+  }
+}
 
 // ==================== BOUNCE & COMPLAINT HANDLERS ====================
 
