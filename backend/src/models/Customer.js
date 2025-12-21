@@ -117,7 +117,8 @@ const customerSchema = new mongoose.Schema({
       'product-page-bf-widget',
       'website-popup-bf-live',
       'website-popup-christmas-2025',
-      'website-popup-shipping-byb'
+      'website-popup-shipping-byb',
+      'website-popup-discount'
     ],
     default: 'shopify'
   },
