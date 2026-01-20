@@ -1,4 +1,4 @@
-// backend/src/controllers/campaignsController.js - OPTIMIZADO v2.0
+// backend/src/controllers/campaignsController.js - OPTIMIZADO v2.1
 // ═══════════════════════════════════════════════════════════════════════════
 // CAMBIOS IMPLEMENTADOS:
 // 1. ✅ Bulk claim preparation (no más claims individuales en worker)
@@ -8,6 +8,7 @@
 // 8. ✅ Concurrency fija (sin cambios en caliente)
 // 9. ✅ Debounce de checkAndFinalizeCampaign
 // 11. ✅ Timers por etapa para debugging
+// 12. ✅ FIX: Ajustar totalRecipients después de deduplicación
 // ═══════════════════════════════════════════════════════════════════════════
 
 const Campaign = require('../models/Campaign');
@@ -519,7 +520,7 @@ class CampaignsController {
     }
   }
 
-  // ==================== ENVÍO DE CAMPAÑA - OPTIMIZADO v2.0 ====================
+  // ==================== ENVÍO DE CAMPAÑA - OPTIMIZADO v2.1 ====================
   
   async send(req, res) {
     try {
@@ -581,7 +582,7 @@ class CampaignsController {
         });
       }
       
-      console.log(`👥 Total destinatarios: ${totalRecipients.toLocaleString()}`);
+      console.log(`👥 Total destinatarios (estimado): ${totalRecipients.toLocaleString()}`);
       
       // Configuración adaptativa
       const config = getOptimalConfig(totalRecipients);
@@ -590,7 +591,7 @@ class CampaignsController {
       console.log(`   Batch sizes: cursor=${config.cursorBatch}, bulk=${config.bulkWriteBatch}`);
       
       // ========== PASO 2: Cambiar estado a "preparing" ==========
-      campaign.status = 'preparing';  // ← NUEVO ESTADO
+      campaign.status = 'preparing';
       campaign.stats.totalRecipients = totalRecipients;
       campaign.stats.sent = 0;
       campaign.stats.delivered = 0;
@@ -599,7 +600,6 @@ class CampaignsController {
       await campaign.save();
       
       // ========== PASO 3: Responder inmediatamente ==========
-      // Con 10 req/s y batch de 100: ~1000 emails/s teórico, ~600-800 real
       const estimatedSeconds = Math.ceil(totalRecipients / 600);
       const estimatedMinutes = Math.ceil(estimatedSeconds / 60);
       
@@ -636,10 +636,10 @@ class CampaignsController {
       
       setImmediate(async () => {
         console.log('╔════════════════════════════════════════════════╗');
-        console.log('║  📥 BACKGROUND - PREPARACIÓN OPTIMIZADA v2.0   ║');
+        console.log('║  📥 BACKGROUND - PREPARACIÓN OPTIMIZADA v2.1   ║');
         console.log('╚════════════════════════════════════════════════╝');
         console.log(`   Modo: ${config.name}`);
-        console.log(`   Cambios: Bulk claim, Estados, Debounce, Timers`);
+        console.log(`   Cambios: Bulk claim, Estados, Debounce, Timers, Fix duplicados`);
         console.log('════════════════════════════════════════════════\n');
         
         // Resetear tracker de batches
@@ -766,7 +766,7 @@ class CampaignsController {
               from: `${fromName} <${fromEmail}>`,
               replyTo: replyTo,
               customerId: customer._id.toString(),
-              jobId: jobId  // ← Incluimos jobId para bulk claim en worker
+              jobId: jobId
             });
             
             // ========== BATCH WRITE A MONGODB ==========
@@ -875,11 +875,20 @@ class CampaignsController {
           
           timer.end('residual_operations');
           
-          // ========== CAMBIO #3: Cambiar estado a "sending" ==========
+          // ═══════════════════════════════════════════════════════════════════
+          // ✅ CAMBIO #12: Ajustar totalRecipients después de deduplicación
+          // Este es el FIX principal - sin esto, checkAndFinalizeCampaign
+          // nunca puede completar porque totalProcessed < totalRecipients
+          // ═══════════════════════════════════════════════════════════════════
+          const actualRecipients = processedCount - skippedDuplicates;
+          
           await Campaign.findByIdAndUpdate(campaignId, {
             status: 'sending',
-            sentAt: new Date()
+            sentAt: new Date(),
+            'stats.totalRecipients': actualRecipients  // ← FIX: Ajustar al número real
           });
+          
+          console.log(`\n   📊 Recipients ajustados: ${processedCount} → ${actualRecipients} (${skippedDuplicates} duplicados omitidos)`);
           
           // ========== RESUMEN FINAL ==========
           const duration = ((Date.now() - timer.startTime) / 1000).toFixed(2);
@@ -890,6 +899,7 @@ class CampaignsController {
           console.log('║  ✅ PREPARACIÓN COMPLETADA                     ║');
           console.log('╚════════════════════════════════════════════════╝');
           console.log(`   Total procesados: ${processedCount.toLocaleString()}`);
+          console.log(`   Recipients reales: ${actualRecipients.toLocaleString()}`);
           console.log(`   EmailSend creados: ${createdEmailSends.toLocaleString()}`);
           console.log(`   Duplicados omitidos: ${skippedDuplicates.toLocaleString()}`);
           console.log(`   BulkWrites ejecutados: ${bulkWriteCount}`);
@@ -1549,7 +1559,6 @@ class CampaignsController {
       const pendingJobs = await EmailSend.countDocuments({ status: 'pending' });
       const processingJobs = await EmailSend.countDocuments({ status: 'processing' });
       
-      // ✅ CAMBIO #2: TTL lock detection (5 min = 300000ms)
       const LOCK_TTL_MS = 5 * 60 * 1000;
       const stuckJobs = await EmailSend.countDocuments({
         status: 'processing',
@@ -1581,13 +1590,14 @@ class CampaignsController {
           sending: sendingCampaigns
         },
         config: {
-          mode: 'OPTIMIZED v2.0',
+          mode: 'OPTIMIZED v2.1',
           features: [
             'Bulk claim (1 query/batch)',
             'TTL locks (5 min)',
             'Estados: preparing → sending',
             'Debounce finalize',
-            'Timers por etapa'
+            'Timers por etapa',
+            'Fix: totalRecipients ajustado post-deduplicación'
           ],
           resend: {
             rateLimit: '10 req/s',
