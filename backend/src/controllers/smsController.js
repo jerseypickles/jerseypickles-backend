@@ -121,7 +121,9 @@ const smsController = {
         subscriber.welcomeSmsMessageId = smsResult.messageId;
         subscriber.welcomeSmsStatus = smsResult.status || 'sent';
         subscriber.carrier = smsResult.carrier;
-        subscriber.lineType = smsResult.lineType?.toLowerCase() || 'mobile';
+        // Map Telnyx lineType to model enum values
+        const lineTypeMap = { 'wireless': 'mobile', 'mobile': 'mobile', 'landline': 'landline', 'voip': 'voip' };
+        subscriber.lineType = lineTypeMap[smsResult.lineType?.toLowerCase()] || 'unknown';
         subscriber.totalSmsSent = 1;
         console.log(`✅ Welcome SMS sent to ${formattedPhone} - ID: ${smsResult.messageId}`);
       } else {
