@@ -1,5 +1,5 @@
 // backend/src/controllers/webhooksController.js
-// 📡 COMPLETE WEBHOOK CONTROLLER WITH LOGGING & MONITORING
+// 📡 COMPLETE WEBHOOK CONTROLLER WITH LOGGING, MONITORING & SMS CONVERSION TRACKING
 const Customer = require('../models/Customer');
 const Order = require('../models/Order');
 const EmailEvent = require('../models/EmailEvent');
@@ -8,6 +8,9 @@ const Campaign = require('../models/Campaign');
 const WebhookLog = require('../models/WebhookLog');
 const AttributionService = require('../middleware/attributionTracking');
 const crypto = require('crypto');
+
+// SMS Conversion Service
+const smsConversionService = require('../services/smsConversionService');
 
 // Store for tracking abandoned carts (in production, use Redis)
 const abandonedCartTracker = new Map();
@@ -365,6 +368,48 @@ class WebhooksController {
       
       console.log('✅ Orden creada en DB:', order.orderNumber);
       
+      // ==================== SMS CONVERSION TRACKING ====================
+      try {
+        if (shopifyOrder.discount_codes && shopifyOrder.discount_codes.length > 0) {
+          console.log(`\n📱 -------- SMS CONVERSION CHECK --------`);
+          console.log(`   Discount codes used: ${shopifyOrder.discount_codes.map(d => d.code).join(', ')}`);
+          
+          const conversionResult = await smsConversionService.processOrderConversion(shopifyOrder);
+          
+          if (conversionResult.converted) {
+            console.log(`   ✅ SMS Conversion tracked!`);
+            console.log(`   Codes processed: ${conversionResult.codesProcessed}`);
+            console.log(`   Successful: ${conversionResult.successfulConversions}`);
+            
+            actions.push({
+              type: 'sms_conversion_tracked',
+              details: {
+                codesProcessed: conversionResult.codesProcessed,
+                successfulConversions: conversionResult.successfulConversions,
+                results: conversionResult.results?.map(r => ({
+                  code: r.code,
+                  success: r.success,
+                  orderTotal: r.orderTotal,
+                  timeToConvert: r.timeToConvert
+                }))
+              },
+              success: true
+            });
+          } else {
+            console.log(`   ℹ️  No SMS codes found: ${conversionResult.reason || 'N/A'}`);
+          }
+          console.log(`   ------------------------------------\n`);
+        }
+      } catch (smsError) {
+        console.log(`   ⚠️  SMS conversion tracking skipped: ${smsError.message}`);
+        actions.push({
+          type: 'sms_conversion_tracking',
+          details: { error: smsError.message },
+          success: false
+        });
+      }
+      // ==================== END SMS CONVERSION TRACKING ====================
+      
       // ==================== CANCEL ABANDONED CART TRACKING ====================
       const checkoutToken = shopifyOrder.checkout_token;
       
@@ -435,9 +480,14 @@ class WebhooksController {
         }
       }
       
-      // Método 3: Discount code attribution
+      // Método 3: Discount code attribution (for email campaigns)
       if (!campaignId && !flowId && shopifyOrder.discount_codes?.length > 0) {
         for (const discount of shopifyOrder.discount_codes) {
+          // Skip SMS codes (JP-XXXXX) for campaign attribution
+          if (discount.code.toUpperCase().startsWith('JP-')) {
+            continue;
+          }
+          
           const campaignWithCode = await Campaign.findOne({
             discountCode: discount.code,
             status: 'sent'
