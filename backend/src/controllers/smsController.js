@@ -94,18 +94,15 @@ const smsController = {
       // Crear subscriber
       subscriber = new SmsSubscriber({
         phone: formattedPhone,
-        phoneFormatted: telnyxService.formatForDisplay(formattedPhone),
+        phoneFormatted: telnyxService.formatForDisplay ? telnyxService.formatForDisplay(formattedPhone) : formattedPhone,
         discountCode,
         discountPercent: 15,
-        status: 'pending',
+        status: 'active',
         source: normalizedSource,
-        sourceUrl: sourceUrl || pageUrl || req.headers['referer'],
-        deviceType: deviceType || 'unknown',
-        tcpaConsent: consent !== false,
-        tcpaConsentAt: consentTimestamp ? new Date(consentTimestamp) : new Date(),
-        tcpaConsentIp: req.ip || req.headers['x-forwarded-for']?.split(',')[0],
         shopifyPriceRuleId: shopifyDiscount?.priceRuleId || null,
-        shopifyDiscountId: shopifyDiscount?.discountId || null
+        shopifyDiscountCodeId: shopifyDiscount?.discountId || null,
+        ipAddress: req.ip || req.headers['x-forwarded-for']?.split(',')[0],
+        userAgent: req.headers['user-agent']
       });
 
       await subscriber.save();
@@ -122,10 +119,9 @@ const smsController = {
         subscriber.welcomeSmsSent = true;
         subscriber.welcomeSmsSentAt = new Date();
         subscriber.welcomeSmsMessageId = smsResult.messageId;
-        subscriber.welcomeSmsStatus = smsResult.status || 'queued';
+        subscriber.welcomeSmsStatus = smsResult.status || 'sent';
         subscriber.carrier = smsResult.carrier;
-        subscriber.lineType = smsResult.lineType?.toLowerCase() || 'unknown';
-        subscriber.status = 'active';
+        subscriber.lineType = smsResult.lineType?.toLowerCase() || 'mobile';
         subscriber.totalSmsSent = 1;
         console.log(`✅ Welcome SMS sent to ${formattedPhone} - ID: ${smsResult.messageId}`);
       } else {
