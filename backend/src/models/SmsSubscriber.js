@@ -46,10 +46,10 @@ const smsSubscriberSchema = new mongoose.Schema({
   unsubscribeReason: String,
   
   // ==================== ORIGEN ====================
-  welcomeSmsStatus: {
+  source: {
     type: String,
-    enum: ['pending', 'queued', 'sending', 'sent', 'delivered', 'failed', 'undelivered', 'delivery_failed', 'delivery_unconfirmed'],
-    default: 'pending'
+    enum: ['popup', 'checkout', 'manual', 'import', 'landing_page', 'website-popup-sms', 'api', 'test'],
+    default: 'popup'
   },
   sourceUrl: String,           // URL donde se suscribió
   sourceCampaign: String,      // UTM campaign si aplica
@@ -68,7 +68,7 @@ const smsSubscriberSchema = new mongoose.Schema({
   welcomeSmsId: String,         // Telnyx message ID
   welcomeSmsStatus: {
     type: String,
-    enum: ['pending', 'queued', 'sending', 'sent', 'delivered', 'failed', 'undelivered'],
+    enum: ['pending', 'queued', 'sending', 'sent', 'delivered', 'failed', 'undelivered', 'delivery_failed', 'delivery_unconfirmed'],
     default: 'pending'
   },
   welcomeSmsDeliveredAt: Date,
