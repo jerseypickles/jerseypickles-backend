@@ -6,7 +6,7 @@ class TelnyxService {
     this.apiKey = process.env.TELNYX_API_KEY;
     this.messagingProfileId = process.env.TELNYX_MESSAGING_PROFILE_ID;
     this.fromNumber = process.env.TELNYX_FROM_NUMBER; // +1XXXXXXXXXX
-    this.webhookUrl = process.env.TELNYX_WEBHOOK_URL; // https://tubackend.com/api/webhooks/telnyx
+    this.webhookUrl = process.env.TELNYX_WEBHOOK_URL; // https://jerseypickles-backend.onrender.com/api/webhooks/telnyx
     
     this.baseUrl = 'https://api.telnyx.com/v2';
     
@@ -19,18 +19,18 @@ class TelnyxService {
     });
   }
 
-  // ==================== ENVIAR SMS ====================
+  // ==================== SEND SMS ====================
   
   /**
-   * Envía un SMS
-   * @param {string} to - Número destino en formato E.164 (+1XXXXXXXXXX)
-   * @param {string} text - Contenido del mensaje
-   * @param {object} options - Opciones adicionales
-   * @returns {object} - Respuesta de Telnyx
+   * Send an SMS
+   * @param {string} to - Destination number in E.164 format (+1XXXXXXXXXX)
+   * @param {string} text - Message content
+   * @param {object} options - Additional options
+   * @returns {object} - Telnyx response
    */
   async sendSms(to, text, options = {}) {
     try {
-      // Validar número
+      // Validate number
       const formattedTo = this.formatPhoneNumber(to);
       if (!formattedTo) {
         throw new Error('Invalid phone number format');
@@ -45,7 +45,7 @@ class TelnyxService {
         webhook_failover_url: this.webhookUrl
       };
 
-      // Agregar opciones extras si existen
+      // Add extra options if they exist
       if (options.mediaUrls) {
         payload.media_urls = options.mediaUrls;
         payload.type = 'MMS';
@@ -84,25 +84,25 @@ class TelnyxService {
   // ==================== SMS TEMPLATES ====================
   
   /**
-   * Envía SMS de bienvenida con código de descuento
+   * Send welcome SMS with discount code
    */
   async sendWelcomeSms(to, discountCode, discountPercent = 15) {
-    const text = `🥒 Jersey Pickles: Gracias por suscribirte! Tu código exclusivo: ${discountCode} para ${discountPercent}% OFF. Úsalo en jerseypickles.com - Reply STOP to opt out`;
+    const text = `🥒 Jersey Pickles: Thanks for joining our VIP Text Club! Your exclusive code: ${discountCode} for ${discountPercent}% OFF your order. Shop now: jerseypickles.com - Reply STOP to opt out`;
     
     return this.sendSms(to, text, { type: 'welcome' });
   }
 
   /**
-   * Envía SMS de abandoned cart
+   * Send abandoned cart SMS
    */
   async sendAbandonedCartSms(to, cartValue, discountCode) {
-    const text = `🥒 Jersey Pickles: Tu carrito de $${cartValue.toFixed(2)} te espera! Usa ${discountCode} para completar tu pedido con descuento. jerseypickles.com/cart - Reply STOP to opt out`;
+    const text = `🥒 Jersey Pickles: Your $${cartValue.toFixed(2)} cart is waiting! Use code ${discountCode} to complete your order with a special discount. Shop: jerseypickles.com/cart - Reply STOP to opt out`;
     
     return this.sendSms(to, text, { type: 'abandoned_cart' });
   }
 
   /**
-   * Envía SMS promocional
+   * Send promotional SMS
    */
   async sendPromoSms(to, message) {
     const text = `🥒 Jersey Pickles: ${message} - Reply STOP to opt out`;
@@ -110,10 +110,37 @@ class TelnyxService {
     return this.sendSms(to, text, { type: 'promo' });
   }
 
-  // ==================== VERIFICAR NÚMERO ====================
+  /**
+   * Send order confirmation SMS
+   */
+  async sendOrderConfirmationSms(to, orderNumber, orderTotal) {
+    const text = `🥒 Jersey Pickles: Thanks for your order #${orderNumber}! Total: $${orderTotal.toFixed(2)}. We'll notify you when it ships. Questions? Reply to this text! - Reply STOP to opt out`;
+    
+    return this.sendSms(to, text, { type: 'order_update' });
+  }
+
+  /**
+   * Send shipping notification SMS
+   */
+  async sendShippingNotificationSms(to, orderNumber, trackingUrl) {
+    const text = `🥒 Jersey Pickles: Great news! Order #${orderNumber} has shipped! Track it here: ${trackingUrl} - Reply STOP to opt out`;
+    
+    return this.sendSms(to, text, { type: 'order_update' });
+  }
+
+  /**
+   * Send back in stock SMS
+   */
+  async sendBackInStockSms(to, productName) {
+    const text = `🥒 Jersey Pickles: ${productName} is back in stock! Get yours before it sells out again: jerseypickles.com - Reply STOP to opt out`;
+    
+    return this.sendSms(to, text, { type: 'promo' });
+  }
+
+  // ==================== NUMBER VERIFICATION ====================
   
   /**
-   * Lookup de número para validar y obtener info del carrier
+   * Number lookup to validate and get carrier info
    */
   async lookupNumber(phoneNumber) {
     try {
@@ -143,10 +170,10 @@ class TelnyxService {
     }
   }
 
-  // ==================== OBTENER ESTADO DE MENSAJE ====================
+  // ==================== GET MESSAGE STATUS ====================
   
   /**
-   * Obtiene el estado actual de un mensaje
+   * Get current status of a message
    */
   async getMessageStatus(messageId) {
     try {
@@ -176,12 +203,12 @@ class TelnyxService {
     }
   }
 
-  // ==================== PROCESAR WEBHOOK ====================
+  // ==================== PROCESS WEBHOOK ====================
   
   /**
-   * Procesa los webhooks de Telnyx
-   * @param {object} payload - Body del webhook
-   * @returns {object} - Datos procesados
+   * Process Telnyx webhooks
+   * @param {object} payload - Webhook body
+   * @returns {object} - Processed data
    */
   processWebhook(payload) {
     const data = payload?.data;
@@ -193,7 +220,7 @@ class TelnyxService {
     const eventType = data.event_type;
     const messageData = data.payload;
 
-    // Eventos que nos interesan
+    // Events we care about
     const relevantEvents = [
       'message.sent',
       'message.finalized',
@@ -221,48 +248,52 @@ class TelnyxService {
       errors: messageData?.errors || []
     };
 
-    // Manejar mensaje entrante (ej: STOP para unsubscribe)
+    // Handle inbound message (e.g., STOP for unsubscribe)
     if (eventType === 'message.received') {
       result.isInbound = true;
       result.fromPhone = messageData?.from?.phone_number;
       result.toPhone = messageData?.to?.[0]?.phone_number;
       
-      // Detectar opt-out
+      // Detect opt-out
       const text = (messageData?.text || '').toLowerCase().trim();
       const optOutKeywords = ['stop', 'unsubscribe', 'cancel', 'quit', 'end'];
       result.isOptOut = optOutKeywords.includes(text);
+      
+      // Detect help request
+      const helpKeywords = ['help', 'info'];
+      result.isHelpRequest = helpKeywords.includes(text);
     }
 
     return result;
   }
 
-  // ==================== UTILIDADES ====================
+  // ==================== UTILITIES ====================
   
   /**
-   * Formatea número a E.164
+   * Format number to E.164
    */
   formatPhoneNumber(phone) {
     if (!phone) return null;
     
-    // Limpiar todo excepto números y +
+    // Clean everything except numbers and +
     let cleaned = phone.toString().replace(/[^\d+]/g, '');
     
-    // Si ya tiene +1, está bien
+    // If it already has +1, it's good
     if (cleaned.startsWith('+1') && cleaned.length === 12) {
       return cleaned;
     }
     
-    // Si tiene +, verificar formato
+    // If it has +, verify format
     if (cleaned.startsWith('+')) {
       return cleaned.length >= 11 ? cleaned : null;
     }
     
-    // Si empieza con 1 y tiene 11 dígitos
+    // If it starts with 1 and has 11 digits
     if (cleaned.startsWith('1') && cleaned.length === 11) {
       return '+' + cleaned;
     }
     
-    // Si tiene 10 dígitos (USA sin código de país)
+    // If it has 10 digits (USA without country code)
     if (cleaned.length === 10) {
       return '+1' + cleaned;
     }
@@ -271,7 +302,7 @@ class TelnyxService {
   }
 
   /**
-   * Formatea número para display
+   * Format number for display
    */
   formatForDisplay(phone) {
     const cleaned = this.formatPhoneNumber(phone);
@@ -287,17 +318,17 @@ class TelnyxService {
   }
 
   /**
-   * Valida si es número móvil (básico)
+   * Validate if it's a mobile number (basic)
    */
   isValidMobileNumber(phone) {
     const formatted = this.formatPhoneNumber(phone);
     return formatted && formatted.length === 12;
   }
 
-  // ==================== BULK SEND (para campañas) ====================
+  // ==================== BULK SEND (for campaigns) ====================
   
   /**
-   * Envía SMS en bulk con rate limiting
+   * Send SMS in bulk with rate limiting
    */
   async sendBulkSms(recipients, text, options = {}) {
     const results = {
@@ -307,7 +338,7 @@ class TelnyxService {
       errors: []
     };
 
-    const delay = options.delayMs || 100; // 100ms entre mensajes = 10/seg
+    const delay = options.delayMs || 100; // 100ms between messages = 10/sec
 
     for (const recipient of recipients) {
       try {
@@ -338,11 +369,40 @@ class TelnyxService {
     return results;
   }
 
+  // ==================== AUTO RESPONSES ====================
+  
+  /**
+   * Send STOP confirmation (required by 10DLC)
+   */
+  async sendStopConfirmation(to) {
+    const text = `Jersey Pickles: You have been unsubscribed and will no longer receive messages from us. Reply START to resubscribe.`;
+    
+    return this.sendSms(to, text, { type: 'system' });
+  }
+
+  /**
+   * Send HELP response (required by 10DLC)
+   */
+  async sendHelpResponse(to) {
+    const text = `Jersey Pickles: For help, contact support@jerseypickles.com or call (551) 400-9394. Msg&data rates may apply. Reply STOP to opt out.`;
+    
+    return this.sendSms(to, text, { type: 'system' });
+  }
+
+  /**
+   * Send START confirmation (resubscribe)
+   */
+  async sendStartConfirmation(to) {
+    const text = `🥒 Jersey Pickles: Welcome back! You're now subscribed to our VIP Text Club. Reply STOP to opt out anytime.`;
+    
+    return this.sendSms(to, text, { type: 'system' });
+  }
+
   // ==================== HEALTH CHECK ====================
   
   async healthCheck() {
     try {
-      // Verificar que podemos hacer requests
+      // Verify we can make requests
       const response = await this.axios.get('/messaging_profiles');
       
       return {
