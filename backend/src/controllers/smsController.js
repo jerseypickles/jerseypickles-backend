@@ -73,7 +73,7 @@ const smsController = {
       // ========== NUEVO SUSCRIPTOR ==========
       
       // Generar código de descuento único
-      const discountCode = await SmsSubscriber.generateDiscountCode();
+      const discountCode = await generateDiscountCode();
       console.log(`🎟️  Generated discount code: ${discountCode}`);
       
       // Crear código en Shopify
@@ -85,7 +85,6 @@ const smsController = {
         }
       } catch (err) {
         console.error('⚠️  Error creating Shopify discount:', err.message);
-        // Continuamos sin el código de Shopify - el código igual funcionará si se crea manualmente
       }
 
       // Normalizar source para que sea válido en el enum
@@ -122,9 +121,8 @@ const smsController = {
       if (smsResult.success) {
         subscriber.welcomeSmsSent = true;
         subscriber.welcomeSmsSentAt = new Date();
-        subscriber.welcomeSmsId = smsResult.messageId;
+        subscriber.welcomeSmsMessageId = smsResult.messageId;
         subscriber.welcomeSmsStatus = smsResult.status || 'queued';
-        subscriber.welcomeSmsCost = smsResult.cost;
         subscriber.carrier = smsResult.carrier;
         subscriber.lineType = smsResult.lineType?.toLowerCase() || 'unknown';
         subscriber.status = 'active';
@@ -205,11 +203,10 @@ const smsController = {
 
     } catch (error) {
       console.error('❌ Telnyx Webhook Error:', error);
-      // Ya respondimos 200, solo logueamos
     }
   },
 
-  // ==================== ESTADÍSTICAS ====================
+  // ==================== ESTADÍSTICAS GENERALES ====================
   
   /**
    * GET /api/sms/stats
@@ -217,32 +214,50 @@ const smsController = {
    */
   async getStats(req, res) {
     try {
-      const { startDate, endDate } = req.query;
-      
-      const dateRange = {};
-      if (startDate) dateRange.start = startDate;
-      if (endDate) dateRange.end = endDate;
+      // Conteos básicos
+      const [total, active, unsubscribed, converted] = await Promise.all([
+        SmsSubscriber.countDocuments(),
+        SmsSubscriber.countDocuments({ status: 'active' }),
+        SmsSubscriber.countDocuments({ status: 'unsubscribed' }),
+        SmsSubscriber.countDocuments({ converted: true })
+      ]);
 
-      const stats = await SmsSubscriber.getStats(dateRange);
-      const dailyStats = await SmsSubscriber.getDailyStats(30);
+      // SMS delivery stats
+      const deliveryStats = await SmsSubscriber.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalSmsSent: { $sum: '$totalSmsSent' },
+            totalSmsDelivered: { $sum: '$totalSmsDelivered' },
+            totalSmsFailed: { $sum: '$totalSmsFailed' }
+          }
+        }
+      ]);
 
-      // Calcular algunas métricas adicionales
+      const delivery = deliveryStats[0] || { totalSmsSent: 0, totalSmsDelivered: 0, totalSmsFailed: 0 };
+
+      // Subscribers últimas 24h
       const recentSubscribers = await SmsSubscriber.countDocuments({
         createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
       });
 
+      // Pending delivery
       const pendingDelivery = await SmsSubscriber.countDocuments({
         welcomeSmsStatus: { $in: ['pending', 'queued', 'sending', 'sent'] }
       });
 
       res.json({
         success: true,
-        stats: {
-          ...stats,
-          recentSubscribers24h: recentSubscribers,
-          pendingDelivery
-        },
-        dailyStats
+        total,
+        active,
+        unsubscribed,
+        converted,
+        conversionRate: total > 0 ? ((converted / total) * 100).toFixed(1) : 0,
+        totalSmsSent: delivery.totalSmsSent || 0,
+        totalSmsDelivered: delivery.totalSmsDelivered || 0,
+        totalSmsFailed: delivery.totalSmsFailed || 0,
+        recentSubscribers24h: recentSubscribers,
+        pendingDelivery
       });
 
     } catch (error) {
@@ -250,6 +265,116 @@ const smsController = {
       res.status(500).json({
         success: false,
         error: 'Error getting statistics'
+      });
+    }
+  },
+
+  // ==================== 🆕 ESTADÍSTICAS DE CONVERSIONES ====================
+  
+  /**
+   * GET /api/sms/stats/conversions
+   * Obtiene estadísticas detalladas de conversiones
+   */
+  async getConversionStats(req, res) {
+    try {
+      const { from, to } = req.query;
+      
+      // Build date filter
+      const dateFilter = {};
+      if (from) dateFilter.$gte = new Date(from);
+      if (to) dateFilter.$lte = new Date(to);
+      
+      const matchStage = { converted: true };
+      if (Object.keys(dateFilter).length > 0) {
+        matchStage['conversionData.convertedAt'] = dateFilter;
+      }
+
+      // Get totals
+      const totalSubscribers = await SmsSubscriber.countDocuments();
+      const convertedSubscribers = await SmsSubscriber.countDocuments(matchStage);
+      
+      // Revenue aggregation
+      const revenueAgg = await SmsSubscriber.aggregate([
+        { $match: matchStage },
+        {
+          $group: {
+            _id: null,
+            totalRevenue: { $sum: '$conversionData.orderTotal' },
+            totalDiscountGiven: { $sum: '$conversionData.discountAmount' },
+            avgOrderValue: { $avg: '$conversionData.orderTotal' },
+            avgTimeToConvert: { $avg: '$conversionData.timeToConvert' },
+            totalOrders: { $sum: 1 }
+          }
+        }
+      ]);
+
+      const revenue = revenueAgg[0] || {
+        totalRevenue: 0,
+        totalDiscountGiven: 0,
+        avgOrderValue: 0,
+        avgTimeToConvert: 0,
+        totalOrders: 0
+      };
+
+      // Get recent conversions
+      const recentConversions = await SmsSubscriber.find({ converted: true })
+        .sort({ 'conversionData.convertedAt': -1 })
+        .limit(20)
+        .select('phone discountCode conversionData')
+        .lean();
+
+      // Format recent conversions for frontend
+      const formattedConversions = recentConversions.map(sub => ({
+        phone: sub.phone,
+        discountCode: sub.discountCode,
+        orderId: sub.conversionData?.orderId,
+        orderNumber: sub.conversionData?.orderNumber,
+        orderTotal: sub.conversionData?.orderTotal || 0,
+        discountAmount: sub.conversionData?.discountAmount || 0,
+        convertedAt: sub.conversionData?.convertedAt,
+        timeToConvert: sub.conversionData?.timeToConvert
+      }));
+
+      // Calculate ROI (simplified: revenue / estimated SMS cost)
+      const estimatedSmsCost = totalSubscribers * 0.015; // ~$0.015 per SMS
+      const roi = estimatedSmsCost > 0 
+        ? (((revenue.totalRevenue - estimatedSmsCost) / estimatedSmsCost) * 100).toFixed(0)
+        : 0;
+
+      // Format avg time to convert
+      let avgTimeFormatted = 'N/A';
+      if (revenue.avgTimeToConvert) {
+        const mins = Math.round(revenue.avgTimeToConvert);
+        if (mins < 60) {
+          avgTimeFormatted = `${mins} min`;
+        } else if (mins < 1440) {
+          avgTimeFormatted = `${Math.round(mins / 60)} hours`;
+        } else {
+          avgTimeFormatted = `${Math.round(mins / 1440)} days`;
+        }
+      }
+
+      res.json({
+        success: true,
+        totalSubscribers,
+        convertedSubscribers,
+        conversionRate: totalSubscribers > 0 
+          ? ((convertedSubscribers / totalSubscribers) * 100).toFixed(1)
+          : 0,
+        totalRevenue: revenue.totalRevenue || 0,
+        totalDiscountGiven: revenue.totalDiscountGiven || 0,
+        avgOrderValue: revenue.avgOrderValue || 0,
+        avgTimeToConvert: avgTimeFormatted,
+        avgTimeToConvertMinutes: revenue.avgTimeToConvert || 0,
+        roi: parseInt(roi) || 0,
+        recentConversions: formattedConversions
+      });
+
+    } catch (error) {
+      console.error('❌ Conversion Stats Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error getting conversion statistics'
       });
     }
   },
@@ -264,7 +389,7 @@ const smsController = {
     try {
       const {
         page = 1,
-        limit = 50,
+        limit = 20,
         status,
         converted,
         search,
@@ -274,35 +399,40 @@ const smsController = {
 
       const query = {};
       
-      if (status) query.status = status;
-      if (converted !== undefined) query.converted = converted === 'true';
+      if (status && status !== 'all') {
+        query.status = status;
+      }
+      
+      if (converted !== undefined && converted !== 'all') {
+        query.converted = converted === 'true';
+      }
+      
       if (search) {
         query.$or = [
           { phone: { $regex: search, $options: 'i' } },
-          { discountCode: { $regex: search, $options: 'i' } }
+          { discountCode: { $regex: search.toUpperCase(), $options: 'i' } }
         ];
       }
 
       const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+      const skip = (parseInt(page) - 1) * parseInt(limit);
 
       const [subscribers, total] = await Promise.all([
         SmsSubscriber.find(query)
           .sort(sort)
-          .skip((page - 1) * limit)
+          .skip(skip)
           .limit(parseInt(limit))
-          .select('-smsHistory'),
+          .lean(),
         SmsSubscriber.countDocuments(query)
       ]);
 
       res.json({
         success: true,
         subscribers,
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total,
-          pages: Math.ceil(total / limit)
-        }
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(total / parseInt(limit))
       });
 
     } catch (error) {
@@ -374,15 +504,8 @@ const smsController = {
       );
 
       if (smsResult.success) {
-        subscriber.totalSmsSent += 1;
+        subscriber.totalSmsSent = (subscriber.totalSmsSent || 0) + 1;
         subscriber.lastSmsAt = new Date();
-        subscriber.addSmsToHistory({
-          messageId: smsResult.messageId,
-          type: 'welcome',
-          content: `Code: ${subscriber.discountCode}`,
-          status: smsResult.status,
-          cost: smsResult.cost
-        });
         await subscriber.save();
       }
 
@@ -408,11 +531,23 @@ const smsController = {
    */
   async healthCheck(req, res) {
     try {
-      const telnyxHealth = await telnyxService.healthCheck();
+      let telnyxHealthy = false;
+      let telnyxError = null;
       
+      try {
+        const health = await telnyxService.healthCheck();
+        telnyxHealthy = health?.healthy || health?.success || true;
+      } catch (e) {
+        telnyxError = e.message;
+      }
+
       res.json({
         success: true,
-        telnyx: telnyxHealth,
+        healthy: telnyxHealthy,
+        telnyx: {
+          connected: telnyxHealthy,
+          error: telnyxError
+        },
         shopify: shopifyService ? 'connected' : 'not available',
         database: 'connected'
       });
@@ -420,6 +555,7 @@ const smsController = {
     } catch (error) {
       res.status(500).json({
         success: false,
+        healthy: false,
         error: error.message
       });
     }
@@ -429,16 +565,37 @@ const smsController = {
 // ==================== FUNCIONES AUXILIARES ====================
 
 /**
- * Crea código de descuento en Shopify usando los métodos existentes
+ * Genera código de descuento único JP-XXXXX
+ */
+async function generateDiscountCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Sin I, O, 0, 1 para evitar confusión
+  let code;
+  let exists = true;
+  
+  while (exists) {
+    let random = '';
+    for (let i = 0; i < 5; i++) {
+      random += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    code = `JP-${random}`;
+    
+    // Verificar que no exista
+    const existing = await SmsSubscriber.findOne({ discountCode: code });
+    exists = !!existing;
+  }
+  
+  return code;
+}
+
+/**
+ * Crea código de descuento en Shopify
  */
 async function createShopifyDiscountCode(code, percentOff) {
-  // Verificar que shopifyService esté disponible
   if (!shopifyService) {
     console.log('⚠️  Shopify service not available - skipping discount creation');
     return null;
   }
   
-  // Verificar que tenga los métodos necesarios
   if (typeof shopifyService.createPriceRule !== 'function' || 
       typeof shopifyService.createDiscountCode !== 'function') {
     console.log('⚠️  Shopify service missing required methods - skipping discount creation');
@@ -446,11 +603,9 @@ async function createShopifyDiscountCode(code, percentOff) {
   }
   
   try {
-    // Calcular fecha de expiración (30 días)
     const endsAt = new Date();
     endsAt.setDate(endsAt.getDate() + 30);
     
-    // 1. Crear Price Rule
     const priceRule = await shopifyService.createPriceRule({
       title: `SMS Welcome - ${code}`,
       target_type: 'line_item',
@@ -470,7 +625,6 @@ async function createShopifyDiscountCode(code, percentOff) {
       return null;
     }
     
-    // 2. Crear Discount Code
     const discountCodeResult = await shopifyService.createDiscountCode(priceRule.id, code);
     
     if (!discountCodeResult || !discountCodeResult.id) {
@@ -485,12 +639,9 @@ async function createShopifyDiscountCode(code, percentOff) {
     
   } catch (error) {
     console.error('❌ Error creating Shopify discount:', error.message);
-    
-    // Log específico para errores de permisos
     if (error.response?.status === 403) {
       console.error('⚠️  PERMISSION ERROR: Access Token needs write_price_rules scope');
     }
-    
     return null;
   }
 }
@@ -500,21 +651,15 @@ async function createShopifyDiscountCode(code, percentOff) {
  */
 async function updateSmsStatus(webhookData) {
   try {
-    // Buscar por messageId en welcomeSmsId
     let subscriber = await SmsSubscriber.findOne({ 
-      welcomeSmsId: webhookData.messageId 
+      welcomeSmsMessageId: webhookData.messageId 
     });
 
     if (subscriber) {
       subscriber.welcomeSmsStatus = webhookData.status;
       
       if (webhookData.status === 'delivered') {
-        subscriber.welcomeSmsDeliveredAt = new Date();
         subscriber.totalSmsDelivered = (subscriber.totalSmsDelivered || 0) + 1;
-      }
-      
-      if (webhookData.cost) {
-        subscriber.welcomeSmsCost = webhookData.cost;
       }
 
       if (webhookData.errors?.length > 0) {
@@ -523,21 +668,6 @@ async function updateSmsStatus(webhookData) {
 
       await subscriber.save();
       console.log(`✅ Updated SMS status: ${subscriber.phone} -> ${webhookData.status}`);
-      return;
-    }
-
-    // Buscar en historial de SMS
-    subscriber = await SmsSubscriber.findOne({
-      'smsHistory.messageId': webhookData.messageId
-    });
-
-    if (subscriber) {
-      await subscriber.updateSmsStatus(
-        webhookData.messageId, 
-        webhookData.status,
-        webhookData.status === 'delivered' ? new Date() : null
-      );
-      console.log(`✅ Updated SMS history status: ${subscriber.phone} -> ${webhookData.status}`);
     }
 
   } catch (error) {
@@ -551,7 +681,6 @@ async function updateSmsStatus(webhookData) {
 async function handleInboundSms(webhookData) {
   try {
     const fromPhone = telnyxService.formatPhoneNumber(webhookData.fromPhone);
-    
     if (!fromPhone) return;
 
     const subscriber = await SmsSubscriber.findOne({ phone: fromPhone });
@@ -561,26 +690,40 @@ async function handleInboundSms(webhookData) {
       return;
     }
 
-    // Manejar opt-out (STOP, UNSUBSCRIBE, etc.)
-    if (webhookData.isOptOut) {
+    const text = (webhookData.text || '').toLowerCase().trim();
+    const stopKeywords = ['stop', 'unsubscribe', 'cancel', 'quit', 'end'];
+    const startKeywords = ['start', 'yes', 'unstop'];
+
+    if (stopKeywords.includes(text)) {
       subscriber.status = 'unsubscribed';
       subscriber.unsubscribedAt = new Date();
-      subscriber.unsubscribeReason = 'SMS STOP';
+      subscriber.unsubscribeReason = 'stop_keyword';
       await subscriber.save();
-      
       console.log(`🚫 Unsubscribed via SMS STOP: ${fromPhone}`);
       
-      // Enviar confirmación de opt-out
       try {
         await telnyxService.sendSms(fromPhone, 
-          'Jersey Pickles: You have been unsubscribed and will receive no further messages. Reply START to resubscribe.'
+          'Jersey Pickles: You have been unsubscribed. Reply START to resubscribe.'
         );
       } catch (e) {
         console.log('⚠️  Could not send opt-out confirmation');
       }
+    } else if (startKeywords.includes(text) && subscriber.status === 'unsubscribed') {
+      subscriber.status = 'active';
+      subscriber.unsubscribedAt = null;
+      subscriber.unsubscribeReason = null;
+      await subscriber.save();
+      console.log(`✅ Re-subscribed via SMS START: ${fromPhone}`);
+      
+      try {
+        await telnyxService.sendSms(fromPhone, 
+          `Jersey Pickles: Welcome back! Your discount code is ${subscriber.discountCode} for 15% off.`
+        );
+      } catch (e) {
+        console.log('⚠️  Could not send re-subscribe confirmation');
+      }
     } else {
       console.log(`📨 Inbound SMS from ${fromPhone}: ${webhookData.text}`);
-      // Aquí podrías manejar otros tipos de respuestas como HELP, START, etc.
     }
 
   } catch (error) {

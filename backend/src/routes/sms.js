@@ -1,45 +1,33 @@
 // backend/src/routes/sms.js
+// 📱 SMS Routes - VIP Text Club
 const express = require('express');
 const router = express.Router();
 const smsController = require('../controllers/smsController');
+const { authMiddleware } = require('../middleware/auth');
 
-// Intentar cargar middleware de auth (opcional)
-let protect = null;
-try {
-  const authMiddleware = require('../middleware/auth');
-  protect = authMiddleware.protect;
-} catch (e) {
-  console.log('⚠️  Auth middleware not available for SMS routes');
-}
+// ==================== PUBLIC ROUTES (No auth required) ====================
 
-// Middleware opcional - si no hay auth, permite acceso
-const optionalProtect = (req, res, next) => {
-  if (protect) {
-    return protect(req, res, next);
-  }
-  next();
-};
-
-// ==================== RUTAS PÚBLICAS ====================
-
-// Health check de Telnyx
-router.get('/health', smsController.healthCheck);
-
-// Suscribir nuevo número (desde popup)
+// Subscribe new phone number (from website popup)
 router.post('/subscribe', smsController.subscribe);
 
-// ==================== RUTAS PROTEGIDAS (Admin Dashboard) ====================
+// Health check (can be public for monitoring)
+router.get('/health', smsController.healthCheck);
 
-// Estadísticas generales
-router.get('/stats', optionalProtect, smsController.getStats);
+// ==================== PROTECTED ROUTES (Auth required) ====================
 
-// Listar suscriptores
-router.get('/subscribers', optionalProtect, smsController.getSubscribers);
+// Get general SMS stats
+router.get('/stats', authMiddleware, smsController.getStats);
 
-// Detalle de suscriptor
-router.get('/subscribers/:id', optionalProtect, smsController.getSubscriber);
+// 🆕 Get conversion stats (for dashboard)
+router.get('/stats/conversions', authMiddleware, smsController.getConversionStats);
 
-// Reenviar SMS de bienvenida
-router.post('/subscribers/:id/resend', optionalProtect, smsController.resendWelcomeSms);
+// Get all subscribers with pagination
+router.get('/subscribers', authMiddleware, smsController.getSubscribers);
+
+// Get single subscriber
+router.get('/subscribers/:id', authMiddleware, smsController.getSubscriber);
+
+// Resend welcome SMS
+router.post('/subscribers/:id/resend', authMiddleware, smsController.resendWelcomeSms);
 
 module.exports = router;
