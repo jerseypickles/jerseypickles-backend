@@ -46,10 +46,10 @@ const smsSubscriberSchema = new mongoose.Schema({
   unsubscribeReason: String,
   
   // ==================== ORIGEN ====================
-  source: {
+  welcomeSmsStatus: {
     type: String,
-    enum: ['popup', 'checkout', 'manual', 'import', 'landing_page', 'website-popup-sms', 'api', 'test'],
-    default: 'popup'
+    enum: ['pending', 'queued', 'sending', 'sent', 'delivered', 'failed', 'undelivered', 'delivery_failed', 'delivery_unconfirmed'],
+    default: 'pending'
   },
   sourceUrl: String,           // URL donde se suscribió
   sourceCampaign: String,      // UTM campaign si aplica
