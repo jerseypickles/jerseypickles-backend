@@ -1,7 +1,8 @@
 // backend/src/routes/webhooks.js
 // 📡 COMPLETE WEBHOOK ROUTES - Shopify, Resend, Telnyx SMS, Monitoring, Testing
 // ✅ FIXED: Unique opens/clicks counting for accurate rates
-// ✅ NEW: Telnyx SMS webhooks + SMS Revenue Attribution
+// ✅ FIXED: Removed duplicate SMS attribution (now in webhooksController)
+// ✅ FIXED: Removed JSON.parse error on req.body
 const express = require('express');
 const router = express.Router();
 const webhooksController = require('../controllers/webhooksController');
@@ -29,44 +30,12 @@ router.use(webhookLimiter);
 router.post('/customers/create', validateShopifyWebhook, webhooksController.customerCreate);
 router.post('/customers/update', validateShopifyWebhook, webhooksController.customerUpdate);
 
-// Order webhooks (con atribución SMS)
-router.post('/orders/create', validateShopifyWebhook, async (req, res, next) => {
-  // Primero procesar el webhook normal
-  await webhooksController.orderCreate(req, res, next);
-  
-  // Luego verificar atribución SMS en background
-  if (SmsSubscriber) {
-    setImmediate(async () => {
-      try {
-        const orderData = JSON.parse(req.body.toString());
-        await checkSmsAttribution(orderData);
-      } catch (err) {
-        console.log('⚠️  SMS Attribution check failed:', err.message);
-      }
-    });
-  }
-});
-
+// Order webhooks (SMS attribution is now handled inside webhooksController.orderCreate)
+router.post('/orders/create', validateShopifyWebhook, webhooksController.orderCreate);
 router.post('/orders/update', validateShopifyWebhook, webhooksController.orderUpdate);
 router.post('/orders/fulfilled', validateShopifyWebhook, webhooksController.orderFulfilled);
 router.post('/orders/cancelled', validateShopifyWebhook, webhooksController.orderCancelled);
-
-router.post('/orders/paid', validateShopifyWebhook, async (req, res, next) => {
-  // Primero procesar el webhook normal
-  await webhooksController.orderPaid(req, res, next);
-  
-  // Luego verificar atribución SMS en background (también en paid por si acaso)
-  if (SmsSubscriber) {
-    setImmediate(async () => {
-      try {
-        const orderData = JSON.parse(req.body.toString());
-        await checkSmsAttribution(orderData);
-      } catch (err) {
-        console.log('⚠️  SMS Attribution check failed:', err.message);
-      }
-    });
-  }
-});
+router.post('/orders/paid', validateShopifyWebhook, webhooksController.orderPaid);
 
 // Checkout webhooks (Abandoned Cart Tracking)
 router.post('/checkouts/create', validateShopifyWebhook, webhooksController.checkoutCreate);
@@ -511,90 +480,7 @@ router.post('/resend', async (req, res) => {
   }
 });
 
-// ==================== SMS ATTRIBUTION FUNCTIONS ====================
-
-/**
- * Verifica atribución SMS en una orden
- * Busca por código de descuento O por teléfono
- */
-async function checkSmsAttribution(orderData) {
-  if (!SmsSubscriber) return { attributed: false };
-  
-  try {
-    // 1. Buscar por código de descuento usado
-    const usedDiscountCodes = orderData.discount_codes || [];
-    
-    for (const discount of usedDiscountCodes) {
-      const code = discount.code?.toUpperCase();
-      
-      // Solo buscar códigos que parecen ser nuestros (JP-XXXXX)
-      if (!code || !code.startsWith('JP-')) continue;
-      
-      const subscriber = await SmsSubscriber.findOne({ 
-        discountCode: code 
-      });
-      
-      if (subscriber && !subscriber.converted) {
-        console.log(`🎯 SMS Attribution found! Code: ${code}, Phone: ${subscriber.phone}`);
-        
-        // Registrar conversión
-        await subscriber.recordConversion(orderData);
-        
-        return {
-          attributed: true,
-          method: 'discount_code',
-          subscriberId: subscriber._id,
-          phone: subscriber.phone,
-          discountCode: code,
-          revenue: parseFloat(orderData.total_price || 0)
-        };
-      }
-    }
-
-    // 2. Si no encontramos por código, buscar por teléfono
-    const orderPhone = orderData.phone || 
-                       orderData.customer?.phone || 
-                       orderData.billing_address?.phone ||
-                       orderData.shipping_address?.phone;
-    
-    if (orderPhone) {
-      const formattedPhone = formatPhoneForSearch(orderPhone);
-      
-      if (formattedPhone) {
-        const subscriber = await SmsSubscriber.findOne({ 
-          phone: formattedPhone,
-          status: 'active'
-        });
-        
-        if (subscriber && !subscriber.converted) {
-          // Verificar que el SMS se envió en los últimos 30 días
-          const daysSinceSubscription = (Date.now() - subscriber.subscribedAt) / (1000 * 60 * 60 * 24);
-          
-          if (daysSinceSubscription <= 30) {
-            console.log(`🎯 SMS Attribution by phone! Phone: ${formattedPhone}`);
-            
-            await subscriber.recordConversion(orderData);
-            
-            return {
-              attributed: true,
-              method: 'phone_match',
-              subscriberId: subscriber._id,
-              phone: formattedPhone,
-              discountCode: subscriber.discountCode,
-              revenue: parseFloat(orderData.total_price || 0)
-            };
-          }
-        }
-      }
-    }
-
-    return { attributed: false };
-
-  } catch (error) {
-    console.error('❌ SMS Attribution Error:', error);
-    return { attributed: false, error: error.message };
-  }
-}
+// ==================== TELNYX SMS HELPER FUNCTIONS ====================
 
 /**
  * Formatea teléfono para búsqueda (E.164)
@@ -623,8 +509,6 @@ function formatPhoneForSearch(phone) {
   return null;
 }
 
-// ==================== TELNYX SMS HELPER FUNCTIONS ====================
-
 /**
  * Actualiza el estado de un SMS en la DB
  */
@@ -632,21 +516,17 @@ async function updateSmsStatus(webhookData) {
   if (!SmsSubscriber) return;
   
   try {
-    // Buscar por messageId en welcomeSmsId
+    // Buscar por messageId en welcomeSmsMessageId
     let subscriber = await SmsSubscriber.findOne({ 
-      welcomeSmsId: webhookData.messageId 
+      welcomeSmsMessageId: webhookData.messageId 
     });
 
     if (subscriber) {
       subscriber.welcomeSmsStatus = webhookData.status;
       
       if (webhookData.status === 'delivered') {
-        subscriber.welcomeSmsDeliveredAt = new Date();
+        subscriber.welcomeSmsSentAt = subscriber.welcomeSmsSentAt || new Date();
         subscriber.totalSmsDelivered = (subscriber.totalSmsDelivered || 0) + 1;
-      }
-      
-      if (webhookData.cost) {
-        subscriber.welcomeSmsCost = webhookData.cost;
       }
 
       if (webhookData.errors?.length > 0) {
@@ -656,20 +536,6 @@ async function updateSmsStatus(webhookData) {
       await subscriber.save();
       console.log(`   ✅ Updated SMS status: ${subscriber.phone} -> ${webhookData.status}`);
       return;
-    }
-
-    // Buscar en historial de SMS
-    subscriber = await SmsSubscriber.findOne({
-      'smsHistory.messageId': webhookData.messageId
-    });
-
-    if (subscriber) {
-      await subscriber.updateSmsStatus(
-        webhookData.messageId, 
-        webhookData.status,
-        webhookData.status === 'delivered' ? new Date() : null
-      );
-      console.log(`   ✅ Updated SMS history status: ${subscriber.phone} -> ${webhookData.status}`);
     }
 
   } catch (error) {
@@ -695,14 +561,55 @@ async function handleInboundSms(webhookData) {
       return;
     }
 
-    // Manejar opt-out
-    if (webhookData.isOptOut) {
+    // Manejar opt-out keywords
+    const text = (webhookData.text || '').toLowerCase().trim();
+    const optOutKeywords = ['stop', 'unsubscribe', 'cancel', 'quit', 'end'];
+    const optInKeywords = ['start', 'yes', 'unstop'];
+    
+    if (optOutKeywords.includes(text)) {
       subscriber.status = 'unsubscribed';
       subscriber.unsubscribedAt = new Date();
-      subscriber.unsubscribeReason = 'SMS STOP';
+      subscriber.unsubscribeReason = 'stop_keyword';
       await subscriber.save();
       
       console.log(`🚫 Unsubscribed via SMS STOP: ${fromPhone}`);
+      
+      // Enviar confirmación de opt-out
+      try {
+        const telnyxService = require('../services/telnyxService');
+        await telnyxService.sendStopConfirmation(fromPhone);
+      } catch (e) {
+        console.log('Could not send STOP confirmation:', e.message);
+      }
+      
+    } else if (optInKeywords.includes(text)) {
+      // Re-subscribe
+      if (subscriber.status === 'unsubscribed') {
+        subscriber.status = 'active';
+        subscriber.unsubscribedAt = null;
+        subscriber.unsubscribeReason = null;
+        await subscriber.save();
+        
+        console.log(`✅ Re-subscribed via SMS START: ${fromPhone}`);
+        
+        // Enviar confirmación
+        try {
+          const telnyxService = require('../services/telnyxService');
+          await telnyxService.sendStartConfirmation(fromPhone);
+        } catch (e) {
+          console.log('Could not send START confirmation:', e.message);
+        }
+      }
+      
+    } else if (text === 'help' || text === 'info') {
+      // Enviar mensaje de ayuda
+      try {
+        const telnyxService = require('../services/telnyxService');
+        await telnyxService.sendHelpResponse(fromPhone);
+      } catch (e) {
+        console.log('Could not send HELP response:', e.message);
+      }
+      
     } else {
       console.log(`📨 Inbound SMS from ${fromPhone}: ${webhookData.text}`);
     }
