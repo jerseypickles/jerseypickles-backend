@@ -463,6 +463,46 @@ class ShopifyService {
       return { success: false, error: error.message };
     }
   }
+// ✅ Crear descuento completo para SMS (Price Rule + Discount Code)
+async createSmsDiscount(code, percentOff = 15, expirationDays = 30) {
+  try {
+    const endsAt = new Date();
+    endsAt.setDate(endsAt.getDate() + expirationDays);
+    
+    // 1. Crear Price Rule
+    const priceRule = await this.createPriceRule({
+      title: `SMS Welcome - ${code}`,
+      target_type: 'line_item',
+      target_selection: 'all',
+      allocation_method: 'across',
+      value_type: 'percentage',
+      value: `-${percentOff}`,
+      customer_selection: 'all',
+      usage_limit: 1,
+      once_per_customer: true,
+      starts_at: new Date().toISOString(),
+      ends_at: endsAt.toISOString()
+    });
+    
+    // 2. Crear Discount Code
+    const discountCode = await this.createDiscountCode(priceRule.id, code);
+    
+    return {
+      success: true,
+      priceRuleId: priceRule.id.toString(),
+      discountCodeId: discountCode.id.toString(),
+      code: code
+    };
+    
+  } catch (error) {
+    console.error('❌ Error creating SMS discount:', error.message);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+  }
 }
+
 
 module.exports = new ShopifyService();

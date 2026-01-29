@@ -1,7 +1,15 @@
 // backend/src/controllers/smsController.js
 const SmsSubscriber = require('../models/SmsSubscriber');
 const telnyxService = require('../services/telnyxService');
-const shopifyService = require('../services/shopifyService'); // Tu servicio existente
+
+// Cargar shopifyService de forma segura
+let shopifyService = null;
+try {
+  shopifyService = require('../services/shopifyService');
+  console.log('📱 SMS Controller: Shopify service loaded');
+} catch (e) {
+  console.log('⚠️  SMS Controller: Shopify service not available');
+}
 
 const smsController = {
   // ==================== SUSCRIBIR NUEVO NÚMERO ====================
@@ -12,14 +20,14 @@ const smsController = {
    */
   async subscribe(req, res) {
     try {
-      const { phone, source = 'popup', sourceUrl, deviceType } = req.body;
+      const { phone, source = 'popup', sourceUrl, deviceType, consent, consentTimestamp, pageUrl } = req.body;
 
       // Validar teléfono
       const formattedPhone = telnyxService.formatPhoneNumber(phone);
       if (!formattedPhone) {
         return res.status(400).json({
           success: false,
-          error: 'Número de teléfono inválido'
+          error: 'Invalid phone number. Please enter a valid 10-digit US phone number.'
         });
       }
 
@@ -27,11 +35,12 @@ const smsController = {
       let subscriber = await SmsSubscriber.findOne({ phone: formattedPhone });
       
       if (subscriber) {
-        // Si ya existe y está activo
+        // Si ya existe y está activo - devolver código existente
         if (subscriber.status === 'active') {
-          return res.status(400).json({
-            success: false,
-            error: 'Este número ya está suscrito',
+          return res.json({
+            success: true,
+            message: 'You are already subscribed!',
+            discountCode: subscriber.discountCode,
             alreadySubscribed: true
           });
         }
@@ -41,40 +50,67 @@ const smsController = {
           subscriber.status = 'active';
           subscriber.subscribedAt = new Date();
           subscriber.unsubscribedAt = null;
+          subscriber.unsubscribeReason = null;
           await subscriber.save();
+          
+          // Enviar SMS de bienvenida de nuevo
+          const smsResult = await telnyxService.sendWelcomeSms(
+            formattedPhone,
+            subscriber.discountCode,
+            subscriber.discountPercent
+          );
+          
+          return res.json({
+            success: true,
+            message: 'Welcome back! Check your phone for your discount code.',
+            discountCode: subscriber.discountCode,
+            resubscribed: true,
+            smsSent: smsResult.success
+          });
         }
-      } else {
-        // Generar código de descuento único
-        const discountCode = await SmsSubscriber.generateDiscountCode();
-        
-        // Crear código en Shopify
-        let shopifyDiscount = null;
-        try {
-          shopifyDiscount = await createShopifyDiscountCode(discountCode, 15);
-        } catch (err) {
-          console.error('⚠️ Error creating Shopify discount:', err.message);
-          // Continuamos sin el código de Shopify
-        }
-
-        // Crear subscriber
-        subscriber = new SmsSubscriber({
-          phone: formattedPhone,
-          phoneFormatted: telnyxService.formatForDisplay(formattedPhone),
-          discountCode,
-          discountPercent: 15,
-          status: 'pending',
-          source,
-          sourceUrl,
-          deviceType: deviceType || 'unknown',
-          tcpaConsent: true,
-          tcpaConsentAt: new Date(),
-          tcpaConsentIp: req.ip || req.headers['x-forwarded-for'],
-          shopifyPriceRuleId: shopifyDiscount?.priceRuleId,
-          shopifyDiscountId: shopifyDiscount?.discountId
-        });
-
-        await subscriber.save();
       }
+      
+      // ========== NUEVO SUSCRIPTOR ==========
+      
+      // Generar código de descuento único
+      const discountCode = await SmsSubscriber.generateDiscountCode();
+      console.log(`🎟️  Generated discount code: ${discountCode}`);
+      
+      // Crear código en Shopify
+      let shopifyDiscount = null;
+      try {
+        shopifyDiscount = await createShopifyDiscountCode(discountCode, 15);
+        if (shopifyDiscount) {
+          console.log(`✅ Shopify discount created: ${discountCode}`);
+        }
+      } catch (err) {
+        console.error('⚠️  Error creating Shopify discount:', err.message);
+        // Continuamos sin el código de Shopify - el código igual funcionará si se crea manualmente
+      }
+
+      // Normalizar source para que sea válido en el enum
+      const validSources = ['popup', 'checkout', 'manual', 'import', 'landing_page', 'website-popup-sms', 'api', 'test'];
+      const normalizedSource = validSources.includes(source) ? source : 'popup';
+
+      // Crear subscriber
+      subscriber = new SmsSubscriber({
+        phone: formattedPhone,
+        phoneFormatted: telnyxService.formatForDisplay(formattedPhone),
+        discountCode,
+        discountPercent: 15,
+        status: 'pending',
+        source: normalizedSource,
+        sourceUrl: sourceUrl || pageUrl || req.headers['referer'],
+        deviceType: deviceType || 'unknown',
+        tcpaConsent: consent !== false,
+        tcpaConsentAt: consentTimestamp ? new Date(consentTimestamp) : new Date(),
+        tcpaConsentIp: req.ip || req.headers['x-forwarded-for']?.split(',')[0],
+        shopifyPriceRuleId: shopifyDiscount?.priceRuleId || null,
+        shopifyDiscountId: shopifyDiscount?.discountId || null
+      });
+
+      await subscriber.save();
+      console.log(`📱 New SMS subscriber created: ${formattedPhone}`);
 
       // Enviar SMS de bienvenida
       const smsResult = await telnyxService.sendWelcomeSms(
@@ -87,27 +123,27 @@ const smsController = {
         subscriber.welcomeSmsSent = true;
         subscriber.welcomeSmsSentAt = new Date();
         subscriber.welcomeSmsId = smsResult.messageId;
-        subscriber.welcomeSmsStatus = smsResult.status;
+        subscriber.welcomeSmsStatus = smsResult.status || 'queued';
         subscriber.welcomeSmsCost = smsResult.cost;
         subscriber.carrier = smsResult.carrier;
         subscriber.lineType = smsResult.lineType?.toLowerCase() || 'unknown';
         subscriber.status = 'active';
         subscriber.totalSmsSent = 1;
+        console.log(`✅ Welcome SMS sent to ${formattedPhone} - ID: ${smsResult.messageId}`);
       } else {
         subscriber.welcomeSmsStatus = 'failed';
         subscriber.welcomeSmsError = smsResult.error;
         subscriber.status = 'invalid';
+        console.log(`❌ Welcome SMS failed to ${formattedPhone}: ${smsResult.error}`);
       }
 
       await subscriber.save();
 
-      console.log(`📱 New SMS subscriber: ${formattedPhone} - Code: ${subscriber.discountCode}`);
-
       res.status(201).json({
         success: true,
         message: smsResult.success 
-          ? '¡Código enviado! Revisa tu teléfono.' 
-          : 'Suscrito pero hubo un error enviando el SMS',
+          ? 'Success! Check your phone for your discount code.' 
+          : 'Subscribed but there was an error sending the SMS. Please try again.',
         discountCode: subscriber.discountCode,
         smsSent: smsResult.success,
         smsError: smsResult.error
@@ -115,9 +151,18 @@ const smsController = {
 
     } catch (error) {
       console.error('❌ SMS Subscribe Error:', error);
+      
+      // Error de duplicado
+      if (error.code === 11000) {
+        return res.status(400).json({
+          success: false,
+          error: 'This phone number is already subscribed.'
+        });
+      }
+      
       res.status(500).json({
         success: false,
-        error: 'Error al procesar la suscripción'
+        error: 'An error occurred. Please try again.'
       });
     }
   },
@@ -204,7 +249,7 @@ const smsController = {
       console.error('❌ SMS Stats Error:', error);
       res.status(500).json({
         success: false,
-        error: 'Error al obtener estadísticas'
+        error: 'Error getting statistics'
       });
     }
   },
@@ -264,7 +309,7 @@ const smsController = {
       console.error('❌ Get Subscribers Error:', error);
       res.status(500).json({
         success: false,
-        error: 'Error al obtener suscriptores'
+        error: 'Error getting subscribers'
       });
     }
   },
@@ -281,7 +326,7 @@ const smsController = {
       if (!subscriber) {
         return res.status(404).json({
           success: false,
-          error: 'Suscriptor no encontrado'
+          error: 'Subscriber not found'
         });
       }
 
@@ -294,7 +339,7 @@ const smsController = {
       console.error('❌ Get Subscriber Error:', error);
       res.status(500).json({
         success: false,
-        error: 'Error al obtener suscriptor'
+        error: 'Error getting subscriber'
       });
     }
   },
@@ -311,14 +356,14 @@ const smsController = {
       if (!subscriber) {
         return res.status(404).json({
           success: false,
-          error: 'Suscriptor no encontrado'
+          error: 'Subscriber not found'
         });
       }
 
       if (subscriber.status !== 'active') {
         return res.status(400).json({
           success: false,
-          error: 'El suscriptor no está activo'
+          error: 'Subscriber is not active'
         });
       }
 
@@ -334,7 +379,7 @@ const smsController = {
         subscriber.addSmsToHistory({
           messageId: smsResult.messageId,
           type: 'welcome',
-          content: `Código: ${subscriber.discountCode}`,
+          content: `Code: ${subscriber.discountCode}`,
           status: smsResult.status,
           cost: smsResult.cost
         });
@@ -343,7 +388,7 @@ const smsController = {
 
       res.json({
         success: smsResult.success,
-        message: smsResult.success ? 'SMS reenviado' : 'Error al reenviar',
+        message: smsResult.success ? 'SMS resent successfully' : 'Error resending SMS',
         error: smsResult.error
       });
 
@@ -351,7 +396,7 @@ const smsController = {
       console.error('❌ Resend SMS Error:', error);
       res.status(500).json({
         success: false,
-        error: 'Error al reenviar SMS'
+        error: 'Error resending SMS'
       });
     }
   },
@@ -368,6 +413,7 @@ const smsController = {
       res.json({
         success: true,
         telnyx: telnyxHealth,
+        shopify: shopifyService ? 'connected' : 'not available',
         database: 'connected'
       });
 
@@ -381,6 +427,73 @@ const smsController = {
 };
 
 // ==================== FUNCIONES AUXILIARES ====================
+
+/**
+ * Crea código de descuento en Shopify usando los métodos existentes
+ */
+async function createShopifyDiscountCode(code, percentOff) {
+  // Verificar que shopifyService esté disponible
+  if (!shopifyService) {
+    console.log('⚠️  Shopify service not available - skipping discount creation');
+    return null;
+  }
+  
+  // Verificar que tenga los métodos necesarios
+  if (typeof shopifyService.createPriceRule !== 'function' || 
+      typeof shopifyService.createDiscountCode !== 'function') {
+    console.log('⚠️  Shopify service missing required methods - skipping discount creation');
+    return null;
+  }
+  
+  try {
+    // Calcular fecha de expiración (30 días)
+    const endsAt = new Date();
+    endsAt.setDate(endsAt.getDate() + 30);
+    
+    // 1. Crear Price Rule
+    const priceRule = await shopifyService.createPriceRule({
+      title: `SMS Welcome - ${code}`,
+      target_type: 'line_item',
+      target_selection: 'all',
+      allocation_method: 'across',
+      value_type: 'percentage',
+      value: `-${percentOff}`,
+      customer_selection: 'all',
+      usage_limit: 1,
+      once_per_customer: true,
+      starts_at: new Date().toISOString(),
+      ends_at: endsAt.toISOString()
+    });
+    
+    if (!priceRule || !priceRule.id) {
+      console.log('⚠️  Failed to create price rule');
+      return null;
+    }
+    
+    // 2. Crear Discount Code
+    const discountCodeResult = await shopifyService.createDiscountCode(priceRule.id, code);
+    
+    if (!discountCodeResult || !discountCodeResult.id) {
+      console.log('⚠️  Failed to create discount code');
+      return null;
+    }
+    
+    return {
+      priceRuleId: priceRule.id.toString(),
+      discountId: discountCodeResult.id.toString()
+    };
+    
+  } catch (error) {
+    console.error('❌ Error creating Shopify discount:', error.message);
+    
+    // Log específico para errores de permisos
+    if (error.response?.status === 403) {
+      console.error('⚠️  PERMISSION ERROR: Access Token needs write_price_rules scope');
+    }
+    
+    return null;
+  }
+}
 
 /**
  * Actualiza el estado de un SMS en la DB
@@ -448,7 +561,7 @@ async function handleInboundSms(webhookData) {
       return;
     }
 
-    // Manejar opt-out
+    // Manejar opt-out (STOP, UNSUBSCRIBE, etc.)
     if (webhookData.isOptOut) {
       subscriber.status = 'unsubscribed';
       subscriber.unsubscribedAt = new Date();
@@ -457,59 +570,21 @@ async function handleInboundSms(webhookData) {
       
       console.log(`🚫 Unsubscribed via SMS STOP: ${fromPhone}`);
       
-      // Opcional: Enviar confirmación de opt-out
-      // await telnyxService.sendSms(fromPhone, 'You have been unsubscribed from Jersey Pickles SMS. You will not receive any more messages.');
+      // Enviar confirmación de opt-out
+      try {
+        await telnyxService.sendSms(fromPhone, 
+          'Jersey Pickles: You have been unsubscribed and will receive no further messages. Reply START to resubscribe.'
+        );
+      } catch (e) {
+        console.log('⚠️  Could not send opt-out confirmation');
+      }
     } else {
       console.log(`📨 Inbound SMS from ${fromPhone}: ${webhookData.text}`);
-      // Aquí podrías manejar otros tipos de respuestas
+      // Aquí podrías manejar otros tipos de respuestas como HELP, START, etc.
     }
 
   } catch (error) {
     console.error('❌ Error handling inbound SMS:', error);
-  }
-}
-
-/**
- * Crea código de descuento en Shopify
- */
-async function createShopifyDiscountCode(code, percentOff) {
-  try {
-    // Primero crear Price Rule
-    const priceRuleResponse = await shopifyService.post('/price_rules.json', {
-      price_rule: {
-        title: `SMS Welcome - ${code}`,
-        target_type: 'line_item',
-        target_selection: 'all',
-        allocation_method: 'across',
-        value_type: 'percentage',
-        value: `-${percentOff}`,
-        customer_selection: 'all',
-        usage_limit: 1,
-        once_per_customer: true,
-        starts_at: new Date().toISOString()
-      }
-    });
-
-    const priceRuleId = priceRuleResponse.data.price_rule.id;
-
-    // Luego crear el Discount Code
-    const discountResponse = await shopifyService.post(
-      `/price_rules/${priceRuleId}/discount_codes.json`,
-      {
-        discount_code: {
-          code: code
-        }
-      }
-    );
-
-    return {
-      priceRuleId: priceRuleId.toString(),
-      discountId: discountResponse.data.discount_code.id.toString()
-    };
-
-  } catch (error) {
-    console.error('❌ Error creating Shopify discount:', error.response?.data || error.message);
-    throw error;
   }
 }
 

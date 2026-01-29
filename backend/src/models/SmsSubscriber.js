@@ -48,7 +48,7 @@ const smsSubscriberSchema = new mongoose.Schema({
   // ==================== ORIGEN ====================
   source: {
     type: String,
-    enum: ['popup', 'checkout', 'manual', 'import', 'landing_page'],
+    enum: ['popup', 'checkout', 'manual', 'import', 'landing_page', 'website-popup-sms', 'api', 'test'],
     default: 'popup'
   },
   sourceUrl: String,           // URL donde se suscribió
