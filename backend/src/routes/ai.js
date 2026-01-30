@@ -1,11 +1,12 @@
 // backend/src/routes/ai.js
-// 🧠 AI Analytics Routes - Solo LEE de MongoDB, nunca calcula en request
-// ✅ FIXED: Devuelve estructura correcta de Claude insights
+// 📱 SMS AI Analytics Routes - Enfocado en SMS Marketing
+// Lee de MongoDB, nunca calcula en request
+
 const express = require('express');
 const router = express.Router();
 const { auth, authorize } = require('../middleware/auth');
 const AIInsight = require('../models/AIInsight');
-const aiCalculator = require('../services/aiCalculator');
+const smsCalculator = require('../services/smsCalculator');
 
 // Aplicar autenticación
 router.use(auth);
@@ -14,7 +15,7 @@ router.use(auth);
 
 /**
  * GET /api/ai/dashboard
- * Resumen rápido de todos los análisis
+ * Resumen rápido de todos los análisis SMS
  */
 router.get('/dashboard', authorize('admin', 'manager'), async (req, res) => {
   try {
@@ -28,32 +29,33 @@ router.get('/dashboard', authorize('admin', 'manager'), async (req, res) => {
 
 /**
  * GET /api/ai/insights
- * Reporte completo de insights (lee de MongoDB)
+ * Reporte completo de insights SMS (lee de MongoDB)
  */
 router.get('/insights', authorize('admin', 'manager'), async (req, res) => {
   try {
     const { days = 30 } = req.query;
-    
-    const insight = await AIInsight.getLatest('comprehensive_report', parseInt(days));
-    
+
+    const insight = await AIInsight.getLatest('sms_comprehensive_report', parseInt(days));
+
     if (!insight) {
       return res.json({
         success: false,
-        message: 'No hay análisis disponible. El sistema calculará automáticamente.',
+        message: 'No hay análisis SMS disponible. El sistema calculará automáticamente.',
         status: 'pending'
       });
     }
-    
+
     res.json({
       success: true,
       ...insight.data,
       _meta: {
         calculatedAt: insight.createdAt,
         ageHours: Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60)),
-        nextCalculation: insight.nextCalculationAt
+        nextCalculation: insight.nextCalculationAt,
+        focusMode: 'sms'
       }
     });
-    
+
   } catch (error) {
     console.error('Error obteniendo insights:', error);
     res.status(500).json({ error: error.message });
@@ -62,12 +64,12 @@ router.get('/insights', authorize('admin', 'manager'), async (req, res) => {
 
 /**
  * GET /api/ai/insights/quick
- * Top 5 insights rápidos
+ * Top 5 insights rápidos de SMS
  */
 router.get('/insights/quick', authorize('admin', 'manager'), async (req, res) => {
   try {
-    const insight = await AIInsight.getLatest('comprehensive_report', 30);
-    
+    const insight = await AIInsight.getLatest('sms_comprehensive_report', 30);
+
     if (!insight) {
       return res.json({
         success: false,
@@ -75,42 +77,32 @@ router.get('/insights/quick', authorize('admin', 'manager'), async (req, res) =>
         topInsights: []
       });
     }
-    
+
     res.json({
       success: true,
       healthScore: insight.summary?.score || 0,
       healthStatus: insight.summary?.status || 'unknown',
       topInsights: insight.topInsights?.slice(0, 5) || [],
-      calculatedAt: insight.createdAt
+      calculatedAt: insight.createdAt,
+      focusMode: 'sms'
     });
-    
+
   } catch (error) {
     console.error('Error obteniendo quick insights:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ==================== 🆕 CLAUDE AI INSIGHTS ====================
+// ==================== CLAUDE AI INSIGHTS (SMS) ====================
 
 /**
  * GET /api/ai/claude
- * ✅ FIXED: Obtener insights generados por Claude con estructura correcta
- * 
- * La respuesta incluye:
- * - executiveSummary: Resumen ejecutivo
- * - deepAnalysis: Análisis profundo por categoría
- * - actionPlan: Plan de acción priorizado
- * - quickWins: Acciones rápidas
- * - warnings: Alertas y advertencias
- * - opportunities: Oportunidades detectadas
- * - productRecommendations: Recomendaciones de productos
- * - revenueGoalStrategy: Estrategia para objetivo de revenue
- * - nextCampaignSuggestion: Sugerencia para próxima campaña
+ * Obtener insights SMS generados por Claude
  */
 router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
   try {
-    const insight = await AIInsight.getLatest('ai_generated_insights', 30);
-    
+    const insight = await AIInsight.getLatest('sms_ai_insights', 30);
+
     if (!insight) {
       return res.json({
         success: false,
@@ -119,56 +111,31 @@ router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
         data: null
       });
     }
-    
-    // ✅ FIXED: insight.data ya contiene la estructura correcta de Claude:
-    // executiveSummary, deepAnalysis, actionPlan, quickWins, warnings,
-    // opportunities, productRecommendations, revenueGoalStrategy, nextCampaignSuggestion
-    
+
     const claudeData = insight.data || {};
-    
+
     // Verificar si los datos están desactualizados (más de 12 horas)
     const ageHours = Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60));
     const isOutdated = ageHours > 12;
-    
-    // Si está desactualizado, verificar si hay datos nuevos que no se han procesado
-    let outdatedReason = null;
+
     let recalculationStarted = false;
-    
+
     if (isOutdated) {
-      outdatedReason = `Último análisis hace ${ageHours} horas`;
-      
-      // Verificar si hay campañas nuevas desde el último análisis
-      try {
-        const Campaign = require('../models/Campaign');
-        const newCampaigns = await Campaign.countDocuments({
-          status: 'sent',
-          sentAt: { $gt: insight.createdAt }
-        });
-        
-        if (newCampaigns > 0) {
-          outdatedReason = `${newCampaigns} campañas nuevas desde el último análisis`;
-          
-          // Disparar recálculo en background si hay campañas nuevas
-          const aiAnalyticsJob = require('../jobs/aiAnalyticsJob');
-          if (!aiAnalyticsJob.isRunning) {
-            recalculationStarted = true;
-            setImmediate(async () => {
-              try {
-                await aiAnalyticsJob.forceRecalculateType('ai_generated_insights');
-              } catch (e) {
-                console.error('Error en recálculo automático:', e.message);
-              }
-            });
+      const aiAnalyticsJob = require('../jobs/aiAnalyticsJob');
+      if (!aiAnalyticsJob.isRunning) {
+        recalculationStarted = true;
+        setImmediate(async () => {
+          try {
+            await aiAnalyticsJob.forceRecalculateType('sms_ai_insights');
+          } catch (e) {
+            console.error('Error en recálculo automático:', e.message);
           }
-        }
-      } catch (e) {
-        // Si no se puede verificar, no es crítico
+        });
       }
     }
-    
+
     res.json({
       success: true,
-      // ✅ FIXED: Devolver los datos de Claude directamente
       data: claudeData,
       _meta: {
         generatedAt: claudeData.generatedAt || insight.createdAt,
@@ -180,11 +147,11 @@ router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
         hasBusinessContext: claudeData.hasBusinessContext || false,
         isFallback: claudeData.isFallback || false,
         isOutdated,
-        outdatedReason,
-        recalculationStarted
+        recalculationStarted,
+        analysisType: 'sms'
       }
     });
-    
+
   } catch (error) {
     console.error('Error obteniendo Claude insights:', error);
     res.status(500).json({ error: error.message });
@@ -198,9 +165,9 @@ router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
 router.get('/claude/status', authorize('admin', 'manager'), async (req, res) => {
   try {
     const claudeService = require('../services/claudeService');
-    
-    const latestInsight = await AIInsight.getLatest('ai_generated_insights', 30);
-    
+
+    const latestInsight = await AIInsight.getLatest('sms_ai_insights', 30);
+
     res.json({
       enabled: claudeService.isAvailable(),
       model: claudeService.model,
@@ -208,257 +175,28 @@ router.get('/claude/status', authorize('admin', 'manager'), async (req, res) => 
       lastTokensUsed: latestInsight?.data?.tokensUsed || null,
       hasData: !!latestInsight?.data?.executiveSummary,
       isFallback: latestInsight?.data?.isFallback || false,
-      dataAge: latestInsight ? Math.round((Date.now() - new Date(latestInsight.createdAt).getTime()) / (1000 * 60 * 60)) : null
+      dataAge: latestInsight
+        ? Math.round((Date.now() - new Date(latestInsight.createdAt).getTime()) / (1000 * 60 * 60))
+        : null,
+      analysisType: 'sms'
     });
-    
+
   } catch (error) {
     console.error('Error obteniendo estado de Claude:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ==================== SUBJECT LINE ANALYSIS ====================
-
-/**
- * GET /api/ai/subjects/analyze
- * Análisis de patterns en subject lines (lee de MongoDB)
- */
-router.get('/subjects/analyze', authorize('admin', 'manager'), async (req, res) => {
-  try {
-    const { days = 30 } = req.query;
-    
-    const insight = await AIInsight.getLatest('subject_analysis', parseInt(days));
-    
-    if (!insight) {
-      // Intentar con 90 días si no hay de 30
-      const insight90 = await AIInsight.getLatest('subject_analysis', 90);
-      
-      if (insight90) {
-        return res.json({
-          success: true,
-          ...insight90.data,
-          _meta: {
-            requestedDays: parseInt(days),
-            actualDays: 90,
-            calculatedAt: insight90.createdAt
-          }
-        });
-      }
-      
-      return res.json({
-        success: false,
-        message: 'Análisis de subjects pendiente',
-        status: 'pending'
-      });
-    }
-    
-    res.json({
-      success: true,
-      ...insight.data,
-      _meta: {
-        calculatedAt: insight.createdAt,
-        ageHours: Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60))
-      }
-    });
-    
-  } catch (error) {
-    console.error('Error en análisis de subjects:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * POST /api/ai/subjects/suggest
- * Genera sugerencias para un subject (esto SÍ calcula en tiempo real, es rápido)
- */
-router.post('/subjects/suggest', authorize('admin', 'manager'), async (req, res) => {
-  try {
-    const { subject } = req.body;
-    
-    if (!subject || subject.trim().length < 3) {
-      return res.status(400).json({ 
-        error: 'Se requiere un subject de al menos 3 caracteres' 
-      });
-    }
-    
-    // Obtener análisis guardado para basarse en él
-    const analysis = await AIInsight.getLatest('subject_analysis', 90);
-    
-    if (!analysis) {
-      return res.json({
-        success: false,
-        message: 'No hay datos históricos para generar sugerencias',
-        suggestions: [{ subject, reason: 'Original', confidence: 'baseline' }]
-      });
-    }
-    
-    const insights = analysis.data?.insights || {};
-    const suggestions = [];
-    
-    // Analizar subject actual
-    const hasEmoji = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]/u.test(subject);
-    const hasNumber = /\d+%?/.test(subject);
-    const length = subject.length;
-    
-    // Sugerir emoji si ayuda
-    if (!hasEmoji && parseFloat(insights.hasEmoji?.lift || 0) > 10) {
-      const emojis = ['🥒', '✨', '🎉', '💚', '🔥', '⚡'];
-      const emoji = emojis[Math.floor(Math.random() * emojis.length)];
-      suggestions.push({
-        subject: `${emoji} ${subject}`,
-        reason: `Agregar emoji puede aumentar opens en +${insights.hasEmoji.lift}%`,
-        confidence: 'medium'
-      });
-    }
-    
-    // Sugerir número si ayuda
-    if (!hasNumber && parseFloat(insights.hasNumber?.lift || 0) > 10) {
-      suggestions.push({
-        subject: subject.replace(/descuento|off|ahorra/gi, '15% OFF'),
-        reason: `Los números aumentan opens en +${insights.hasNumber.lift}%`,
-        confidence: 'medium'
-      });
-    }
-    
-    // Original siempre primero
-    suggestions.unshift({
-      subject,
-      reason: 'Subject original',
-      confidence: 'baseline'
-    });
-    
-    res.json({
-      success: true,
-      original: subject,
-      suggestions: suggestions.slice(0, 5),
-      basedOn: {
-        campaignsAnalyzed: analysis.data?.summary?.campaignsAnalyzed || 0,
-        avgOpenRate: analysis.data?.summary?.avgOpenRate
-      }
-    });
-    
-  } catch (error) {
-    console.error('Error generando sugerencias:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ==================== SEND TIMING ====================
-
-/**
- * GET /api/ai/timing/best
- * Mejores horarios de envío (lee de MongoDB)
- */
-router.get('/timing/best', authorize('admin', 'manager'), async (req, res) => {
-  try {
-    const { segmentId } = req.query;
-    
-    const insight = await AIInsight.getLatest('send_timing', 90, segmentId || null);
-    
-    if (!insight) {
-      return res.json({
-        success: false,
-        message: 'Análisis de timing pendiente',
-        status: 'pending'
-      });
-    }
-    
-    res.json({
-      success: true,
-      ...insight.data,
-      _meta: {
-        calculatedAt: insight.createdAt,
-        segmentId: segmentId || 'all'
-      }
-    });
-    
-  } catch (error) {
-    console.error('Error en análisis de timing:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * GET /api/ai/timing/heatmap
- * Heatmap de engagement (lee de MongoDB)
- */
-router.get('/timing/heatmap', authorize('admin', 'manager'), async (req, res) => {
-  try {
-    const { segmentId } = req.query;
-    
-    const insight = await AIInsight.getLatest('send_timing', 90, segmentId || null);
-    
-    if (!insight) {
-      return res.json({
-        success: false,
-        message: 'Datos de heatmap pendientes',
-        heatmap: []
-      });
-    }
-    
-    res.json({
-      success: true,
-      heatmap: insight.data?.heatmap || [],
-      bestTimes: insight.data?.bestTimes || [],
-      dayAverages: insight.data?.dayAverages || [],
-      calculatedAt: insight.createdAt
-    });
-    
-  } catch (error) {
-    console.error('Error obteniendo heatmap:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ==================== LIST PERFORMANCE ====================
-
-/**
- * GET /api/ai/lists/performance
- * Performance por lista (lee de MongoDB)
- */
-router.get('/lists/performance', authorize('admin', 'manager'), async (req, res) => {
-  try {
-    const { days = 30 } = req.query;
-    
-    let insight = await AIInsight.getLatest('list_performance', parseInt(days));
-    
-    if (!insight) {
-      insight = await AIInsight.getLatest('list_performance', 90);
-    }
-    
-    if (!insight) {
-      return res.json({
-        success: false,
-        message: 'Análisis de listas pendiente',
-        status: 'pending'
-      });
-    }
-    
-    res.json({
-      success: true,
-      ...insight.data,
-      _meta: {
-        calculatedAt: insight.createdAt,
-        requestedDays: parseInt(days)
-      }
-    });
-    
-  } catch (error) {
-    console.error('Error en análisis de listas:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ==================== HEALTH CHECK ====================
+// ==================== SMS HEALTH CHECK ====================
 
 /**
  * GET /api/ai/health
- * Estado de salud del email marketing (lee de MongoDB)
+ * Estado de salud del SMS marketing
  */
 router.get('/health', authorize('admin', 'manager'), async (req, res) => {
   try {
-    const insight = await AIInsight.getLatest('health_check', 7);
-    
+    const insight = await AIInsight.getLatest('sms_health_check', 7);
+
     if (!insight) {
       return res.json({
         success: false,
@@ -466,16 +204,17 @@ router.get('/health', authorize('admin', 'manager'), async (req, res) => {
         health: { score: 0, status: 'unknown' }
       });
     }
-    
+
     res.json({
       success: true,
       ...insight.data,
       _meta: {
         calculatedAt: insight.createdAt,
-        ageHours: Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60))
+        ageHours: Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60)),
+        analysisType: 'sms'
       }
     });
-    
+
   } catch (error) {
     console.error('Error en health check:', error);
     res.status(500).json({ error: error.message });
@@ -484,12 +223,12 @@ router.get('/health', authorize('admin', 'manager'), async (req, res) => {
 
 /**
  * GET /api/ai/health/alerts
- * Solo alertas activas
+ * Solo alertas activas de SMS
  */
 router.get('/health/alerts', authorize('admin', 'manager'), async (req, res) => {
   try {
-    const insight = await AIInsight.getLatest('health_check', 7);
-    
+    const insight = await AIInsight.getLatest('sms_health_check', 7);
+
     res.json({
       success: true,
       healthScore: insight?.summary?.score || 0,
@@ -499,90 +238,287 @@ router.get('/health/alerts', authorize('admin', 'manager'), async (req, res) => 
         critical: insight?.alerts?.filter(a => a.severity === 'critical').length || 0,
         warning: insight?.alerts?.filter(a => a.severity === 'warning').length || 0
       },
-      calculatedAt: insight?.createdAt
+      calculatedAt: insight?.createdAt,
+      analysisType: 'sms'
     });
-    
+
   } catch (error) {
     console.error('Error obteniendo alertas:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ==================== CAMPAIGN PREDICTION ====================
+// ==================== CONVERSION FUNNEL ====================
 
 /**
- * POST /api/ai/campaigns/predict
- * Predecir performance de una campaña (usa datos históricos de MongoDB)
+ * GET /api/ai/funnel
+ * Funnel de conversión SMS
  */
-router.post('/campaigns/predict', authorize('admin', 'manager'), async (req, res) => {
+router.get('/funnel', authorize('admin', 'manager'), async (req, res) => {
   try {
-    const { subject, listId, sendHour, sendDay } = req.body;
-    
-    if (!subject || !listId) {
-      return res.status(400).json({
-        error: 'Se requiere subject y listId'
-      });
-    }
-    
-    // Obtener insights históricos de MongoDB
-    const [listInsight, subjectInsight, timingInsight] = await Promise.all([
-      AIInsight.getLatest('list_performance', 90),
-      AIInsight.getLatest('subject_analysis', 90),
-      AIInsight.getLatest('send_timing', 90)
-    ]);
-    
-    if (!listInsight) {
+    const { days = 30 } = req.query;
+
+    const insight = await AIInsight.getLatest('sms_conversion_funnel', parseInt(days));
+
+    if (!insight) {
       return res.json({
         success: false,
-        message: 'No hay datos históricos suficientes para predicción'
+        message: 'Análisis de funnel pendiente',
+        status: 'pending'
       });
     }
-    
-    // Usar el calculator con los datos históricos
-    const prediction = await aiCalculator.predictCampaignPerformance(
-      { subject, listId, sendHour, sendDay },
-      {
-        list_performance: listInsight,
-        subject_analysis: subjectInsight,
-        send_timing: timingInsight
+
+    res.json({
+      success: true,
+      ...insight.data,
+      _meta: {
+        calculatedAt: insight.createdAt,
+        ageHours: Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60))
       }
-    );
-    
-    res.json(prediction);
-    
+    });
+
   } catch (error) {
-    console.error('Error en predicción:', error);
+    console.error('Error en análisis de funnel:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ==================== HISTORY / TRENDS ====================
+// ==================== SECOND CHANCE SMS ====================
 
 /**
- * GET /api/ai/history/:type
- * Historial de scores de un tipo de análisis
+ * GET /api/ai/second-chance
+ * Performance del Second Chance SMS
  */
-router.get('/history/:type', authorize('admin', 'manager'), async (req, res) => {
+router.get('/second-chance', authorize('admin', 'manager'), async (req, res) => {
   try {
-    const { type } = req.params;
-    const { days = 30, limit = 30 } = req.query;
-    
-    const history = await AIInsight.getScoreHistory(type, parseInt(days), parseInt(limit));
-    
+    const { days = 30 } = req.query;
+
+    const insight = await AIInsight.getLatest('sms_second_chance', parseInt(days));
+
+    if (!insight) {
+      return res.json({
+        success: false,
+        message: 'Análisis de Second Chance pendiente',
+        status: 'pending'
+      });
+    }
+
     res.json({
       success: true,
-      type,
-      periodDays: parseInt(days),
-      history: history.map(h => ({
-        date: h.createdAt,
-        score: h.summary?.score,
-        status: h.summary?.status,
-        trend: h.changes?.trend
-      }))
+      ...insight.data,
+      _meta: {
+        calculatedAt: insight.createdAt,
+        ageHours: Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60))
+      }
     });
-    
+
   } catch (error) {
-    console.error('Error obteniendo historial:', error);
+    console.error('Error en análisis de Second Chance:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ai/second-chance/opportunity
+ * Oportunidades perdidas de Second Chance
+ */
+router.get('/second-chance/opportunity', authorize('admin', 'manager'), async (req, res) => {
+  try {
+    const insight = await AIInsight.getLatest('sms_second_chance', 30);
+
+    if (!insight) {
+      return res.json({
+        success: false,
+        message: 'Datos pendientes'
+      });
+    }
+
+    res.json({
+      success: true,
+      opportunity: insight.data?.opportunity || {},
+      financial: insight.data?.financial || {},
+      topInsights: insight.data?.topInsights?.filter(i => i.type === 'warning') || [],
+      calculatedAt: insight.createdAt
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo oportunidades:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== TIME TO CONVERT ====================
+
+/**
+ * GET /api/ai/timing
+ * Análisis de tiempo hasta conversión
+ */
+router.get('/timing', authorize('admin', 'manager'), async (req, res) => {
+  try {
+    const { days = 30 } = req.query;
+
+    const insight = await AIInsight.getLatest('sms_time_to_convert', parseInt(days));
+
+    if (!insight) {
+      return res.json({
+        success: false,
+        message: 'Análisis de timing pendiente',
+        status: 'pending'
+      });
+    }
+
+    res.json({
+      success: true,
+      ...insight.data,
+      _meta: {
+        calculatedAt: insight.createdAt,
+        ageHours: Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60))
+      }
+    });
+
+  } catch (error) {
+    console.error('Error en análisis de timing:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ai/timing/distribution
+ * Distribución de tiempo hasta conversión
+ */
+router.get('/timing/distribution', authorize('admin', 'manager'), async (req, res) => {
+  try {
+    const insight = await AIInsight.getLatest('sms_time_to_convert', 30);
+
+    if (!insight) {
+      return res.json({
+        success: false,
+        message: 'Datos de distribución pendientes',
+        distribution: []
+      });
+    }
+
+    res.json({
+      success: true,
+      avgTimeToConvert: insight.data?.summary?.avgTimeToConvert,
+      distribution: insight.data?.distribution || [],
+      byConversionType: insight.data?.byConversionType || [],
+      calculatedAt: insight.createdAt
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo distribución:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== CAMPAIGN PERFORMANCE ====================
+
+/**
+ * GET /api/ai/campaigns
+ * Performance de campañas SMS
+ */
+router.get('/campaigns', authorize('admin', 'manager'), async (req, res) => {
+  try {
+    const { days = 30 } = req.query;
+
+    const insight = await AIInsight.getLatest('sms_campaign_performance', parseInt(days));
+
+    if (!insight) {
+      return res.json({
+        success: false,
+        message: 'Análisis de campañas pendiente',
+        status: 'pending'
+      });
+    }
+
+    res.json({
+      success: true,
+      ...insight.data,
+      _meta: {
+        calculatedAt: insight.createdAt,
+        ageHours: Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60))
+      }
+    });
+
+  } catch (error) {
+    console.error('Error en análisis de campañas:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ai/campaigns/top
+ * Top campañas por revenue y conversión
+ */
+router.get('/campaigns/top', authorize('admin', 'manager'), async (req, res) => {
+  try {
+    const insight = await AIInsight.getLatest('sms_campaign_performance', 30);
+
+    if (!insight) {
+      return res.json({
+        success: false,
+        message: 'Datos de campañas pendientes',
+        rankings: {}
+      });
+    }
+
+    res.json({
+      success: true,
+      rankings: insight.data?.rankings || {},
+      summary: insight.data?.summary || {},
+      calculatedAt: insight.createdAt
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo top campañas:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== LIVE CALCULATIONS (Para datos en tiempo real) ====================
+
+/**
+ * GET /api/ai/live/health
+ * Cálculo en tiempo real de health (para testing/debugging)
+ */
+router.get('/live/health', authorize('admin'), async (req, res) => {
+  try {
+    const { days = 7 } = req.query;
+    const result = await smsCalculator.calculateSmsHealthCheck({ days: parseInt(days) });
+    res.json(result);
+  } catch (error) {
+    console.error('Error en live health:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ai/live/funnel
+ * Cálculo en tiempo real de funnel
+ */
+router.get('/live/funnel', authorize('admin'), async (req, res) => {
+  try {
+    const { days = 30 } = req.query;
+    const result = await smsCalculator.calculateConversionFunnel({ days: parseInt(days) });
+    res.json(result);
+  } catch (error) {
+    console.error('Error en live funnel:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ai/live/second-chance
+ * Cálculo en tiempo real de Second Chance
+ */
+router.get('/live/second-chance', authorize('admin'), async (req, res) => {
+  try {
+    const { days = 30 } = req.query;
+    const result = await smsCalculator.calculateSecondChancePerformance({ days: parseInt(days) });
+    res.json(result);
+  } catch (error) {
+    console.error('Error en live second-chance:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -591,14 +527,14 @@ router.get('/history/:type', authorize('admin', 'manager'), async (req, res) => 
 
 /**
  * POST /api/ai/recalculate
- * Forzar recálculo de todos los análisis
+ * Forzar recálculo de análisis SMS
  */
 router.post('/recalculate', authorize('admin'), async (req, res) => {
   try {
     const { type } = req.body;
-    
+
     const aiAnalyticsJob = require('../jobs/aiAnalyticsJob');
-    
+
     if (type) {
       console.log(`🔄 Forzando recálculo de: ${type}`);
       const results = await aiAnalyticsJob.forceRecalculateType(type);
@@ -608,20 +544,20 @@ router.post('/recalculate', authorize('admin'), async (req, res) => {
         results
       });
     } else {
-      console.log('🔄 Forzando recálculo de todos los análisis...');
-      
+      console.log('🔄 Forzando recálculo de todos los análisis SMS...');
+
       // Ejecutar en background
       setImmediate(async () => {
         await aiAnalyticsJob.forceRecalculate();
       });
-      
+
       res.json({
         success: true,
-        message: 'Recálculo iniciado en background',
+        message: 'Recálculo SMS iniciado en background',
         note: 'Los resultados estarán disponibles en unos minutos'
       });
     }
-    
+
   } catch (error) {
     console.error('Error forzando recálculo:', error);
     res.status(500).json({ error: error.message });
@@ -635,15 +571,15 @@ router.post('/recalculate', authorize('admin'), async (req, res) => {
 router.post('/invalidate', authorize('admin'), async (req, res) => {
   try {
     const { type } = req.body;
-    
+
     const count = await AIInsight.invalidate(type || null);
-    
+
     res.json({
       success: true,
       message: `${count} análisis invalidados`,
       invalidated: count
     });
-    
+
   } catch (error) {
     console.error('Error invalidando análisis:', error);
     res.status(500).json({ error: error.message });
@@ -657,23 +593,51 @@ router.post('/invalidate', authorize('admin'), async (req, res) => {
 router.get('/status', authorize('admin', 'manager'), async (req, res) => {
   try {
     const aiAnalyticsJob = require('../jobs/aiAnalyticsJob');
-    
+
     const summary = await AIInsight.getDashboardSummary();
-    const dueForRecalc = await AIInsight.getDueForRecalculation();
     const jobStatus = aiAnalyticsJob.getStatus();
-    
+
     res.json({
       success: true,
       job: jobStatus,
       analyses: summary.analyses,
       globalScore: summary.globalScore,
       totalAlerts: summary.totalAlerts,
-      pendingRecalculations: dueForRecalc.length,
+      focusMode: summary.focusMode,
       timestamp: new Date()
     });
-    
+
   } catch (error) {
     console.error('Error obteniendo status:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ai/history/:type
+ * Historial de scores de un tipo de análisis
+ */
+router.get('/history/:type', authorize('admin', 'manager'), async (req, res) => {
+  try {
+    const { type } = req.params;
+    const { days = 30, limit = 30 } = req.query;
+
+    const history = await AIInsight.getScoreHistory(type, parseInt(days), parseInt(limit));
+
+    res.json({
+      success: true,
+      type,
+      periodDays: parseInt(days),
+      history: history.map(h => ({
+        date: h.createdAt,
+        score: h.summary?.score,
+        status: h.summary?.status,
+        trend: h.changes?.trend
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo historial:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -685,19 +649,57 @@ router.get('/status', authorize('admin', 'manager'), async (req, res) => {
 router.delete('/cleanup', authorize('admin'), async (req, res) => {
   try {
     const { daysToKeep = 90 } = req.body;
-    
+
     const deleted = await AIInsight.cleanup(parseInt(daysToKeep));
-    
+
     res.json({
       success: true,
       message: `${deleted} análisis antiguos eliminados`,
       deleted
     });
-    
+
   } catch (error) {
     console.error('Error en cleanup:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// ==================== LEGACY EMAIL ENDPOINTS (deprecated) ====================
+
+/**
+ * GET /api/ai/subjects/analyze
+ * @deprecated - Ya no aplica, el enfoque es SMS
+ */
+router.get('/subjects/analyze', authorize('admin', 'manager'), async (req, res) => {
+  res.json({
+    success: false,
+    message: 'Este endpoint está deprecado. El enfoque ahora es SMS marketing.',
+    redirect: '/api/ai/health'
+  });
+});
+
+/**
+ * GET /api/ai/timing/best
+ * @deprecated - Usar /api/ai/timing para SMS
+ */
+router.get('/timing/best', authorize('admin', 'manager'), async (req, res) => {
+  res.json({
+    success: false,
+    message: 'Este endpoint está deprecado. Usar /api/ai/timing para análisis de SMS.',
+    redirect: '/api/ai/timing'
+  });
+});
+
+/**
+ * GET /api/ai/lists/performance
+ * @deprecated - Ya no aplica, el enfoque es SMS
+ */
+router.get('/lists/performance', authorize('admin', 'manager'), async (req, res) => {
+  res.json({
+    success: false,
+    message: 'Este endpoint está deprecado. El enfoque ahora es SMS marketing.',
+    redirect: '/api/ai/funnel'
+  });
 });
 
 module.exports = router;

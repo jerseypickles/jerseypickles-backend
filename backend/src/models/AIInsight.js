@@ -17,12 +17,21 @@ const aiInsightSchema = new mongoose.Schema({
   type: {
     type: String,
     enum: [
-      'subject_analysis',      // Análisis de subject lines
-      'send_timing',           // Mejores horarios
-      'list_performance',      // Performance por lista
-      'health_check',          // Estado de salud
-      'comprehensive_report',  // Reporte completo
-      'ai_generated_insights'  // 🆕 Insights generados por Claude
+      // Legacy (email) - mantener por compatibilidad
+      'subject_analysis',
+      'send_timing',
+      'list_performance',
+      'health_check',
+      'comprehensive_report',
+      'ai_generated_insights',
+      // SMS Marketing (nuevo enfoque principal)
+      'sms_health_check',           // Estado de salud SMS
+      'sms_conversion_funnel',      // Funnel de conversión SMS
+      'sms_second_chance',          // Performance Second Chance
+      'sms_time_to_convert',        // Análisis de timing
+      'sms_campaign_performance',   // Performance de campañas SMS
+      'sms_comprehensive_report',   // Reporte completo SMS
+      'sms_ai_insights'             // Insights de Claude para SMS
     ],
     required: true,
     index: true
@@ -332,16 +341,91 @@ aiInsightSchema.statics.getScoreHistory = async function(type, periodDays = 30, 
 
 /**
  * Dashboard summary
+ * Ahora enfocado en SMS Marketing
  */
 aiInsightSchema.statics.getDashboardSummary = async function() {
-  const types = [
+  // SMS types (nuevo enfoque principal)
+  const smsTypes = [
+    'sms_health_check',
+    'sms_conversion_funnel',
+    'sms_second_chance',
+    'sms_time_to_convert',
+    'sms_campaign_performance',
+    'sms_ai_insights'
+  ];
+
+  // Legacy email types (para compatibilidad)
+  const legacyTypes = [
     'subject_analysis',
-    'send_timing', 
+    'send_timing',
     'list_performance',
     'health_check',
-    'ai_generated_insights'  // 🆕 Incluir insights de Claude
+    'ai_generated_insights'
   ];
-  
+
+  const summary = {
+    sms: {},
+    legacy: {}
+  };
+
+  // Obtener SMS insights
+  for (const type of smsTypes) {
+    const latest = await this.getLatest(type, 30);
+    summary.sms[type] = latest ? {
+      score: latest.summary?.score,
+      status: latest.summary?.status,
+      alertsCount: latest.alerts?.length || 0,
+      lastCalculated: latest.createdAt,
+      trend: latest.changes?.trend,
+      ageHours: Math.round((Date.now() - new Date(latest.createdAt).getTime()) / (1000 * 60 * 60))
+    } : null;
+  }
+
+  // Obtener legacy insights (para compatibilidad)
+  for (const type of legacyTypes) {
+    const latest = await this.getLatest(type, 30);
+    summary.legacy[type] = latest ? {
+      score: latest.summary?.score,
+      status: latest.summary?.status,
+      lastCalculated: latest.createdAt
+    } : null;
+  }
+
+  // Calcular score global basado en SMS
+  const smsScores = Object.values(summary.sms)
+    .filter(s => s?.score !== undefined)
+    .map(s => s.score);
+
+  const globalScore = smsScores.length > 0
+    ? Math.round(smsScores.reduce((a, b) => a + b, 0) / smsScores.length)
+    : 0;
+
+  const totalAlerts = Object.values(summary.sms)
+    .reduce((sum, s) => sum + (s?.alertsCount || 0), 0);
+
+  return {
+    globalScore,
+    totalAlerts,
+    analyses: summary.sms, // Ahora devuelve SMS por defecto
+    legacyAnalyses: summary.legacy,
+    lastUpdated: new Date(),
+    focusMode: 'sms' // Indicar que el enfoque es SMS
+  };
+};
+
+/**
+ * Dashboard summary (legacy - para compatibilidad)
+ * @deprecated Usar getDashboardSummary que ahora es SMS-first
+ */
+aiInsightSchema.statics.getLegacyDashboardSummary = async function() {
+  const types = [
+    'subject_analysis',
+    'send_timing',
+    'list_performance',
+    'health_check',
+    'ai_generated_insights'
+  ];
+
   const summary = {};
   
   for (const type of types) {
