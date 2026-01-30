@@ -1,4 +1,4 @@
-// backend/server.js (v2.5.0 - SMS Campaigns)
+// backend/server.js (v2.6.0 - Second Chance SMS)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -173,7 +173,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({ 
     message: '🥒 Jersey Pickles Email & SMS Marketing API',
-    version: '2.5.0',
+    version: '2.6.0',
     status: 'running',
     features: {
       campaigns: '✅ Email Campaigns',
@@ -185,7 +185,8 @@ app.get('/', (req, res) => {
       products: '✅ Product Analytics',
       calendar: '✅ Business Calendar',
       sms_marketing: '✅ SMS Marketing (Telnyx)',
-      sms_campaigns: '✅ SMS Campaigns'
+      sms_campaigns: '✅ SMS Campaigns',
+      sms_second_chance: '✅ Second Chance SMS (20% Recovery)'
     },
     endpoints: {
       health: '/health',
@@ -204,7 +205,8 @@ app.get('/', (req, res) => {
       products: '/api/products',
       calendar: '/api/calendar',
       sms: '/api/sms',
-      sms_campaigns: '/api/sms/campaigns'
+      sms_campaigns: '/api/sms/campaigns',
+      sms_second_chance: '/api/sms/second-chance'
     }
   });
 });
@@ -277,7 +279,7 @@ try {
   });
 }
 
-// 📱 SMS MARKETING ROUTES (Subscribers)
+// 📱 SMS MARKETING ROUTES (Subscribers + Second Chance)
 try {
   const smsRoutes = require('./src/routes/sms');
   app.use('/api/sms', smsRoutes);
@@ -333,10 +335,11 @@ let productsAvailable = false;
 let calendarAvailable = false;
 let smsServiceAvailable = false;
 let smsCampaignsAvailable = false;
+let secondChanceSmsAvailable = false; // 🆕
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║   🥒 Jersey Pickles Marketing Platform v2.5.0 ║');
+  console.log('║   🥒 Jersey Pickles Marketing Platform v2.6.0 ║');
   console.log('╚════════════════════════════════════════════════╝');
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -454,6 +457,29 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     }
   }, 5000);
   
+  // 🆕 📱 Inicializar Second Chance SMS Job
+  setTimeout(() => {
+    console.log('\n📱 Inicializando Second Chance SMS Job...');
+    try {
+      const secondChanceSmsJob = require('./src/jobs/secondChanceSmsJob');
+      
+      // Initialize cron job - runs every hour at minute 30
+      // Only sends SMS between 9am-9pm Eastern Time
+      secondChanceSmsJob.init('30 * * * *');
+      
+      secondChanceSmsAvailable = true;
+      console.log('✅ Second Chance SMS Job listo');
+      console.log('   ⏰ Schedule: Every hour at :30');
+      console.log('   🕐 Sending hours: 9am - 9pm (Eastern)');
+      console.log('   ⏳ Delay: 6-8 hours after first SMS');
+      console.log('   🎟️ Discount: 20% OFF (expires in 2 hours)');
+      console.log('   📝 Code format: JP2-XXXXX');
+    } catch (error) {
+      secondChanceSmsAvailable = false;
+      console.log('⚠️  Second Chance SMS Job no disponible:', error.message);
+    }
+  }, 5500);
+  
   // Resumen de features
   setTimeout(() => {
     console.log('\n╔════════════════════════════════════════════════╗');
@@ -465,8 +491,9 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`║  Business Calendar:  ${calendarAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  SMS Marketing:      ${smsServiceAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  SMS Campaigns:      ${smsCampaignsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
+    console.log(`║  Second Chance SMS:  ${secondChanceSmsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log('╚════════════════════════════════════════════════╝');
-  }, 6000);
+  }, 6500);
 });
 
 // ==================== GRACEFUL SHUTDOWN ====================
@@ -505,6 +532,19 @@ const gracefulShutdown = async (signal) => {
         }
       } catch (err) {
         console.log('⚠️  AI Analytics job not stopped:', err.message);
+      }
+    }
+    
+    // 🆕 Stop Second Chance SMS Job
+    if (secondChanceSmsAvailable) {
+      try {
+        const secondChanceSmsJob = require('./src/jobs/secondChanceSmsJob');
+        if (secondChanceSmsJob && typeof secondChanceSmsJob.stop === 'function') {
+          secondChanceSmsJob.stop();
+          console.log('✅ Second Chance SMS job stopped');
+        }
+      } catch (err) {
+        console.log('⚠️  Second Chance SMS job not stopped:', err.message);
       }
     }
     
