@@ -1,5 +1,5 @@
 // backend/src/services/smsConversionService.js
-// 📊 SMS Conversion Tracking Service
+// 📊 SMS Conversion Tracking Service - Con First vs Second SMS Detection
 // Tracks when customers use their SMS discount codes
 
 const SmsSubscriber = require('../models/SmsSubscriber');
@@ -22,13 +22,16 @@ class SmsConversionService {
         return { converted: false, reason: 'No discount codes used' };
       }
 
-      // Find SMS discount codes (they start with JP-)
+      // Find SMS discount codes (JP- for first, JP2- for second)
       const smsDiscountCodes = discountCodes.filter(dc => 
-        dc.code && dc.code.toUpperCase().startsWith('JP-')
+        dc.code && (
+          dc.code.toUpperCase().startsWith('JP-') || 
+          dc.code.toUpperCase().startsWith('JP2-')
+        )
       );
 
       if (smsDiscountCodes.length === 0) {
-        return { converted: false, reason: 'No SMS discount codes (JP-) found' };
+        return { converted: false, reason: 'No SMS discount codes (JP- or JP2-) found' };
       }
 
       console.log(`🎯 SMS Discount Code detected in order #${shopifyOrder.order_number}:`, 
@@ -63,21 +66,37 @@ class SmsConversionService {
 
   /**
    * Track a single discount code conversion
+   * Detects if it's first (JP-) or second (JP2-) code
    */
   async trackConversion(code, shopifyOrder) {
     try {
       const normalizedCode = code.toUpperCase().trim();
       
+      // Determine if it's first or second code
+      const isSecondCode = normalizedCode.startsWith('JP2-');
+      const codeType = isSecondCode ? 'second' : 'first';
+      
       // Find the SMS subscriber with this discount code
-      const subscriber = await SmsSubscriber.findOne({ 
-        discountCode: normalizedCode 
-      });
+      let subscriber;
+      
+      if (isSecondCode) {
+        // Search in secondDiscountCode field
+        subscriber = await SmsSubscriber.findOne({ 
+          secondDiscountCode: normalizedCode 
+        });
+      } else {
+        // Search in discountCode field (first code)
+        subscriber = await SmsSubscriber.findOne({ 
+          discountCode: normalizedCode 
+        });
+      }
 
       if (!subscriber) {
         console.log(`⚠️ No SMS subscriber found for code: ${normalizedCode}`);
         return { 
           success: false, 
           code: normalizedCode, 
+          codeType,
           reason: 'Subscriber not found' 
         };
       }
@@ -87,18 +106,28 @@ class SmsConversionService {
         console.log(`ℹ️ Subscriber already converted with order: ${subscriber.conversionData.orderId}`);
         return { 
           success: false, 
-          code: normalizedCode, 
+          code: normalizedCode,
+          codeType,
           reason: 'Already converted',
           existingOrderId: subscriber.conversionData.orderId
         };
       }
 
+      // 🆕 Check if second code has expired
+      if (isSecondCode && subscriber.secondDiscountExpiresAt) {
+        if (new Date() > new Date(subscriber.secondDiscountExpiresAt)) {
+          console.log(`⚠️ Second discount code expired: ${normalizedCode}`);
+          // Note: Shopify should also reject expired codes, but we log it here
+        }
+      }
+
       // Calculate time to convert (minutes from SMS sent to order placed)
       let timeToConvert = null;
-      if (subscriber.welcomeSmsSentAt) {
-        const smsSentTime = new Date(subscriber.welcomeSmsSentAt);
+      const smsSentTime = isSecondCode ? subscriber.secondSmsAt : subscriber.welcomeSmsAt;
+      
+      if (smsSentTime) {
         const orderTime = new Date(shopifyOrder.created_at);
-        timeToConvert = Math.round((orderTime - smsSentTime) / (1000 * 60)); // minutes
+        timeToConvert = Math.round((orderTime - new Date(smsSentTime)) / (1000 * 60)); // minutes
       }
 
       // Calculate discount amount
@@ -119,15 +148,19 @@ class SmsConversionService {
       // Update subscriber with conversion data
       const updateData = {
         converted: true,
+        convertedWith: codeType, // 🆕 'first' or 'second'
+        convertedAt: new Date(shopifyOrder.created_at),
+        timeToConvert: timeToConvert,
         conversionData: {
           orderId: shopifyOrder.id?.toString(),
           orderNumber: shopifyOrder.order_number?.toString() || shopifyOrder.name,
           orderTotal: parseFloat(shopifyOrder.total_price),
           subtotal: parseFloat(shopifyOrder.subtotal_price || shopifyOrder.total_price),
           discountAmount: discountAmount,
+          discountCodeUsed: normalizedCode, // 🆕 Track which code was used
           currency: shopifyOrder.currency || 'USD',
           convertedAt: new Date(shopifyOrder.created_at),
-          timeToConvert: timeToConvert, // minutes
+          timeToConvert: timeToConvert,
           products: products,
           itemCount: products.reduce((sum, p) => sum + p.quantity, 0),
           customerEmail: shopifyOrder.email,
@@ -142,9 +175,11 @@ class SmsConversionService {
 
       await SmsSubscriber.findByIdAndUpdate(subscriber._id, updateData);
 
-      console.log(`✅ SMS Conversion tracked!`);
+      // 🆕 Log with conversion type
+      const conversionLabel = isSecondCode ? '🟣 RECOVERED (20%)' : '🟢 CONVERTED (15%)';
+      console.log(`✅ SMS Conversion tracked! ${conversionLabel}`);
       console.log(`   📱 Phone: ${subscriber.phone}`);
-      console.log(`   🏷️ Code: ${normalizedCode}`);
+      console.log(`   🏷️ Code: ${normalizedCode} (${codeType})`);
       console.log(`   📦 Order: #${updateData.conversionData.orderNumber}`);
       console.log(`   💵 Total: $${updateData.conversionData.orderTotal}`);
       console.log(`   💰 Discount: $${discountAmount}`);
@@ -153,6 +188,8 @@ class SmsConversionService {
       return {
         success: true,
         code: normalizedCode,
+        codeType, // 🆕 'first' or 'second'
+        convertedWith: codeType,
         subscriberId: subscriber._id,
         phone: subscriber.phone,
         orderNumber: updateData.conversionData.orderNumber,
@@ -172,7 +209,7 @@ class SmsConversionService {
   }
 
   /**
-   * Get SMS conversion stats
+   * Get SMS conversion stats with first vs second breakdown
    */
   async getConversionStats(dateRange = {}) {
     try {
@@ -190,40 +227,73 @@ class SmsConversionService {
         converted: true 
       });
 
-      // Get revenue from conversions
+      // 🆕 Breakdown by conversion type
+      const convertedFirst = await SmsSubscriber.countDocuments({
+        ...query,
+        converted: true,
+        convertedWith: 'first'
+      });
+      
+      const convertedSecond = await SmsSubscriber.countDocuments({
+        ...query,
+        converted: true,
+        convertedWith: 'second'
+      });
+
+      // Get revenue from conversions with breakdown
       const revenueResult = await SmsSubscriber.aggregate([
         { $match: { ...query, converted: true } },
         { 
           $group: {
-            _id: null,
+            _id: '$convertedWith',
             totalRevenue: { $sum: '$conversionData.orderTotal' },
             totalDiscount: { $sum: '$conversionData.discountAmount' },
             avgOrderValue: { $avg: '$conversionData.orderTotal' },
-            avgTimeToConvert: { $avg: '$conversionData.timeToConvert' }
+            avgTimeToConvert: { $avg: '$conversionData.timeToConvert' },
+            count: { $sum: 1 }
           }
         }
       ]);
 
-      const revenue = revenueResult[0] || {
-        totalRevenue: 0,
-        totalDiscount: 0,
-        avgOrderValue: 0,
-        avgTimeToConvert: 0
+      // Parse revenue by type
+      const revenueByType = {
+        first: { totalRevenue: 0, totalDiscount: 0, avgOrderValue: 0, avgTimeToConvert: 0, count: 0 },
+        second: { totalRevenue: 0, totalDiscount: 0, avgOrderValue: 0, avgTimeToConvert: 0, count: 0 }
       };
+      
+      revenueResult.forEach(r => {
+        if (r._id === 'first' || r._id === 'second') {
+          revenueByType[r._id] = r;
+        }
+      });
 
-      // Get recent conversions
+      const totalRevenue = revenueByType.first.totalRevenue + revenueByType.second.totalRevenue;
+      const totalDiscount = revenueByType.first.totalDiscount + revenueByType.second.totalDiscount;
+
+      // Get recent conversions with type
       const recentConversions = await SmsSubscriber.find({ 
         ...query, 
         converted: true 
       })
         .sort({ 'conversionData.convertedAt': -1 })
-        .limit(10)
-        .select('phone discountCode conversionData createdAt');
+        .limit(20)
+        .select('phone discountCode secondDiscountCode convertedWith conversionData createdAt');
 
       // Calculate conversion rate
       const conversionRate = totalSubscribers > 0 
         ? ((convertedSubscribers / totalSubscribers) * 100).toFixed(2) 
         : 0;
+
+      // 🆕 Get second SMS stats
+      const secondSmsSent = await SmsSubscriber.countDocuments({
+        ...query,
+        secondSmsSent: true
+      });
+      
+      const secondSmsDelivered = await SmsSubscriber.countDocuments({
+        ...query,
+        secondSmsStatus: 'delivered'
+      });
 
       return {
         success: true,
@@ -231,16 +301,51 @@ class SmsConversionService {
           totalSubscribers,
           convertedSubscribers,
           conversionRate: `${conversionRate}%`,
-          totalRevenue: revenue.totalRevenue?.toFixed(2) || '0.00',
-          totalDiscountGiven: revenue.totalDiscount?.toFixed(2) || '0.00',
-          avgOrderValue: revenue.avgOrderValue?.toFixed(2) || '0.00',
-          avgTimeToConvertMinutes: Math.round(revenue.avgTimeToConvert) || 0,
-          avgTimeToConvertFormatted: this.formatMinutes(revenue.avgTimeToConvert),
-          roi: this.calculateROI(revenue.totalRevenue, revenue.totalDiscount)
+          
+          // 🆕 Breakdown
+          conversions: {
+            total: convertedSubscribers,
+            first: convertedFirst,
+            second: convertedSecond
+          },
+          
+          // 🆕 Revenue breakdown
+          revenue: {
+            total: totalRevenue?.toFixed(2) || '0.00',
+            first: revenueByType.first.totalRevenue?.toFixed(2) || '0.00',
+            second: revenueByType.second.totalRevenue?.toFixed(2) || '0.00'
+          },
+          
+          totalDiscountGiven: totalDiscount?.toFixed(2) || '0.00',
+          
+          // 🆕 Avg values by type
+          avgOrderValue: {
+            overall: ((revenueByType.first.avgOrderValue + revenueByType.second.avgOrderValue) / 2)?.toFixed(2) || '0.00',
+            first: revenueByType.first.avgOrderValue?.toFixed(2) || '0.00',
+            second: revenueByType.second.avgOrderValue?.toFixed(2) || '0.00'
+          },
+          
+          avgTimeToConvert: {
+            first: this.formatMinutes(revenueByType.first.avgTimeToConvert),
+            second: this.formatMinutes(revenueByType.second.avgTimeToConvert)
+          },
+          
+          // 🆕 Second SMS stats
+          secondSms: {
+            sent: secondSmsSent,
+            delivered: secondSmsDelivered,
+            converted: convertedSecond,
+            recoveryRate: secondSmsDelivered > 0 
+              ? ((convertedSecond / secondSmsDelivered) * 100).toFixed(1) + '%'
+              : '0%'
+          },
+          
+          roi: this.calculateROI(totalRevenue, totalDiscount)
         },
         recentConversions: recentConversions.map(s => ({
           phone: this.maskPhone(s.phone),
-          code: s.discountCode,
+          code: s.conversionData?.discountCodeUsed || s.discountCode,
+          convertedWith: s.convertedWith || 'first', // 🆕
           orderNumber: s.conversionData?.orderNumber,
           orderTotal: s.conversionData?.orderTotal,
           convertedAt: s.conversionData?.convertedAt,
@@ -278,8 +383,6 @@ class SmsConversionService {
    */
   calculateROI(revenue, discountGiven) {
     if (!revenue || revenue <= 0) return '0%';
-    // ROI = (Revenue - Discount) / Discount * 100
-    // Or simplified: how much revenue per dollar of discount
     if (!discountGiven || discountGiven <= 0) return 'Infinite';
     const roi = ((revenue - discountGiven) / discountGiven * 100).toFixed(0);
     return `${roi}%`;
@@ -290,7 +393,6 @@ class SmsConversionService {
    */
   maskPhone(phone) {
     if (!phone) return 'N/A';
-    // +1234567890 -> +1***...7890
     const cleaned = phone.replace(/\D/g, '');
     if (cleaned.length >= 10) {
       return `+${cleaned.slice(0, 1)}***${cleaned.slice(-4)}`;
@@ -299,44 +401,161 @@ class SmsConversionService {
   }
 
   /**
-   * Get unconverted subscribers (for follow-up campaigns)
+   * Get unconverted subscribers eligible for second chance SMS
    */
-  async getUnconvertedSubscribers(options = {}) {
+  async getUnconvertedForSecondChance(options = {}) {
     try {
       const {
-        minDaysOld = 1,
-        maxDaysOld = 30,
-        limit = 100
+        minHoursOld = 6,
+        maxHoursOld = 8,
+        limit = 50
       } = options;
 
       const now = new Date();
-      const minDate = new Date(now - minDaysOld * 24 * 60 * 60 * 1000);
-      const maxDate = new Date(now - maxDaysOld * 24 * 60 * 60 * 1000);
+      const minDate = new Date(now - minHoursOld * 60 * 60 * 1000);
+      const maxDate = new Date(now - maxHoursOld * 60 * 60 * 1000);
 
       const subscribers = await SmsSubscriber.find({
         converted: false,
         status: 'active',
-        createdAt: { $lte: minDate, $gte: maxDate }
+        secondSmsSent: { $ne: true }, // Haven't received second SMS
+        welcomeSmsStatus: 'delivered', // First SMS was delivered
+        welcomeSmsAt: { $lte: minDate, $gte: maxDate }
       })
-        .sort({ createdAt: -1 })
+        .sort({ welcomeSmsAt: 1 }) // Oldest first
         .limit(limit)
-        .select('phone discountCode discountPercent createdAt welcomeSmsSentAt');
+        .select('phone discountCode discountPercent createdAt welcomeSmsAt');
 
       return {
         success: true,
         count: subscribers.length,
         subscribers: subscribers.map(s => ({
+          _id: s._id,
           phone: s.phone,
           discountCode: s.discountCode,
           discountPercent: s.discountPercent,
           signedUpAt: s.createdAt,
-          daysSinceSignup: Math.floor((now - s.createdAt) / (24 * 60 * 60 * 1000))
+          welcomeSmsAt: s.welcomeSmsAt,
+          hoursSinceFirstSms: Math.round((now - s.welcomeSmsAt) / (60 * 60 * 1000))
         }))
       };
 
     } catch (error) {
       console.error('❌ Error getting unconverted subscribers:', error);
       return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Get conversion breakdown stats (for dashboard)
+   */
+  async getConversionBreakdown() {
+    try {
+      const stats = await SmsSubscriber.aggregate([
+        {
+          $facet: {
+            total: [{ $count: 'count' }],
+            active: [{ $match: { status: 'active' } }, { $count: 'count' }],
+            
+            // First SMS stats
+            firstSmsDelivered: [
+              { $match: { welcomeSmsStatus: 'delivered' } },
+              { $count: 'count' }
+            ],
+            
+            // Second SMS stats
+            secondSmsSent: [
+              { $match: { secondSmsSent: true } },
+              { $count: 'count' }
+            ],
+            secondSmsDelivered: [
+              { $match: { secondSmsStatus: 'delivered' } },
+              { $count: 'count' }
+            ],
+            pendingSecondSms: [
+              { 
+                $match: { 
+                  status: 'active',
+                  converted: false, 
+                  secondSmsSent: { $ne: true },
+                  welcomeSmsStatus: 'delivered'
+                } 
+              },
+              { $count: 'count' }
+            ],
+            
+            // Conversion breakdown
+            convertedFirst: [
+              { $match: { converted: true, convertedWith: 'first' } },
+              { $count: 'count' }
+            ],
+            convertedSecond: [
+              { $match: { converted: true, convertedWith: 'second' } },
+              { $count: 'count' }
+            ],
+            totalConverted: [
+              { $match: { converted: true } },
+              { $count: 'count' }
+            ],
+            
+            // Revenue breakdown
+            revenueFirst: [
+              { $match: { converted: true, convertedWith: 'first' } },
+              { $group: { _id: null, total: { $sum: '$conversionData.orderTotal' } } }
+            ],
+            revenueSecond: [
+              { $match: { converted: true, convertedWith: 'second' } },
+              { $group: { _id: null, total: { $sum: '$conversionData.orderTotal' } } }
+            ],
+            
+            // No conversion after both SMS
+            noConversion: [
+              { 
+                $match: { 
+                  converted: false, 
+                  secondSmsSent: true,
+                  secondSmsStatus: 'delivered'
+                } 
+              },
+              { $count: 'count' }
+            ]
+          }
+        }
+      ]);
+      
+      const s = stats[0];
+      
+      return {
+        total: s.total[0]?.count || 0,
+        active: s.active[0]?.count || 0,
+        
+        firstSms: {
+          delivered: s.firstSmsDelivered[0]?.count || 0
+        },
+        
+        secondSms: {
+          sent: s.secondSmsSent[0]?.count || 0,
+          delivered: s.secondSmsDelivered[0]?.count || 0,
+          pending: s.pendingSecondSms[0]?.count || 0
+        },
+        
+        conversions: {
+          total: s.totalConverted[0]?.count || 0,
+          first: s.convertedFirst[0]?.count || 0,
+          second: s.convertedSecond[0]?.count || 0,
+          none: s.noConversion[0]?.count || 0
+        },
+        
+        revenue: {
+          total: (s.revenueFirst[0]?.total || 0) + (s.revenueSecond[0]?.total || 0),
+          first: s.revenueFirst[0]?.total || 0,
+          second: s.revenueSecond[0]?.total || 0
+        }
+      };
+
+    } catch (error) {
+      console.error('❌ Error getting conversion breakdown:', error);
+      return null;
     }
   }
 }

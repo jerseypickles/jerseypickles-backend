@@ -1,6 +1,8 @@
 // backend/src/controllers/smsController.js
+// 📱 SMS Controller - Con Second Chance SMS Support
 const SmsSubscriber = require('../models/SmsSubscriber');
 const telnyxService = require('../services/telnyxService');
+const smsConversionService = require('../services/smsConversionService');
 
 // Cargar shopifyService de forma segura
 let shopifyService = null;
@@ -9,6 +11,23 @@ try {
   console.log('📱 SMS Controller: Shopify service loaded');
 } catch (e) {
   console.log('⚠️  SMS Controller: Shopify service not available');
+}
+
+// Cargar secondChanceSmsService de forma segura
+let secondChanceSmsService = null;
+try {
+  secondChanceSmsService = require('../services/secondChanceSmsService');
+  console.log('📱 SMS Controller: Second Chance SMS service loaded');
+} catch (e) {
+  console.log('⚠️  SMS Controller: Second Chance SMS service not available');
+}
+
+// Cargar secondChanceSmsJob de forma segura
+let secondChanceSmsJob = null;
+try {
+  secondChanceSmsJob = require('../jobs/secondChanceSmsJob');
+} catch (e) {
+  // Job not available
 }
 
 const smsController = {
@@ -72,11 +91,11 @@ const smsController = {
       
       // ========== NUEVO SUSCRIPTOR ==========
       
-      // Generar código de descuento único
+      // Generar código de descuento único (15% OFF)
       const discountCode = await generateDiscountCode();
       console.log(`🎟️  Generated discount code: ${discountCode}`);
       
-      // Crear código en Shopify
+      // Crear código en Shopify (sin expiración para el primero)
       let shopifyDiscount = null;
       try {
         shopifyDiscount = await createShopifyDiscountCode(discountCode, 15);
@@ -102,13 +121,17 @@ const smsController = {
         shopifyPriceRuleId: shopifyDiscount?.priceRuleId || null,
         shopifyDiscountCodeId: shopifyDiscount?.discountId || null,
         ipAddress: req.ip || req.headers['x-forwarded-for']?.split(',')[0],
-        userAgent: req.headers['user-agent']
+        userAgent: req.headers['user-agent'],
+        // 🆕 Initialize second SMS fields
+        secondSmsSent: false,
+        converted: false,
+        convertedWith: null
       });
 
       await subscriber.save();
       console.log(`📱 New SMS subscriber created: ${formattedPhone}`);
 
-      // Enviar SMS de bienvenida
+      // Enviar SMS de bienvenida (15% OFF)
       const smsResult = await telnyxService.sendWelcomeSms(
         formattedPhone,
         subscriber.discountCode,
@@ -117,7 +140,7 @@ const smsController = {
 
       if (smsResult.success) {
         subscriber.welcomeSmsSent = true;
-        subscriber.welcomeSmsSentAt = new Date();
+        subscriber.welcomeSmsAt = new Date(); // 🆕 Renamed from welcomeSmsSentAt
         subscriber.welcomeSmsMessageId = smsResult.messageId;
         subscriber.welcomeSmsStatus = smsResult.status || 'sent';
         subscriber.carrier = smsResult.carrier;
@@ -125,7 +148,8 @@ const smsController = {
         const lineTypeMap = { 'wireless': 'mobile', 'mobile': 'mobile', 'landline': 'landline', 'voip': 'voip' };
         subscriber.lineType = lineTypeMap[smsResult.lineType?.toLowerCase()] || 'unknown';
         subscriber.totalSmsSent = 1;
-        console.log(`✅ Welcome SMS sent to ${formattedPhone} - ID: ${smsResult.messageId}`);
+        subscriber.totalSmsReceived = 1;
+        console.log(`✅ Welcome SMS (15% OFF) sent to ${formattedPhone} - ID: ${smsResult.messageId}`);
       } else {
         subscriber.welcomeSmsStatus = 'failed';
         subscriber.welcomeSmsError = smsResult.error;
@@ -194,7 +218,7 @@ const smsController = {
         return;
       }
 
-      // Actualizar estado del SMS saliente
+      // Actualizar estado del SMS saliente (first or second)
       if (webhookData.messageId) {
         await updateSmsStatus(webhookData);
       }
@@ -208,26 +232,49 @@ const smsController = {
   
   /**
    * GET /api/sms/stats
-   * Obtiene estadísticas generales de SMS
+   * Obtiene estadísticas generales de SMS con breakdown first/second
    */
   async getStats(req, res) {
     try {
+      // Get full breakdown from conversion service
+      const breakdown = await smsConversionService.getConversionBreakdown();
+      
       // Conteos básicos
-      const [total, active, unsubscribed, converted] = await Promise.all([
+      const [total, active, unsubscribed] = await Promise.all([
         SmsSubscriber.countDocuments(),
         SmsSubscriber.countDocuments({ status: 'active' }),
-        SmsSubscriber.countDocuments({ status: 'unsubscribed' }),
-        SmsSubscriber.countDocuments({ converted: true })
+        SmsSubscriber.countDocuments({ status: 'unsubscribed' })
       ]);
 
-      // SMS delivery stats
+      // SMS delivery stats (both first and second)
       const deliveryStats = await SmsSubscriber.aggregate([
         {
           $group: {
             _id: null,
-            totalSmsSent: { $sum: '$totalSmsSent' },
-            totalSmsDelivered: { $sum: '$totalSmsDelivered' },
-            totalSmsFailed: { $sum: '$totalSmsFailed' }
+            totalSmsSent: { 
+              $sum: { 
+                $add: [
+                  { $cond: ['$welcomeSmsSent', 1, 0] },
+                  { $cond: ['$secondSmsSent', 1, 0] }
+                ]
+              }
+            },
+            totalSmsDelivered: { 
+              $sum: {
+                $add: [
+                  { $cond: [{ $eq: ['$welcomeSmsStatus', 'delivered'] }, 1, 0] },
+                  { $cond: [{ $eq: ['$secondSmsStatus', 'delivered'] }, 1, 0] }
+                ]
+              }
+            },
+            totalSmsFailed: { 
+              $sum: {
+                $add: [
+                  { $cond: [{ $eq: ['$welcomeSmsStatus', 'failed'] }, 1, 0] },
+                  { $cond: [{ $eq: ['$secondSmsStatus', 'failed'] }, 1, 0] }
+                ]
+              }
+            }
           }
         }
       ]);
@@ -235,27 +282,65 @@ const smsController = {
       const delivery = deliveryStats[0] || { totalSmsSent: 0, totalSmsDelivered: 0, totalSmsFailed: 0 };
 
       // Subscribers últimas 24h
-      const recentSubscribers = await SmsSubscriber.countDocuments({
+      const recentSubscribers24h = await SmsSubscriber.countDocuments({
         createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
       });
 
-      // Pending delivery
-      const pendingDelivery = await SmsSubscriber.countDocuments({
-        welcomeSmsStatus: { $in: ['pending', 'queued', 'sending', 'sent'] }
-      });
+      // Calculate conversion rate
+      const totalConverted = breakdown?.conversions?.total || 0;
+      const conversionRate = total > 0 ? ((totalConverted / total) * 100).toFixed(1) : '0';
+
+      // 🆕 First SMS stats
+      const firstSmsDelivered = breakdown?.firstSms?.delivered || 0;
+      const firstConverted = breakdown?.conversions?.first || 0;
+      const firstConversionRate = firstSmsDelivered > 0 
+        ? ((firstConverted / firstSmsDelivered) * 100).toFixed(1) 
+        : '0';
+
+      // 🆕 Second SMS stats
+      const secondSmsSent = breakdown?.secondSms?.sent || 0;
+      const secondSmsDelivered = breakdown?.secondSms?.delivered || 0;
+      const secondConverted = breakdown?.conversions?.second || 0;
+      const recoveryRate = secondSmsDelivered > 0
+        ? ((secondConverted / secondSmsDelivered) * 100).toFixed(1)
+        : '0';
 
       res.json({
         success: true,
         total,
         active,
         unsubscribed,
-        converted,
-        conversionRate: total > 0 ? ((converted / total) * 100).toFixed(1) : 0,
+        converted: totalConverted,
+        conversionRate,
+        
+        // SMS delivery stats
         totalSmsSent: delivery.totalSmsSent || 0,
         totalSmsDelivered: delivery.totalSmsDelivered || 0,
         totalSmsFailed: delivery.totalSmsFailed || 0,
-        recentSubscribers24h: recentSubscribers,
-        pendingDelivery
+        
+        // 🆕 First SMS (15% OFF)
+        firstSms: {
+          delivered: firstSmsDelivered,
+          converted: firstConverted,
+          conversionRate: firstConversionRate
+        },
+        
+        // 🆕 Second SMS (20% OFF) - Recovery
+        secondSms: {
+          sent: secondSmsSent,
+          delivered: secondSmsDelivered,
+          converted: secondConverted,
+          pending: breakdown?.secondSms?.pending || 0,
+          recoveryRate
+        },
+        
+        // 🆕 Revenue breakdown
+        revenue: breakdown?.revenue || { total: 0, first: 0, second: 0 },
+        
+        // 🆕 No conversion after both SMS
+        noConversion: breakdown?.conversions?.none || 0,
+        
+        recentSubscribers24h
       });
 
     } catch (error) {
@@ -267,105 +352,30 @@ const smsController = {
     }
   },
 
-  // ==================== 🆕 ESTADÍSTICAS DE CONVERSIONES ====================
+  // ==================== ESTADÍSTICAS DE CONVERSIONES ====================
   
   /**
    * GET /api/sms/stats/conversions
-   * Obtiene estadísticas detalladas de conversiones
+   * Obtiene estadísticas detalladas de conversiones con first/second breakdown
    */
   async getConversionStats(req, res) {
     try {
       const { from, to } = req.query;
       
-      // Build date filter
-      const dateFilter = {};
-      if (from) dateFilter.$gte = new Date(from);
-      if (to) dateFilter.$lte = new Date(to);
+      const dateRange = {};
+      if (from) dateRange.from = from;
+      if (to) dateRange.to = to;
       
-      const matchStage = { converted: true };
-      if (Object.keys(dateFilter).length > 0) {
-        matchStage['conversionData.convertedAt'] = dateFilter;
-      }
-
-      // Get totals
-      const totalSubscribers = await SmsSubscriber.countDocuments();
-      const convertedSubscribers = await SmsSubscriber.countDocuments(matchStage);
+      const stats = await smsConversionService.getConversionStats(dateRange);
       
-      // Revenue aggregation
-      const revenueAgg = await SmsSubscriber.aggregate([
-        { $match: matchStage },
-        {
-          $group: {
-            _id: null,
-            totalRevenue: { $sum: '$conversionData.orderTotal' },
-            totalDiscountGiven: { $sum: '$conversionData.discountAmount' },
-            avgOrderValue: { $avg: '$conversionData.orderTotal' },
-            avgTimeToConvert: { $avg: '$conversionData.timeToConvert' },
-            totalOrders: { $sum: 1 }
-          }
-        }
-      ]);
-
-      const revenue = revenueAgg[0] || {
-        totalRevenue: 0,
-        totalDiscountGiven: 0,
-        avgOrderValue: 0,
-        avgTimeToConvert: 0,
-        totalOrders: 0
-      };
-
-      // Get recent conversions
-      const recentConversions = await SmsSubscriber.find({ converted: true })
-        .sort({ 'conversionData.convertedAt': -1 })
-        .limit(20)
-        .select('phone discountCode conversionData')
-        .lean();
-
-      // Format recent conversions for frontend
-      const formattedConversions = recentConversions.map(sub => ({
-        phone: sub.phone,
-        discountCode: sub.discountCode,
-        orderId: sub.conversionData?.orderId,
-        orderNumber: sub.conversionData?.orderNumber,
-        orderTotal: sub.conversionData?.orderTotal || 0,
-        discountAmount: sub.conversionData?.discountAmount || 0,
-        convertedAt: sub.conversionData?.convertedAt,
-        timeToConvert: sub.conversionData?.timeToConvert
-      }));
-
-      // Calculate ROI (simplified: revenue / estimated SMS cost)
-      const estimatedSmsCost = totalSubscribers * 0.015; // ~$0.015 per SMS
-      const roi = estimatedSmsCost > 0 
-        ? (((revenue.totalRevenue - estimatedSmsCost) / estimatedSmsCost) * 100).toFixed(0)
-        : 0;
-
-      // Format avg time to convert
-      let avgTimeFormatted = 'N/A';
-      if (revenue.avgTimeToConvert) {
-        const mins = Math.round(revenue.avgTimeToConvert);
-        if (mins < 60) {
-          avgTimeFormatted = `${mins} min`;
-        } else if (mins < 1440) {
-          avgTimeFormatted = `${Math.round(mins / 60)} hours`;
-        } else {
-          avgTimeFormatted = `${Math.round(mins / 1440)} days`;
-        }
+      if (!stats.success) {
+        return res.status(500).json(stats);
       }
 
       res.json({
         success: true,
-        totalSubscribers,
-        convertedSubscribers,
-        conversionRate: totalSubscribers > 0 
-          ? ((convertedSubscribers / totalSubscribers) * 100).toFixed(1)
-          : 0,
-        totalRevenue: revenue.totalRevenue || 0,
-        totalDiscountGiven: revenue.totalDiscountGiven || 0,
-        avgOrderValue: revenue.avgOrderValue || 0,
-        avgTimeToConvert: avgTimeFormatted,
-        avgTimeToConvertMinutes: revenue.avgTimeToConvert || 0,
-        roi: parseInt(roi) || 0,
-        recentConversions: formattedConversions
+        ...stats.stats,
+        recentConversions: stats.recentConversions
       });
 
     } catch (error) {
@@ -373,6 +383,145 @@ const smsController = {
       res.status(500).json({
         success: false,
         error: 'Error getting conversion statistics'
+      });
+    }
+  },
+
+  // ==================== 🆕 SECOND CHANCE SMS STATS ====================
+  
+  /**
+   * GET /api/sms/stats/second-chance
+   * Estadísticas específicas del Second Chance SMS
+   */
+  async getSecondChanceStats(req, res) {
+    try {
+      if (!secondChanceSmsService) {
+        return res.status(503).json({
+          success: false,
+          error: 'Second Chance SMS service not available'
+        });
+      }
+
+      const stats = await secondChanceSmsService.getSecondChanceStats();
+      const jobStatus = secondChanceSmsJob?.getStatus() || { initialized: false };
+      
+      res.json({
+        success: true,
+        ...stats,
+        job: jobStatus
+      });
+
+    } catch (error) {
+      console.error('❌ Second Chance Stats Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error getting second chance statistics'
+      });
+    }
+  },
+
+  // ==================== 🆕 TRIGGER SECOND CHANCE SMS ====================
+  
+  /**
+   * POST /api/sms/second-chance/trigger
+   * POST /api/sms/second-chance/trigger/:subscriberId
+   * Trigger manual para testing
+   */
+  async triggerSecondChance(req, res) {
+    try {
+      if (!secondChanceSmsService) {
+        return res.status(503).json({
+          success: false,
+          error: 'Second Chance SMS service not available'
+        });
+      }
+
+      const { subscriberId } = req.params;
+      
+      if (subscriberId) {
+        // Process specific subscriber
+        const subscriber = await SmsSubscriber.findById(subscriberId);
+        
+        if (!subscriber) {
+          return res.status(404).json({ 
+            success: false, 
+            error: 'Subscriber not found' 
+          });
+        }
+        
+        // Check eligibility
+        if (subscriber.converted) {
+          return res.status(400).json({
+            success: false,
+            error: 'Subscriber already converted'
+          });
+        }
+        
+        if (subscriber.secondSmsSent) {
+          return res.status(400).json({
+            success: false,
+            error: 'Second SMS already sent'
+          });
+        }
+        
+        const result = await secondChanceSmsService.processSubscriberForSecondSms(subscriber);
+        
+        return res.json({
+          success: result.success,
+          ...result
+        });
+      }
+      
+      // Process batch
+      const result = await secondChanceSmsService.processSecondChanceBatch(10);
+      
+      res.json({
+        success: true,
+        ...result
+      });
+      
+    } catch (error) {
+      console.error('❌ Trigger Second Chance Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error triggering second chance SMS'
+      });
+    }
+  },
+
+  // ==================== 🆕 SECOND CHANCE JOB STATUS ====================
+  
+  /**
+   * GET /api/sms/second-chance/status
+   */
+  async getSecondChanceJobStatus(req, res) {
+    try {
+      const status = secondChanceSmsJob?.getStatus() || {
+        initialized: false,
+        running: false,
+        withinSendingHours: false,
+        nextSendingWindow: null
+      };
+
+      // Get pending count
+      const pendingSecondSms = await SmsSubscriber.countDocuments({
+        status: 'active',
+        converted: false,
+        secondSmsSent: { $ne: true },
+        welcomeSmsStatus: 'delivered'
+      });
+
+      res.json({
+        success: true,
+        ...status,
+        pendingSecondSms
+      });
+
+    } catch (error) {
+      console.error('❌ Job Status Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error getting job status'
       });
     }
   },
@@ -390,6 +539,7 @@ const smsController = {
         limit = 20,
         status,
         converted,
+        convertedWith, // 🆕 Filter by 'first' or 'second'
         search,
         sortBy = 'createdAt',
         sortOrder = 'desc'
@@ -405,10 +555,16 @@ const smsController = {
         query.converted = converted === 'true';
       }
       
+      // 🆕 Filter by conversion type
+      if (convertedWith && ['first', 'second'].includes(convertedWith)) {
+        query.convertedWith = convertedWith;
+      }
+      
       if (search) {
         query.$or = [
           { phone: { $regex: search, $options: 'i' } },
-          { discountCode: { $regex: search.toUpperCase(), $options: 'i' } }
+          { discountCode: { $regex: search.toUpperCase(), $options: 'i' } },
+          { secondDiscountCode: { $regex: search.toUpperCase(), $options: 'i' } } // 🆕
         ];
       }
 
@@ -424,9 +580,15 @@ const smsController = {
         SmsSubscriber.countDocuments(query)
       ]);
 
+      // 🆕 Add computed conversionStatus for each subscriber
+      const formattedSubscribers = subscribers.map(sub => ({
+        ...sub,
+        conversionStatus: getConversionStatus(sub)
+      }));
+
       res.json({
         success: true,
-        subscribers,
+        subscribers: formattedSubscribers,
         total,
         page: parseInt(page),
         limit: parseInt(limit),
@@ -449,7 +611,7 @@ const smsController = {
    */
   async getSubscriber(req, res) {
     try {
-      const subscriber = await SmsSubscriber.findById(req.params.id);
+      const subscriber = await SmsSubscriber.findById(req.params.id).lean();
       
       if (!subscriber) {
         return res.status(404).json({
@@ -457,6 +619,9 @@ const smsController = {
           error: 'Subscriber not found'
         });
       }
+
+      // 🆕 Add conversion status
+      subscriber.conversionStatus = getConversionStatus(subscriber);
 
       res.json({
         success: true,
@@ -503,7 +668,10 @@ const smsController = {
 
       if (smsResult.success) {
         subscriber.totalSmsSent = (subscriber.totalSmsSent || 0) + 1;
+        subscriber.totalSmsReceived = (subscriber.totalSmsReceived || 0) + 1;
         subscriber.lastSmsAt = new Date();
+        subscriber.welcomeSmsStatus = 'sent';
+        subscriber.welcomeSmsMessageId = smsResult.messageId;
         await subscriber.save();
       }
 
@@ -547,6 +715,8 @@ const smsController = {
           error: telnyxError
         },
         shopify: shopifyService ? 'connected' : 'not available',
+        secondChanceSms: secondChanceSmsService ? 'available' : 'not available', // 🆕
+        secondChanceJob: secondChanceSmsJob?.getStatus()?.initialized || false, // 🆕
         database: 'connected'
       });
 
@@ -563,9 +733,26 @@ const smsController = {
 // ==================== FUNCIONES AUXILIARES ====================
 
 /**
- * Genera código de descuento único JP-XXXXX
+ * 🆕 Get conversion status label for frontend
  */
-async function generateDiscountCode() {
+function getConversionStatus(sub) {
+  if (sub.converted && sub.convertedWith === 'first') return 'converted';
+  if (sub.converted && sub.convertedWith === 'second') return 'recovered';
+  if (sub.secondSmsSent && !sub.converted) return 'no_conversion';
+  if (!sub.secondSmsSent && sub.welcomeSmsStatus === 'delivered' && !sub.converted) {
+    const hoursSinceFirst = sub.welcomeSmsAt 
+      ? (Date.now() - new Date(sub.welcomeSmsAt).getTime()) / (1000 * 60 * 60)
+      : 0;
+    if (hoursSinceFirst >= 6) return 'pending_second';
+    return 'waiting';
+  }
+  return 'waiting';
+}
+
+/**
+ * Genera código de descuento único JP-XXXXX (first) o JP2-XXXXX (second)
+ */
+async function generateDiscountCode(prefix = 'JP') {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Sin I, O, 0, 1 para evitar confusión
   let code;
   let exists = true;
@@ -575,10 +762,15 @@ async function generateDiscountCode() {
     for (let i = 0; i < 5; i++) {
       random += chars.charAt(Math.floor(Math.random() * chars.length));
     }
-    code = `JP-${random}`;
+    code = `${prefix}-${random}`;
     
-    // Verificar que no exista
-    const existing = await SmsSubscriber.findOne({ discountCode: code });
+    // Verificar que no exista en ninguno de los campos de código
+    const existing = await SmsSubscriber.findOne({ 
+      $or: [
+        { discountCode: code },
+        { secondDiscountCode: code }
+      ]
+    });
     exists = !!existing;
   }
   
@@ -587,8 +779,11 @@ async function generateDiscountCode() {
 
 /**
  * Crea código de descuento en Shopify
+ * @param {string} code - Código de descuento
+ * @param {number} percentOff - Porcentaje de descuento
+ * @param {Date} expiresAt - Fecha de expiración (opcional, para second code)
  */
-async function createShopifyDiscountCode(code, percentOff) {
+async function createShopifyDiscountCode(code, percentOff, expiresAt = null) {
   if (!shopifyService) {
     console.log('⚠️  Shopify service not available - skipping discount creation');
     return null;
@@ -601,11 +796,12 @@ async function createShopifyDiscountCode(code, percentOff) {
   }
   
   try {
-    const endsAt = new Date();
-    endsAt.setDate(endsAt.getDate() + 30);
+    // Default expiration: 30 days (for first code)
+    // For second code: expiresAt is passed (2 hours)
+    const endsAt = expiresAt || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
     
     const priceRule = await shopifyService.createPriceRule({
-      title: `SMS Welcome - ${code}`,
+      title: `SMS ${code.startsWith('JP2') ? 'Recovery' : 'Welcome'} - ${code}`,
       target_type: 'line_item',
       target_selection: 'all',
       allocation_method: 'across',
@@ -632,7 +828,8 @@ async function createShopifyDiscountCode(code, percentOff) {
     
     return {
       priceRuleId: priceRule.id.toString(),
-      discountId: discountCodeResult.id.toString()
+      discountId: discountCodeResult.id.toString(),
+      expiresAt: endsAt
     };
     
   } catch (error) {
@@ -645,10 +842,11 @@ async function createShopifyDiscountCode(code, percentOff) {
 }
 
 /**
- * Actualiza el estado de un SMS en la DB
+ * Actualiza el estado de un SMS en la DB (first or second)
  */
 async function updateSmsStatus(webhookData) {
   try {
+    // Try to find by welcomeSmsMessageId (first SMS)
     let subscriber = await SmsSubscriber.findOne({ 
       welcomeSmsMessageId: webhookData.messageId 
     });
@@ -665,7 +863,28 @@ async function updateSmsStatus(webhookData) {
       }
 
       await subscriber.save();
-      console.log(`✅ Updated SMS status: ${subscriber.phone} -> ${webhookData.status}`);
+      console.log(`✅ Updated first SMS status: ${subscriber.phone} -> ${webhookData.status}`);
+      return;
+    }
+
+    // 🆕 Try to find by secondSmsMessageId (second SMS)
+    subscriber = await SmsSubscriber.findOne({ 
+      secondSmsMessageId: webhookData.messageId 
+    });
+
+    if (subscriber) {
+      subscriber.secondSmsStatus = webhookData.status;
+      
+      if (webhookData.status === 'delivered') {
+        subscriber.totalSmsDelivered = (subscriber.totalSmsDelivered || 0) + 1;
+      }
+
+      if (webhookData.errors?.length > 0) {
+        subscriber.secondSmsError = webhookData.errors[0]?.detail || 'Unknown error';
+      }
+
+      await subscriber.save();
+      console.log(`✅ Updated second SMS status: ${subscriber.phone} -> ${webhookData.status}`);
     }
 
   } catch (error) {
@@ -728,5 +947,9 @@ async function handleInboundSms(webhookData) {
     console.error('❌ Error handling inbound SMS:', error);
   }
 }
+
+// Export helper for second chance service
+smsController.generateDiscountCode = generateDiscountCode;
+smsController.createShopifyDiscountCode = createShopifyDiscountCode;
 
 module.exports = smsController;

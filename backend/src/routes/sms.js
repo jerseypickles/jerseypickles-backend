@@ -1,4 +1,5 @@
 // backend/src/routes/sms.js
+// 📱 SMS Marketing Routes - Con Second Chance SMS
 const express = require('express');
 const router = express.Router();
 const smsController = require('../controllers/smsController');
@@ -33,8 +34,11 @@ router.post('/subscribe', smsController.subscribe);
 // Estadísticas generales
 router.get('/stats', optionalProtect, smsController.getStats);
 
-// 🆕 Estadísticas de conversiones (para dashboard)
+// Estadísticas de conversiones (para dashboard)
 router.get('/stats/conversions', optionalProtect, smsController.getConversionStats);
+
+// 🆕 Estadísticas de Second Chance SMS
+router.get('/stats/second-chance', optionalProtect, smsController.getSecondChanceStats);
 
 // Listar suscriptores
 router.get('/subscribers', optionalProtect, smsController.getSubscribers);
@@ -44,5 +48,12 @@ router.get('/subscribers/:id', optionalProtect, smsController.getSubscriber);
 
 // Reenviar SMS de bienvenida
 router.post('/subscribers/:id/resend', optionalProtect, smsController.resendWelcomeSms);
+
+// 🆕 Second Chance SMS - Trigger manual (para testing)
+router.post('/second-chance/trigger', optionalProtect, smsController.triggerSecondChance);
+router.post('/second-chance/trigger/:subscriberId', optionalProtect, smsController.triggerSecondChance);
+
+// 🆕 Second Chance SMS - Job status
+router.get('/second-chance/status', optionalProtect, smsController.getSecondChanceJobStatus);
 
 module.exports = router;
