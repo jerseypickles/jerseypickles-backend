@@ -123,11 +123,22 @@ class SmsConversionService {
 
       // Calculate time to convert (minutes from SMS sent to order placed)
       let timeToConvert = null;
-      const smsSentTime = isSecondCode ? subscriber.secondSmsAt : subscriber.welcomeSmsAt;
+      
+      // Para second code usa secondSmsAt, para first code busca en welcomeSmsAt O welcomeSmsSentAt (legacy)
+      let smsSentTime;
+      if (isSecondCode) {
+        smsSentTime = subscriber.secondSmsAt;
+      } else {
+        smsSentTime = subscriber.welcomeSmsAt || subscriber.welcomeSmsSentAt;
+      }
       
       if (smsSentTime) {
         const orderTime = new Date(shopifyOrder.created_at);
         timeToConvert = Math.round((orderTime - new Date(smsSentTime)) / (1000 * 60)); // minutes
+      } else if (subscriber.createdAt) {
+        // Fallback: usar fecha de creación del subscriber si no hay fecha de SMS
+        const orderTime = new Date(shopifyOrder.created_at);
+        timeToConvert = Math.round((orderTime - new Date(subscriber.createdAt)) / (1000 * 60));
       }
 
       // Calculate discount amount
@@ -277,7 +288,7 @@ class SmsConversionService {
       })
         .sort({ 'conversionData.convertedAt': -1, 'convertedAt': -1 })
         .limit(20)
-        .select('phone discountCode secondDiscountCode convertedWith convertedAt timeToConvert conversionData createdAt');
+        .select('phone discountCode secondDiscountCode convertedWith convertedAt timeToConvert conversionData createdAt welcomeSmsAt welcomeSmsSentAt secondSmsAt');
 
       // Calculate conversion rate
       const conversionRate = totalSubscribers > 0 
@@ -349,10 +360,29 @@ class SmsConversionService {
             usedCode = s.convertedWith === 'second' ? s.secondDiscountCode : s.discountCode;
           }
           
-          // Obtener timeToConvert de múltiples fuentes
-          const ttc = s.timeToConvert 
-            || s.conversionData?.timeToConvert 
-            || null;
+          // Obtener timeToConvert de múltiples fuentes o calcularlo
+          let ttc = s.timeToConvert || s.conversionData?.timeToConvert;
+          
+          // Si no hay timeToConvert guardado, calcularlo
+          if (ttc === null || ttc === undefined) {
+            const convertedAt = s.conversionData?.convertedAt || s.convertedAt;
+            
+            // Primero intentar con fecha de SMS
+            let startTime;
+            if (s.convertedWith === 'second' && s.secondSmsAt) {
+              startTime = new Date(s.secondSmsAt);
+            } else if (s.welcomeSmsAt || s.welcomeSmsSentAt) {
+              startTime = new Date(s.welcomeSmsAt || s.welcomeSmsSentAt);
+            } else if (s.createdAt) {
+              // Fallback: usar fecha de creación
+              startTime = new Date(s.createdAt);
+            }
+            
+            if (startTime && convertedAt) {
+              const endTime = new Date(convertedAt);
+              ttc = Math.round((endTime - startTime) / (1000 * 60)); // minutos
+            }
+          }
           
           return {
             phone: this.maskPhone(s.phone),
