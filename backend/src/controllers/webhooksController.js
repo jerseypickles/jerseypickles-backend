@@ -377,18 +377,34 @@ class WebhooksController {
           const conversionResult = await smsConversionService.processOrderConversion(shopifyOrder);
           
           if (conversionResult.converted) {
-            console.log(`   ✅ SMS Conversion tracked!`);
+            // 🆕 Detectar si fue first (JP-) o second (JP2-)
+            const successfulConversion = conversionResult.results?.find(r => r.success);
+            const conversionType = successfulConversion?.convertedWith || 'first';
+            const usedCode = successfulConversion?.code || 'N/A';
+            
+            // 🆕 Logs diferenciados por tipo
+            if (conversionType === 'second') {
+              console.log(`   🟣 RECOVERED! (Second Chance SMS - 20% OFF)`);
+            } else {
+              console.log(`   🟢 CONVERTED! (First SMS - 15% OFF)`);
+            }
+            
+            console.log(`   🏷️  Code used: ${usedCode}`);
+            console.log(`   💵 Order total: $${shopifyOrder.total_price}`);
+            console.log(`   ⏱️  Time to convert: ${successfulConversion?.timeToConvert || 'N/A'} min`);
             console.log(`   Codes processed: ${conversionResult.codesProcessed}`);
-            console.log(`   Successful: ${conversionResult.successfulConversions}`);
             
             actions.push({
               type: 'sms_conversion_tracked',
               details: {
+                conversionType, // 🆕 'first' o 'second'
+                usedCode,       // 🆕 El código que usó
                 codesProcessed: conversionResult.codesProcessed,
                 successfulConversions: conversionResult.successfulConversions,
                 results: conversionResult.results?.map(r => ({
                   code: r.code,
                   success: r.success,
+                  convertedWith: r.convertedWith, // 🆕
                   orderTotal: r.orderTotal,
                   timeToConvert: r.timeToConvert
                 }))
