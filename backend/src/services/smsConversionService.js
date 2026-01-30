@@ -275,9 +275,9 @@ class SmsConversionService {
         ...query, 
         converted: true 
       })
-        .sort({ 'conversionData.convertedAt': -1 })
+        .sort({ 'conversionData.convertedAt': -1, 'convertedAt': -1 })
         .limit(20)
-        .select('phone discountCode secondDiscountCode convertedWith conversionData createdAt');
+        .select('phone discountCode secondDiscountCode convertedWith convertedAt timeToConvert conversionData createdAt');
 
       // Calculate conversion rate
       const conversionRate = totalSubscribers > 0 
@@ -342,15 +342,29 @@ class SmsConversionService {
           
           roi: this.calculateROI(totalRevenue, totalDiscount)
         },
-        recentConversions: recentConversions.map(s => ({
-          phone: this.maskPhone(s.phone),
-          code: s.conversionData?.discountCodeUsed || s.discountCode,
-          convertedWith: s.convertedWith || 'first', // 🆕
-          orderNumber: s.conversionData?.orderNumber,
-          orderTotal: s.conversionData?.orderTotal,
-          convertedAt: s.conversionData?.convertedAt,
-          timeToConvert: this.formatMinutes(s.conversionData?.timeToConvert)
-        }))
+        recentConversions: recentConversions.map(s => {
+          // Determinar el código usado - prioridad: discountCodeUsed > secondDiscountCode (si es second) > discountCode
+          let usedCode = s.conversionData?.discountCodeUsed;
+          if (!usedCode) {
+            usedCode = s.convertedWith === 'second' ? s.secondDiscountCode : s.discountCode;
+          }
+          
+          // Obtener timeToConvert de múltiples fuentes
+          const ttc = s.timeToConvert 
+            || s.conversionData?.timeToConvert 
+            || null;
+          
+          return {
+            phone: this.maskPhone(s.phone),
+            code: usedCode || s.discountCode || '-',
+            discountCode: usedCode || s.discountCode || '-',
+            convertedWith: s.convertedWith || 'first',
+            orderNumber: s.conversionData?.orderNumber,
+            orderTotal: s.conversionData?.orderTotal,
+            convertedAt: s.conversionData?.convertedAt || s.convertedAt,
+            timeToConvert: this.formatMinutes(ttc)
+          };
+        })
       };
 
     } catch (error) {
@@ -363,18 +377,22 @@ class SmsConversionService {
    * Format minutes to human readable
    */
   formatMinutes(minutes) {
-    if (!minutes || minutes <= 0) return 'N/A';
+    // Handle null, undefined, empty string, NaN
+    if (minutes === null || minutes === undefined || minutes === '') return '-';
     
-    if (minutes < 60) {
-      return `${Math.round(minutes)} min`;
-    } else if (minutes < 1440) {
-      const hours = Math.floor(minutes / 60);
-      const mins = Math.round(minutes % 60);
-      return `${hours}h ${mins}m`;
+    const mins = Number(minutes);
+    if (isNaN(mins) || mins < 0) return '-';
+    
+    if (mins < 60) {
+      return `${Math.round(mins)} min`;
+    } else if (mins < 1440) {
+      const hours = Math.floor(mins / 60);
+      const remainingMins = Math.round(mins % 60);
+      return remainingMins > 0 ? `${hours}h ${remainingMins}m` : `${hours}h`;
     } else {
-      const days = Math.floor(minutes / 1440);
-      const hours = Math.floor((minutes % 1440) / 60);
-      return `${days}d ${hours}h`;
+      const days = Math.floor(mins / 1440);
+      const hours = Math.floor((mins % 1440) / 60);
+      return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
     }
   }
 
