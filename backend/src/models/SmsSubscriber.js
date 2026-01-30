@@ -243,8 +243,9 @@ smsSubscriberSchema.virtual('eligibleForSecondSms').get(function() {
 
 // Conversion status label for frontend
 smsSubscriberSchema.virtual('conversionStatus').get(function() {
-  if (this.converted && this.convertedWith === 'first') return 'converted';
+  // Legacy data (converted sin convertedWith) se trata como 'first'
   if (this.converted && this.convertedWith === 'second') return 'recovered';
+  if (this.converted) return 'converted'; // first o legacy
   if (this.secondSmsSent && !this.converted) return 'no_conversion';
   if (!this.secondSmsSent && this.eligibleForSecondSms) return 'pending_second';
   if (!this.converted) return 'waiting';
@@ -333,9 +334,18 @@ smsSubscriberSchema.statics.getConversionBreakdown = async function() {
           { $count: 'count' }
         ],
         
-        // Conversion breakdown
+        // Conversion breakdown - INCLUIR LEGACY (sin convertedWith) como first
         convertedFirst: [
-          { $match: { converted: true, convertedWith: 'first' } },
+          { 
+            $match: { 
+              converted: true,
+              $or: [
+                { convertedWith: 'first' },
+                { convertedWith: { $exists: false } },
+                { convertedWith: null }
+              ]
+            } 
+          },
           { $count: 'count' }
         ],
         convertedSecond: [
@@ -347,9 +357,18 @@ smsSubscriberSchema.statics.getConversionBreakdown = async function() {
           { $count: 'count' }
         ],
         
-        // Revenue breakdown
+        // Revenue breakdown - INCLUIR LEGACY en first
         revenueFirst: [
-          { $match: { converted: true, convertedWith: 'first' } },
+          { 
+            $match: { 
+              converted: true,
+              $or: [
+                { convertedWith: 'first' },
+                { convertedWith: { $exists: false } },
+                { convertedWith: null }
+              ]
+            } 
+          },
           { $group: { _id: null, total: { $sum: '$conversionData.orderTotal' } } }
         ],
         revenueSecond: [

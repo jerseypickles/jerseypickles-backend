@@ -238,11 +238,16 @@ class SmsConversionService {
         converted: true 
       });
 
-      // 🆕 Breakdown by conversion type
+      // Breakdown by conversion type
+      // FIRST = convertedWith es 'first' O convertedWith no existe/null (datos legacy)
       const convertedFirst = await SmsSubscriber.countDocuments({
         ...query,
         converted: true,
-        convertedWith: 'first'
+        $or: [
+          { convertedWith: 'first' },
+          { convertedWith: { $exists: false } },
+          { convertedWith: null }
+        ]
       });
       
       const convertedSecond = await SmsSubscriber.countDocuments({
@@ -252,11 +257,14 @@ class SmsConversionService {
       });
 
       // Get revenue from conversions with breakdown
+      // Usar $ifNull para tratar null/undefined como 'first' (legacy)
       const revenueResult = await SmsSubscriber.aggregate([
         { $match: { ...query, converted: true } },
         { 
           $group: {
-            _id: '$convertedWith',
+            _id: { 
+              $ifNull: ['$convertedWith', 'first'] // Legacy data sin convertedWith = first
+            },
             totalRevenue: { $sum: '$conversionData.orderTotal' },
             totalDiscount: { $sum: '$conversionData.discountAmount' },
             avgOrderValue: { $avg: '$conversionData.orderTotal' },
@@ -388,6 +396,7 @@ class SmsConversionService {
             phone: this.maskPhone(s.phone),
             code: usedCode || s.discountCode || '-',
             discountCode: usedCode || s.discountCode || '-',
+            // Legacy data (sin convertedWith) se considera 'first'
             convertedWith: s.convertedWith || 'first',
             orderNumber: s.conversionData?.orderNumber,
             orderTotal: s.conversionData?.orderTotal,
@@ -533,8 +542,18 @@ class SmsConversionService {
             ],
             
             // Conversion breakdown
+            // First = convertedWith es 'first' O converted es true pero convertedWith no existe (legacy)
             convertedFirst: [
-              { $match: { converted: true, convertedWith: 'first' } },
+              { 
+                $match: { 
+                  converted: true, 
+                  $or: [
+                    { convertedWith: 'first' },
+                    { convertedWith: { $exists: false } },
+                    { convertedWith: null }
+                  ]
+                } 
+              },
               { $count: 'count' }
             ],
             convertedSecond: [
@@ -546,9 +565,18 @@ class SmsConversionService {
               { $count: 'count' }
             ],
             
-            // Revenue breakdown
+            // Revenue breakdown - incluir legacy en first
             revenueFirst: [
-              { $match: { converted: true, convertedWith: 'first' } },
+              { 
+                $match: { 
+                  converted: true, 
+                  $or: [
+                    { convertedWith: 'first' },
+                    { convertedWith: { $exists: false } },
+                    { convertedWith: null }
+                  ]
+                } 
+              },
               { $group: { _id: null, total: { $sum: '$conversionData.orderTotal' } } }
             ],
             revenueSecond: [

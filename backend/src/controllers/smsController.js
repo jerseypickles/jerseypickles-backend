@@ -736,12 +736,14 @@ const smsController = {
  * 🆕 Get conversion status label for frontend
  */
 function getConversionStatus(sub) {
-  if (sub.converted && sub.convertedWith === 'first') return 'converted';
+  // Legacy data (converted sin convertedWith) se trata como 'first' (converted)
   if (sub.converted && sub.convertedWith === 'second') return 'recovered';
+  if (sub.converted) return 'converted'; // first o legacy
   if (sub.secondSmsSent && !sub.converted) return 'no_conversion';
   if (!sub.secondSmsSent && sub.welcomeSmsStatus === 'delivered' && !sub.converted) {
-    const hoursSinceFirst = sub.welcomeSmsAt 
-      ? (Date.now() - new Date(sub.welcomeSmsAt).getTime()) / (1000 * 60 * 60)
+    const smsTime = sub.welcomeSmsAt || sub.welcomeSmsSentAt;
+    const hoursSinceFirst = smsTime 
+      ? (Date.now() - new Date(smsTime).getTime()) / (1000 * 60 * 60)
       : 0;
     if (hoursSinceFirst >= 6) return 'pending_second';
     return 'waiting';
