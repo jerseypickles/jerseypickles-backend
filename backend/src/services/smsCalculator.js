@@ -1076,6 +1076,617 @@ class SmsCalculator {
       }
     };
   }
+
+  // ==================== 8. ENGAGEMENT HEATMAP ====================
+
+  async calculateEngagementHeatmap(options = {}) {
+    const { days = 30, metric = 'clicks' } = options;
+    const { start } = this.getDateRange(days);
+
+    // Obtener datos de SmsMessage para campañas
+    const SmsMessage = require('../models/SmsMessage');
+
+    // Aggregar por hora y día de la semana
+    const heatmapData = await SmsMessage.aggregate([
+      {
+        $match: {
+          sentAt: { $gte: start },
+          status: 'delivered'
+        }
+      },
+      {
+        $project: {
+          hour: { $hour: '$sentAt' },
+          dayOfWeek: { $dayOfWeek: '$sentAt' }, // 1=Sunday, 7=Saturday
+          clicked: { $cond: ['$clicked', 1, 0] },
+          converted: { $cond: ['$converted', 1, 0] }
+        }
+      },
+      {
+        $group: {
+          _id: { hour: '$hour', day: '$dayOfWeek' },
+          total: { $sum: 1 },
+          clicks: { $sum: '$clicked' },
+          conversions: { $sum: '$converted' }
+        }
+      },
+      { $sort: { '_id.day': 1, '_id.hour': 1 } }
+    ]);
+
+    // También analizar datos de conversión de Welcome SMS por hora
+    const welcomeHeatmap = await SmsSubscriber.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: start },
+          welcomeSmsAt: { $exists: true },
+          converted: true
+        }
+      },
+      {
+        $project: {
+          hour: { $hour: '$welcomeSmsAt' },
+          dayOfWeek: { $dayOfWeek: '$welcomeSmsAt' }
+        }
+      },
+      {
+        $group: {
+          _id: { hour: '$hour', day: '$dayOfWeek' },
+          conversions: { $sum: 1 }
+        }
+      }
+    ]);
+
+    // Crear matriz 7x24 (días x horas)
+    const dayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+    const matrix = [];
+
+    for (let day = 1; day <= 7; day++) {
+      const dayData = {
+        day: dayNames[day - 1],
+        dayIndex: day,
+        hours: []
+      };
+
+      for (let hour = 0; hour < 24; hour++) {
+        const campaignData = heatmapData.find(d => d._id.day === day && d._id.hour === hour);
+        const welcomeData = welcomeHeatmap.find(d => d._id.day === day && d._id.hour === hour);
+
+        const total = (campaignData?.total || 0);
+        const clicks = (campaignData?.clicks || 0);
+        const conversions = (campaignData?.conversions || 0) + (welcomeData?.conversions || 0);
+
+        // Calcular engagement rate basado en métrica seleccionada
+        let rate = 0;
+        if (metric === 'clicks' && total > 0) {
+          rate = (clicks / total) * 100;
+        } else if (metric === 'conversions' && total > 0) {
+          rate = (conversions / total) * 100;
+        }
+
+        dayData.hours.push({
+          hour,
+          hourLabel: `${hour}:00`,
+          total,
+          clicks,
+          conversions,
+          rate: rate.toFixed(1),
+          intensity: this.getIntensityLevel(rate)
+        });
+      }
+
+      matrix.push(dayData);
+    }
+
+    // Encontrar top 5 mejores horarios
+    const allSlots = [];
+    matrix.forEach(day => {
+      day.hours.forEach(h => {
+        if (h.total >= 5) { // Mínimo 5 mensajes para ser significativo
+          allSlots.push({
+            day: day.day,
+            hour: h.hourLabel,
+            rate: parseFloat(h.rate),
+            total: h.total,
+            clicks: h.clicks,
+            conversions: h.conversions
+          });
+        }
+      });
+    });
+
+    allSlots.sort((a, b) => b.rate - a.rate);
+    const top5 = allSlots.slice(0, 5);
+
+    // Generar recomendación
+    let recommendation = 'Sin datos suficientes para recomendación.';
+    if (top5.length > 0) {
+      const best = top5[0];
+      recommendation = `Mejor momento para enviar SMS: ${best.day} a las ${best.hour} con ${best.rate}% de ${metric === 'clicks' ? 'clicks' : 'conversiones'}.`;
+    }
+
+    // Encontrar peor horario
+    const bottom5 = allSlots.filter(s => s.total >= 5).sort((a, b) => a.rate - b.rate).slice(0, 5);
+
+    return {
+      success: true,
+      period: { days, start, end: new Date() },
+      metric,
+      summary: {
+        totalMessages: allSlots.reduce((sum, s) => sum + s.total, 0),
+        totalClicks: allSlots.reduce((sum, s) => sum + s.clicks, 0),
+        totalConversions: allSlots.reduce((sum, s) => sum + s.conversions, 0),
+        avgRate: allSlots.length > 0
+          ? (allSlots.reduce((sum, s) => sum + s.rate, 0) / allSlots.length).toFixed(1) + '%'
+          : '0%'
+      },
+      heatmap: matrix,
+      topHours: top5,
+      worstHours: bottom5,
+      recommendation,
+      insights: this.generateHeatmapInsights(top5, bottom5, metric)
+    };
+  }
+
+  getIntensityLevel(rate) {
+    if (rate >= 15) return 'very_high';
+    if (rate >= 10) return 'high';
+    if (rate >= 5) return 'medium';
+    if (rate >= 2) return 'low';
+    return 'very_low';
+  }
+
+  generateHeatmapInsights(top5, bottom5, metric) {
+    const insights = [];
+
+    if (top5.length > 0) {
+      // Patrón de días
+      const topDays = [...new Set(top5.map(t => t.day))];
+      if (topDays.length <= 2) {
+        insights.push({
+          priority: 'high',
+          insight: `Los mejores días para enviar son: ${topDays.join(' y ')}`,
+          action: 'Concentra tus campañas en estos días'
+        });
+      }
+
+      // Patrón de horas
+      const topHours = top5.map(t => parseInt(t.hour.split(':')[0]));
+      const avgHour = Math.round(topHours.reduce((a, b) => a + b, 0) / topHours.length);
+      if (avgHour >= 9 && avgHour <= 11) {
+        insights.push({
+          priority: 'medium',
+          insight: 'Las mañanas (9-11 AM) tienen mejor engagement',
+          action: 'Programa tus SMS para las mañanas'
+        });
+      } else if (avgHour >= 12 && avgHour <= 14) {
+        insights.push({
+          priority: 'medium',
+          insight: 'El horario de almuerzo tiene buen engagement',
+          action: 'Aprovecha el horario de almuerzo (12-2 PM)'
+        });
+      }
+    }
+
+    if (bottom5.length > 0) {
+      const worstHours = bottom5.map(t => parseInt(t.hour.split(':')[0]));
+      if (worstHours.some(h => h >= 22 || h <= 6)) {
+        insights.push({
+          priority: 'warning',
+          insight: 'Las horas nocturnas (10PM-6AM) tienen bajo engagement',
+          action: 'Evita enviar SMS en horario nocturno'
+        });
+      }
+    }
+
+    return insights;
+  }
+
+  // ==================== 9. ANALYZE SMS MESSAGES ====================
+
+  async analyzeSmsMessages(options = {}) {
+    const { days = 30 } = options;
+    const { start } = this.getDateRange(days);
+
+    // Obtener campañas SMS enviadas
+    const campaigns = await SmsCampaign.find({
+      status: 'sent',
+      completedAt: { $gte: start }
+    }).sort({ completedAt: -1 }).lean();
+
+    if (campaigns.length === 0) {
+      return {
+        success: true,
+        message: 'No hay campañas SMS enviadas en este período',
+        analyses: [],
+        insights: []
+      };
+    }
+
+    // Analizar cada mensaje
+    const analyses = campaigns.map(campaign => {
+      const message = campaign.message || '';
+      const stats = campaign.stats || {};
+
+      // Características del mensaje
+      const hasEmoji = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]/u.test(message);
+      const hasDiscount = /\d+%|off|descuento|ahorra/i.test(message);
+      const hasUrgency = /hoy|ahora|última|expira|limitado|solo|quick/i.test(message);
+      const hasCTA = /shop|compra|visita|click|usa|código/i.test(message);
+      const hasPersonalization = /\{name\}|\{first_name\}/i.test(message);
+      const charCount = message.length;
+      const segments = campaign.segments || Math.ceil(charCount / 160);
+
+      // Calcular click rate
+      const clickRate = stats.delivered > 0
+        ? ((stats.clicked || 0) / stats.delivered) * 100
+        : 0;
+      const conversionRate = stats.delivered > 0
+        ? ((stats.converted || 0) / stats.delivered) * 100
+        : 0;
+
+      return {
+        campaignId: campaign._id,
+        name: campaign.name,
+        message: message.substring(0, 100) + (message.length > 100 ? '...' : ''),
+        fullMessage: message,
+        sentAt: campaign.completedAt,
+        characteristics: {
+          charCount,
+          segments,
+          hasEmoji,
+          hasDiscount,
+          hasUrgency,
+          hasCTA,
+          hasPersonalization
+        },
+        performance: {
+          sent: stats.sent || 0,
+          delivered: stats.delivered || 0,
+          clicked: stats.clicked || 0,
+          converted: stats.converted || 0,
+          clickRate: clickRate.toFixed(2),
+          conversionRate: conversionRate.toFixed(2),
+          revenue: stats.totalRevenue || 0
+        },
+        score: this.calculateMessageScore({
+          charCount, hasEmoji, hasDiscount, hasUrgency, hasCTA, clickRate
+        })
+      };
+    });
+
+    // Ordenar por click rate
+    analyses.sort((a, b) => parseFloat(b.performance.clickRate) - parseFloat(a.performance.clickRate));
+
+    // Generar insights generales
+    const insights = this.generateMessageInsights(analyses);
+
+    // Estadísticas agregadas
+    const withEmoji = analyses.filter(a => a.characteristics.hasEmoji);
+    const withoutEmoji = analyses.filter(a => !a.characteristics.hasEmoji);
+    const withUrgency = analyses.filter(a => a.characteristics.hasUrgency);
+    const withDiscount = analyses.filter(a => a.characteristics.hasDiscount);
+
+    const avgClickRate = (arr) => arr.length > 0
+      ? arr.reduce((sum, a) => sum + parseFloat(a.performance.clickRate), 0) / arr.length
+      : 0;
+
+    const patterns = {
+      emoji: {
+        withEmoji: {
+          count: withEmoji.length,
+          avgClickRate: avgClickRate(withEmoji).toFixed(2) + '%'
+        },
+        withoutEmoji: {
+          count: withoutEmoji.length,
+          avgClickRate: avgClickRate(withoutEmoji).toFixed(2) + '%'
+        },
+        recommendation: avgClickRate(withEmoji) > avgClickRate(withoutEmoji)
+          ? 'Los emojis mejoran el click rate'
+          : 'Los emojis no muestran mejora significativa'
+      },
+      urgency: {
+        withUrgency: {
+          count: withUrgency.length,
+          avgClickRate: avgClickRate(withUrgency).toFixed(2) + '%'
+        },
+        recommendation: avgClickRate(withUrgency) > avgClickRate(analyses) * 1.1
+          ? 'La urgencia aumenta clicks significativamente'
+          : 'La urgencia no muestra mejora significativa'
+      },
+      discount: {
+        withDiscount: {
+          count: withDiscount.length,
+          avgClickRate: avgClickRate(withDiscount).toFixed(2) + '%'
+        }
+      },
+      length: {
+        short: analyses.filter(a => a.characteristics.charCount <= 100).length,
+        medium: analyses.filter(a => a.characteristics.charCount > 100 && a.characteristics.charCount <= 160).length,
+        long: analyses.filter(a => a.characteristics.charCount > 160).length,
+        recommendation: 'Mantén los mensajes bajo 160 caracteres para evitar segmentación'
+      }
+    };
+
+    return {
+      success: true,
+      period: { days, start, end: new Date() },
+      summary: {
+        totalCampaigns: analyses.length,
+        avgClickRate: avgClickRate(analyses).toFixed(2) + '%',
+        avgConversionRate: (analyses.reduce((sum, a) => sum + parseFloat(a.performance.conversionRate), 0) / analyses.length).toFixed(2) + '%',
+        totalRevenue: analyses.reduce((sum, a) => sum + a.performance.revenue, 0).toFixed(2),
+        topPerformer: analyses[0]?.name || 'N/A'
+      },
+      analyses: analyses.slice(0, 20), // Top 20
+      patterns,
+      insights
+    };
+  }
+
+  calculateMessageScore(data) {
+    let score = 50; // Base score
+
+    // Longitud óptima
+    if (data.charCount <= 160) score += 10;
+    else if (data.charCount <= 306) score += 5;
+    else score -= 5;
+
+    // Características positivas
+    if (data.hasEmoji) score += 8;
+    if (data.hasDiscount) score += 12;
+    if (data.hasUrgency) score += 10;
+    if (data.hasCTA) score += 10;
+
+    // Ajustar por performance real si está disponible
+    if (data.clickRate > 10) score += 15;
+    else if (data.clickRate > 5) score += 8;
+    else if (data.clickRate < 2) score -= 10;
+
+    return Math.min(100, Math.max(0, score));
+  }
+
+  generateMessageInsights(analyses) {
+    const insights = [];
+
+    if (analyses.length === 0) return insights;
+
+    // Top performer
+    const top = analyses[0];
+    if (top) {
+      const traits = [];
+      if (top.characteristics.hasEmoji) traits.push('emoji');
+      if (top.characteristics.hasUrgency) traits.push('urgencia');
+      if (top.characteristics.hasDiscount) traits.push('descuento');
+
+      insights.push({
+        priority: 'high',
+        category: 'top_performer',
+        insight: `"${top.name}" tuvo el mejor click rate (${top.performance.clickRate}%)`,
+        action: traits.length > 0
+          ? `Usa estos elementos: ${traits.join(', ')}`
+          : 'Analiza qué hizo diferente este mensaje'
+      });
+    }
+
+    // Worst performer
+    const worst = analyses[analyses.length - 1];
+    if (worst && parseFloat(worst.performance.clickRate) < 2) {
+      insights.push({
+        priority: 'warning',
+        category: 'worst_performer',
+        insight: `"${worst.name}" tuvo bajo click rate (${worst.performance.clickRate}%)`,
+        action: 'Evita mensajes similares en el futuro'
+      });
+    }
+
+    // Longitud
+    const longMessages = analyses.filter(a => a.characteristics.charCount > 160);
+    if (longMessages.length > analyses.length * 0.3) {
+      insights.push({
+        priority: 'medium',
+        category: 'length',
+        insight: `${longMessages.length} de ${analyses.length} mensajes exceden 160 caracteres`,
+        action: 'Los mensajes cortos tienen mejor engagement'
+      });
+    }
+
+    return insights;
+  }
+
+  // ==================== 10. PREDICT CAMPAIGN PERFORMANCE ====================
+
+  async predictCampaignPerformance(campaignData, options = {}) {
+    const { useAI = false } = options;
+    const message = campaignData.message || '';
+
+    // Análisis del mensaje
+    const characteristics = {
+      charCount: message.length,
+      segments: Math.ceil(message.length / 160),
+      hasEmoji: /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]/u.test(message),
+      hasDiscount: /\d+%|off|descuento/i.test(message),
+      hasUrgency: /hoy|ahora|última|expira|limitado/i.test(message),
+      hasCTA: /shop|compra|visita|click|usa/i.test(message),
+      hasLink: /http|www|\.com/i.test(message)
+    };
+
+    // Obtener stats históricos
+    const historicalStats = await this.getHistoricalCampaignStats();
+
+    // Calcular score del mensaje
+    let messageScore = 50;
+
+    // Longitud (≤160 chars = +5%)
+    if (characteristics.charCount <= 160) messageScore += 10;
+    else if (characteristics.charCount > 306) messageScore -= 5;
+
+    // Emojis (+3%)
+    if (characteristics.hasEmoji) messageScore += 6;
+
+    // Ofertas/descuentos (+8%)
+    if (characteristics.hasDiscount) messageScore += 16;
+
+    // Urgencia (+5%)
+    if (characteristics.hasUrgency) messageScore += 10;
+
+    // Call-to-action (+4%)
+    if (characteristics.hasCTA) messageScore += 8;
+
+    messageScore = Math.min(100, Math.max(0, messageScore));
+
+    // Predecir tasas basadas en score y datos históricos
+    const baseDeliveryRate = historicalStats.avgDeliveryRate || 95;
+    const baseClickRate = historicalStats.avgClickRate || 5;
+    const baseConversionRate = historicalStats.avgConversionRate || 8;
+
+    // Ajustar predicciones basadas en score
+    const scoreFactor = messageScore / 70; // 70 es el score "promedio"
+
+    const predictions = {
+      deliveryRate: {
+        min: Math.max(85, baseDeliveryRate - 3),
+        max: Math.min(99, baseDeliveryRate + 2),
+        expected: baseDeliveryRate.toFixed(1)
+      },
+      clickRate: {
+        min: Math.max(1, (baseClickRate * scoreFactor * 0.7)).toFixed(1),
+        max: Math.min(20, (baseClickRate * scoreFactor * 1.4)).toFixed(1),
+        expected: (baseClickRate * scoreFactor).toFixed(1)
+      },
+      conversionRate: {
+        min: Math.max(2, (baseConversionRate * scoreFactor * 0.7)).toFixed(1),
+        max: Math.min(25, (baseConversionRate * scoreFactor * 1.5)).toFixed(1),
+        expected: (baseConversionRate * scoreFactor).toFixed(1)
+      }
+    };
+
+    // Estimar revenue si hay audiencia
+    const estimatedAudience = campaignData.estimatedAudience || 100;
+    const avgOrderValue = historicalStats.avgOrderValue || 45;
+    const expectedConversions = Math.round(estimatedAudience * (parseFloat(predictions.conversionRate.expected) / 100));
+
+    predictions.estimatedRevenue = {
+      min: Math.round(expectedConversions * avgOrderValue * 0.7),
+      max: Math.round(expectedConversions * avgOrderValue * 1.3),
+      expected: Math.round(expectedConversions * avgOrderValue)
+    };
+
+    // Generar recomendaciones
+    const recommendations = [];
+    const strengths = [];
+    const weaknesses = [];
+
+    if (characteristics.charCount <= 160) {
+      strengths.push('Longitud óptima (1 segmento)');
+    } else {
+      weaknesses.push('Mensaje largo - considera acortarlo');
+      recommendations.push('Reduce el mensaje a menos de 160 caracteres');
+    }
+
+    if (characteristics.hasEmoji) {
+      strengths.push('Incluye emoji para engagement');
+    } else {
+      recommendations.push('Añade un emoji relevante (🥒🫒)');
+    }
+
+    if (characteristics.hasDiscount) {
+      strengths.push('Incluye oferta/descuento');
+    }
+
+    if (characteristics.hasUrgency) {
+      strengths.push('Tiene urgencia que motiva acción');
+    } else {
+      recommendations.push('Añade urgencia (ej: "Solo hoy", "Expira en 2h")');
+    }
+
+    if (characteristics.hasCTA) {
+      strengths.push('Tiene call-to-action claro');
+    } else {
+      weaknesses.push('Falta call-to-action');
+      recommendations.push('Añade un CTA claro (ej: "Shop now", "Usa código X")');
+    }
+
+    // Determinar comparación con promedio
+    let comparisonToAverage = 'average';
+    if (messageScore >= 75) comparisonToAverage = 'above_average';
+    else if (messageScore < 50) comparisonToAverage = 'below_average';
+
+    return {
+      success: true,
+      messageScore,
+      characteristics,
+      predictions,
+      strengths,
+      weaknesses,
+      recommendations,
+      comparisonToAverage,
+      confidence: historicalStats.campaignCount >= 10 ? 'high' :
+                  historicalStats.campaignCount >= 5 ? 'medium' : 'low',
+      historicalBenchmarks: {
+        avgClickRate: historicalStats.avgClickRate?.toFixed(1) + '%',
+        avgConversionRate: historicalStats.avgConversionRate?.toFixed(1) + '%',
+        topCampaignClickRate: historicalStats.topCampaign?.clickRate?.toFixed(1) + '%',
+        campaignsAnalyzed: historicalStats.campaignCount
+      }
+    };
+  }
+
+  async getHistoricalCampaignStats() {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    const campaigns = await SmsCampaign.find({
+      status: 'sent',
+      completedAt: { $gte: thirtyDaysAgo }
+    }).lean();
+
+    if (campaigns.length === 0) {
+      return {
+        campaignCount: 0,
+        avgDeliveryRate: 95,
+        avgClickRate: 5,
+        avgConversionRate: 8,
+        avgOrderValue: 45,
+        topCampaign: null
+      };
+    }
+
+    let totalDeliveryRate = 0;
+    let totalClickRate = 0;
+    let totalConversionRate = 0;
+    let validCampaigns = 0;
+    let topCampaign = null;
+    let topClickRate = 0;
+
+    campaigns.forEach(c => {
+      const stats = c.stats || {};
+      if (stats.sent > 0) {
+        validCampaigns++;
+        const deliveryRate = stats.delivered / stats.sent * 100;
+        totalDeliveryRate += deliveryRate;
+
+        if (stats.delivered > 0) {
+          const clickRate = (stats.clicked || 0) / stats.delivered * 100;
+          const conversionRate = (stats.converted || 0) / stats.delivered * 100;
+          totalClickRate += clickRate;
+          totalConversionRate += conversionRate;
+
+          if (clickRate > topClickRate) {
+            topClickRate = clickRate;
+            topCampaign = { name: c.name, clickRate, conversionRate };
+          }
+        }
+      }
+    });
+
+    return {
+      campaignCount: validCampaigns,
+      avgDeliveryRate: validCampaigns > 0 ? totalDeliveryRate / validCampaigns : 95,
+      avgClickRate: validCampaigns > 0 ? totalClickRate / validCampaigns : 5,
+      avgConversionRate: validCampaigns > 0 ? totalConversionRate / validCampaigns : 8,
+      avgOrderValue: 45, // Default, idealmente calcular de conversiones reales
+      topCampaign
+    };
+  }
 }
 
 module.exports = new SmsCalculator();

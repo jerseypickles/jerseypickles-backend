@@ -523,6 +523,141 @@ router.get('/live/second-chance', authorize('admin'), async (req, res) => {
   }
 });
 
+// ==================== SMS MESSAGE ANALYSIS & SUGGESTIONS ====================
+
+/**
+ * POST /api/ai/subjects/suggest
+ * Generar sugerencias de mensajes SMS con Claude AI
+ */
+router.post('/subjects/suggest', authorize('admin', 'manager'), async (req, res) => {
+  try {
+    const { baseMessage, campaignType, audienceType, objective } = req.body;
+
+    const claudeService = require('../services/claudeService');
+    claudeService.init();
+
+    // Obtener datos históricos para contexto
+    let historicalData = null;
+    try {
+      const historicalStats = await smsCalculator.getHistoricalCampaignStats();
+      historicalData = {
+        avgClickRate: historicalStats.avgClickRate?.toFixed(1),
+        bestCampaign: historicalStats.topCampaign?.name
+      };
+    } catch (e) {
+      console.log('No historical data available for suggestions');
+    }
+
+    const result = await claudeService.suggestSmsMessages({
+      baseMessage,
+      campaignType,
+      audienceType,
+      objective,
+      historicalData
+    });
+
+    res.json(result);
+
+  } catch (error) {
+    console.error('Error generando sugerencias SMS:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ai/timing/heatmap
+ * Heatmap de engagement por hora y día
+ */
+router.get('/timing/heatmap', authorize('admin', 'manager'), async (req, res) => {
+  try {
+    const { days = 30, metric = 'clicks' } = req.query;
+
+    const result = await smsCalculator.calculateEngagementHeatmap({
+      days: parseInt(days),
+      metric
+    });
+
+    res.json(result);
+
+  } catch (error) {
+    console.error('Error calculando heatmap:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/ai/campaigns/predict
+ * Predecir performance de una campaña SMS
+ */
+router.post('/campaigns/predict', authorize('admin', 'manager'), async (req, res) => {
+  try {
+    const { message, audienceType, estimatedAudience, useAI = false } = req.body;
+
+    if (!message) {
+      return res.status(400).json({
+        success: false,
+        error: 'Se requiere el mensaje de la campaña'
+      });
+    }
+
+    // Calcular predicción basada en reglas
+    const prediction = await smsCalculator.predictCampaignPerformance({
+      message,
+      audienceType,
+      estimatedAudience
+    });
+
+    // Si useAI=true y Claude está disponible, enriquecer con análisis AI
+    if (useAI) {
+      try {
+        const claudeService = require('../services/claudeService');
+        claudeService.init();
+
+        if (claudeService.isAvailable()) {
+          const historicalStats = await smsCalculator.getHistoricalCampaignStats();
+          const aiPrediction = await claudeService.predictCampaignPerformance(
+            { message, audienceType, estimatedAudience },
+            historicalStats
+          );
+
+          if (aiPrediction) {
+            prediction.aiAnalysis = aiPrediction;
+            prediction.enrichedWithAI = true;
+          }
+        }
+      } catch (e) {
+        console.log('AI enrichment failed:', e.message);
+      }
+    }
+
+    res.json(prediction);
+
+  } catch (error) {
+    console.error('Error prediciendo campaña:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ai/subjects/analyze
+ * Análisis de mensajes SMS históricos
+ */
+router.get('/subjects/analyze', authorize('admin', 'manager'), async (req, res) => {
+  try {
+    const { days = 30 } = req.query;
+
+    const result = await smsCalculator.analyzeSmsMessages({
+      days: parseInt(days)
+    });
+
+    res.json(result);
+
+  } catch (error) {
+    console.error('Error analizando mensajes SMS:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== ADMIN / MANAGEMENT ====================
 
 /**
@@ -667,26 +802,14 @@ router.delete('/cleanup', authorize('admin'), async (req, res) => {
 // ==================== LEGACY EMAIL ENDPOINTS (deprecated) ====================
 
 /**
- * GET /api/ai/subjects/analyze
- * @deprecated - Ya no aplica, el enfoque es SMS
- */
-router.get('/subjects/analyze', authorize('admin', 'manager'), async (req, res) => {
-  res.json({
-    success: false,
-    message: 'Este endpoint está deprecado. El enfoque ahora es SMS marketing.',
-    redirect: '/api/ai/health'
-  });
-});
-
-/**
  * GET /api/ai/timing/best
- * @deprecated - Usar /api/ai/timing para SMS
+ * @deprecated - Usar /api/ai/timing/heatmap para SMS
  */
 router.get('/timing/best', authorize('admin', 'manager'), async (req, res) => {
   res.json({
     success: false,
-    message: 'Este endpoint está deprecado. Usar /api/ai/timing para análisis de SMS.',
-    redirect: '/api/ai/timing'
+    message: 'Este endpoint está deprecado. Usar /api/ai/timing/heatmap para análisis de SMS.',
+    redirect: '/api/ai/timing/heatmap'
   });
 });
 
