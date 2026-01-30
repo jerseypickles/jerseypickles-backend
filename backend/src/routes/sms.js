@@ -56,4 +56,7 @@ router.post('/second-chance/trigger/:subscriberId', optionalProtect, smsControll
 // 🆕 Second Chance SMS - Job status
 router.get('/second-chance/status', optionalProtect, smsController.getSecondChanceJobStatus);
 
+// 🆕 Second Chance SMS - Detailed queue visibility
+router.get('/second-chance/queue', optionalProtect, smsController.getSecondChanceQueue);
+
 module.exports = router;
