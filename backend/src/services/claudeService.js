@@ -1,6 +1,6 @@
 // backend/src/services/claudeService.js
 // 🧠 Servicio para integración con Claude API (Anthropic)
-// 🔧 UPDATED: Integración con datos de productos y calendario de negocio
+// 🔧 UPDATED: Ahora enfocado en SMS Marketing (no email)
 
 const Anthropic = require('@anthropic-ai/sdk');
 
@@ -23,7 +23,7 @@ class ClaudeService {
     if (this.initialized) return;
 
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    
+
     if (!apiKey) {
       console.log('⚠️  ANTHROPIC_API_KEY no configurada - Claude AI deshabilitado');
       return;
@@ -42,8 +42,475 @@ class ClaudeService {
     return this.initialized && this.client !== null;
   }
 
+  // ==================== SMS MARKETING INSIGHTS (NUEVO) ====================
+
+  /**
+   * Generar análisis profundo de SMS marketing
+   * Este es el método principal para el nuevo enfoque 100% SMS
+   */
+  async generateSmsInsights(metricsData) {
+    if (!this.isAvailable()) {
+      console.log('⚠️  Claude API no disponible, usando insights básicos');
+      return this.getSmsFallbackInsights(metricsData);
+    }
+
+    // Obtener contexto de negocio si está disponible
+    let businessContext = null;
+    let businessContextPrompt = '';
+
+    if (businessContextService) {
+      try {
+        console.log('📦 Obteniendo contexto de negocio para Claude...');
+        businessContext = await businessContextService.getFullBusinessContext();
+        businessContextPrompt = businessContextService.formatBusinessContextForPrompt(businessContext);
+        console.log('✅ Contexto de negocio obtenido');
+      } catch (error) {
+        console.log('⚠️  Error obteniendo contexto de negocio:', error.message);
+      }
+    }
+
+    const systemPrompt = this.buildSmsSystemPrompt();
+    const userPrompt = this.buildSmsUserPrompt(metricsData, businessContextPrompt);
+
+    try {
+      console.log('🧠 Llamando a Claude API para análisis de SMS...');
+      console.log(`   Model: ${this.model}`);
+      console.log(`   System prompt length: ${systemPrompt.length} chars`);
+      console.log(`   User prompt length: ${userPrompt.length} chars`);
+
+      const startTime = Date.now();
+
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Claude API timeout (60s)')), 60000);
+      });
+
+      const apiPromise = this.client.messages.create({
+        model: this.model,
+        max_tokens: 3500,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }]
+      });
+
+      const response = await Promise.race([apiPromise, timeoutPromise]);
+
+      const duration = Date.now() - startTime;
+      console.log(`✅ Claude respondió en ${duration}ms`);
+      console.log(`   Input tokens: ${response.usage?.input_tokens || 'N/A'}`);
+      console.log(`   Output tokens: ${response.usage?.output_tokens || 'N/A'}`);
+
+      const content = response.content[0]?.text;
+
+      if (!content) {
+        console.error('❌ Claude devolvió respuesta vacía');
+        return this.getSmsFallbackInsights(metricsData);
+      }
+
+      const analysis = this.parseResponse(content);
+
+      if (!analysis || analysis.parseError) {
+        console.error('❌ Error parseando respuesta de Claude, usando fallback');
+        return this.getSmsFallbackInsights(metricsData);
+      }
+
+      console.log(`✅ Análisis SMS parseado correctamente`);
+      console.log(`   - Executive summary: ${analysis.executiveSummary ? 'Sí' : 'No'}`);
+      console.log(`   - Action plan items: ${analysis.actionPlan?.length || 0}`);
+      console.log(`   - Quick wins: ${analysis.quickWins?.length || 0}`);
+
+      return {
+        success: true,
+        ...analysis,
+        generatedAt: new Date().toISOString(),
+        model: this.model,
+        tokensUsed: {
+          input: response.usage?.input_tokens || 0,
+          output: response.usage?.output_tokens || 0
+        },
+        duration,
+        hasBusinessContext: !!businessContextPrompt,
+        analysisType: 'sms'
+      };
+
+    } catch (error) {
+      console.error('❌ Error llamando a Claude API:', error.message);
+      return this.getSmsFallbackInsights(metricsData);
+    }
+  }
+
+  /**
+   * System prompt para análisis de SMS Marketing
+   */
+  buildSmsSystemPrompt() {
+    return `Eres el consultor de SMS marketing de Jersey Pickles, un e-commerce de pickles artesanales y olives gourmet en New Jersey.
+
+TU ROL: Analizar datos de SMS marketing y dar recomendaciones ESPECÍFICAS y ACCIONABLES.
+
+CONTEXTO DEL NEGOCIO:
+- Productos: Pickles artesanales, olives marinadas, productos gourmet, gift sets
+- Estrategia SMS: Welcome SMS (15% OFF) → Second Chance SMS (20% OFF, 6-8h después)
+- El Second Chance SMS es CRÍTICO para recuperar clientes que no convierten inicialmente
+- Ticket promedio: $35-50 por orden
+- Estacionalidad: Picos en BBQ season (Mayo-Sept) y holidays (Nov-Dic)
+
+BENCHMARKS SMS MARKETING:
+- Delivery Rate bueno: >95%
+- Conversion Rate bueno (15% OFF): 8-15%
+- Second Chance Recovery Rate bueno: 15-25%
+- Unsubscribe Rate saludable: <3%
+- Time to Convert óptimo: <2 horas
+
+MÉTRICAS CLAVE A ANALIZAR:
+1. Funnel de conversión: Suscripción → Welcome SMS → Conversión 15% → Second Chance → Conversión 20%
+2. ROI del Second Chance (cada $ en SMS cuánto genera)
+3. Oportunidades perdidas (elegibles que no recibieron Second Chance)
+4. Timing óptimo para envíos
+
+INSTRUCCIONES:
+1. Responde SOLO con JSON válido (sin markdown, sin \`\`\`)
+2. Todo en ESPAÑOL
+3. Sé específico - menciona datos reales del input
+4. Prioriza acciones por impacto en revenue
+
+FORMATO JSON REQUERIDO:
+{
+  "executiveSummary": "2-3 oraciones con el estado general del SMS marketing y la acción más importante",
+  "deepAnalysis": {
+    "health": {
+      "status": "healthy o warning o critical",
+      "analysis": "Análisis de métricas de salud (delivery, conversion, unsubs)"
+    },
+    "funnel": {
+      "analysis": "Análisis del funnel de conversión completo"
+    },
+    "secondChance": {
+      "analysis": "Análisis específico del Second Chance SMS y su efectividad"
+    },
+    "timing": {
+      "analysis": "Análisis de timing y ventanas de conversión"
+    },
+    "revenue": {
+      "analysis": "Análisis de revenue y ROI del SMS marketing"
+    }
+  },
+  "actionPlan": [
+    {
+      "priority": 1,
+      "title": "Título corto",
+      "what": "Qué hacer específicamente",
+      "why": "Por qué importa basado en los datos",
+      "how": "Pasos concretos",
+      "expectedImpact": "Resultado esperado en $ o % si es posible"
+    }
+  ],
+  "quickWins": ["Acción rápida 1", "Acción rápida 2", "Acción rápida 3"],
+  "warnings": [
+    {
+      "severity": "critical o warning",
+      "issue": "Problema detectado",
+      "consequence": "Qué pasa si no se arregla",
+      "solution": "Cómo arreglarlo"
+    }
+  ],
+  "opportunities": [
+    {
+      "opportunity": "Oportunidad identificada",
+      "potential": "Impacto potencial en $ o conversiones",
+      "effort": "low o medium o high"
+    }
+  ],
+  "secondChanceStrategy": {
+    "currentPerformance": "Resumen del performance actual",
+    "optimizations": ["Optimización 1", "Optimización 2"],
+    "idealTiming": "Recomendación de timing",
+    "copyRecommendations": ["Sugerencia de copy 1", "Sugerencia 2"]
+  },
+  "smsTemplateRecommendations": {
+    "welcomeSms": {
+      "currentEffectiveness": "Bueno/Regular/Malo basado en conversión",
+      "suggestions": ["Mejora 1", "Mejora 2"]
+    },
+    "secondChanceSms": {
+      "currentEffectiveness": "Bueno/Regular/Malo basado en recovery",
+      "suggestions": ["Mejora 1", "Mejora 2"]
+    }
+  },
+  "revenueGoalStrategy": {
+    "currentStatus": "Resumen del revenue actual",
+    "projectedMonthly": "Proyección basada en tendencias",
+    "recommendedActions": ["Acción 1", "Acción 2"],
+    "riskLevel": "low o medium o high"
+  }
+}`;
+  }
+
+  /**
+   * User prompt con datos de SMS
+   */
+  buildSmsUserPrompt(data, businessContextPrompt = '') {
+    const seasonalContext = data.seasonalContext ? `
+═══════════════════════════════════════════════════════════
+🗓️ CONTEXTO TEMPORAL
+═══════════════════════════════════════════════════════════
+Evento/Temporada actual: ${data.seasonalContext.event || 'Normal'}
+Tipo: ${data.seasonalContext.type || 'standard'}
+` : '';
+
+    return `Analiza estos datos de SMS marketing de Jersey Pickles de los ÚLTIMOS 30 DÍAS:
+${seasonalContext}
+═══════════════════════════════════════════════════════════
+📊 MÉTRICAS DE SALUD
+═══════════════════════════════════════════════════════════
+• Health Score: ${data.health?.score || 0}/100
+• Delivery Rate: ${data.health?.deliveryRate || 0}%
+• Conversion Rate: ${data.health?.conversionRate || 0}%
+• Unsubscribe Rate: ${data.health?.unsubRate || 0}%
+• Total Suscriptores: ${data.health?.totalSubscribers || 0}
+• Total Convertidos: ${data.health?.totalConverted || 0}
+• Revenue Total: $${data.health?.totalRevenue || 0}
+
+═══════════════════════════════════════════════════════════
+📱 FUNNEL DE CONVERSIÓN
+═══════════════════════════════════════════════════════════
+Overall Conversion Rate: ${data.funnel?.overallConversionRate || '0%'}
+
+FIRST SMS (15% OFF):
+• Conversiones: ${data.funnel?.firstConversions || 0}
+• Revenue: $${data.funnel?.firstRevenue || 0}
+
+SECOND CHANCE SMS (20% OFF):
+• Conversiones: ${data.funnel?.secondConversions || 0}
+• Revenue: $${data.funnel?.secondRevenue || 0}
+• Recovery Rate: ${data.funnel?.secondRecoveryRate || '0%'}
+
+═══════════════════════════════════════════════════════════
+🔄 SECOND CHANCE SMS (DETALLE)
+═══════════════════════════════════════════════════════════
+• Enviados: ${data.secondChance?.sent || 0}
+• Entregados: ${data.secondChance?.delivered || 0}
+• Convertidos: ${data.secondChance?.converted || 0}
+• Revenue: $${data.secondChance?.revenue || 0}
+• Conversion Rate: ${data.secondChance?.conversionRate || '0%'}
+• ROI: ${data.secondChance?.roi || '0%'}
+• Mejor hora de envío: ${data.secondChance?.bestHour || 'N/A'}
+
+⚠️ OPORTUNIDAD PERDIDA:
+• Elegibles que NO recibieron Second Chance: ${data.secondChance?.eligibleNotSent || 0}
+• Revenue potencial perdido: $${data.secondChance?.potentialRevenue || 0}
+
+═══════════════════════════════════════════════════════════
+⏱️ TIEMPO HASTA CONVERSIÓN
+═══════════════════════════════════════════════════════════
+• Tiempo promedio: ${data.timing?.avgTimeToConvert || 'N/A'}
+• Conversión más rápida: ${data.timing?.fastestConversion || 'N/A'}
+
+Distribución:
+${data.timing?.distribution?.map(d => `   ${d.range}: ${d.count} conversiones ($${d.revenue || 0})`).join('\n') || '   Sin datos'}
+
+═══════════════════════════════════════════════════════════
+📢 CAMPAÑAS SMS
+═══════════════════════════════════════════════════════════
+• Total campañas: ${data.campaigns?.total || 0}
+• Conversion Rate promedio: ${data.campaigns?.avgConversionRate || '0%'}
+• Revenue total: $${data.campaigns?.totalRevenue || 0}
+${data.campaigns?.topCampaign ? `• Top campaña: "${data.campaigns.topCampaign.name}" ($${data.campaigns.topCampaign.revenue})` : ''}
+
+═══════════════════════════════════════════════════════════
+🚨 ALERTAS ACTIVAS
+═══════════════════════════════════════════════════════════
+${data.alerts?.length > 0 ? data.alerts.map(a =>
+  `[${a.severity?.toUpperCase()}] ${a.message}`
+).join('\n') : '✅ Sin alertas activas'}
+
+${businessContextPrompt}
+
+═══════════════════════════════════════════════════════════
+📝 TU TAREA
+═══════════════════════════════════════════════════════════
+
+Basándote en TODOS los datos anteriores, proporciona:
+
+1. RESUMEN EJECUTIVO (2-3 oraciones)
+   - Estado general del SMS marketing
+   - Oportunidad o problema principal
+
+2. ANÁLISIS PROFUNDO
+   - Health: Estado de métricas clave
+   - Funnel: Dónde se pierden conversiones
+   - Second Chance: Efectividad de la recuperación
+   - Timing: Ventanas de conversión
+   - Revenue: ROI y tendencias
+
+3. PLAN DE ACCIÓN (3-4 acciones priorizadas)
+   - Enfócate en maximizar conversiones y revenue
+   - Si hay elegibles sin Second Chance, eso es CRÍTICO
+
+4. ESTRATEGIA SECOND CHANCE
+   - Cómo optimizar esta funcionalidad clave
+   - Timing ideal
+   - Ideas de copy
+
+5. RECOMENDACIONES DE TEMPLATES SMS
+   - Welcome SMS: qué mejorar
+   - Second Chance SMS: qué mejorar
+
+6. ALERTAS Y OPORTUNIDADES
+   - Problemas urgentes
+   - Revenue que se está dejando en la mesa
+
+IMPORTANTE:
+- Sé ESPECÍFICO con números y recomendaciones
+- Si hay elegibles sin Second Chance, es la oportunidad #1
+- Considera la temporada actual para timing
+- El ROI del Second Chance es clave para justificar la inversión`;
+  }
+
+  /**
+   * Fallback cuando Claude no está disponible (SMS version)
+   */
+  getSmsFallbackInsights(data) {
+    const actionPlan = [];
+    const warnings = [];
+    const quickWins = [];
+    const opportunities = [];
+
+    let healthAnalysis = 'Sin datos suficientes para análisis de salud.';
+    let healthStatus = 'unknown';
+
+    if (data.health) {
+      const h = data.health;
+      const score = h.score || 0;
+      healthStatus = score >= 80 ? 'healthy' : score >= 60 ? 'warning' : 'critical';
+
+      healthAnalysis = `Tu SMS marketing tiene un health score de ${score}/100. `;
+
+      const convRate = parseFloat(h.conversionRate) || 0;
+      if (convRate >= 10) {
+        healthAnalysis += `El conversion rate de ${convRate}% es excelente para SMS. `;
+      } else if (convRate >= 5) {
+        healthAnalysis += `El conversion rate de ${convRate}% es aceptable pero hay espacio para mejorar. `;
+      } else {
+        healthAnalysis += `El conversion rate de ${convRate}% está bajo - revisa el copy y el descuento. `;
+      }
+    }
+
+    // Second Chance opportunities
+    if (data.secondChance?.eligibleNotSent > 0) {
+      const eligible = data.secondChance.eligibleNotSent;
+      const potential = data.secondChance.potentialRevenue || 0;
+
+      warnings.push({
+        severity: 'critical',
+        issue: `${eligible} suscriptores elegibles NO han recibido Second Chance SMS`,
+        consequence: `Estás perdiendo aproximadamente $${potential} en revenue potencial`,
+        solution: 'Verifica que el job de Second Chance esté corriendo correctamente'
+      });
+
+      actionPlan.push({
+        priority: 1,
+        title: 'Activar Second Chance para elegibles',
+        what: `Enviar Second Chance SMS a los ${eligible} suscriptores elegibles`,
+        why: `Revenue potencial de $${potential} que se está perdiendo`,
+        how: '1. Verificar el cron job. 2. Revisar logs de errores. 3. Trigger manual si es necesario.',
+        expectedImpact: `Recuperar ~$${potential} en revenue`
+      });
+    }
+
+    // Conversion rate insights
+    const convRate = parseFloat(data.health?.conversionRate) || 0;
+    if (convRate < 8) {
+      quickWins.push('Prueba aumentar el descuento inicial de 15% a 20% por una semana');
+      quickWins.push('Añade urgencia al mensaje: "Válido solo hoy" o "Próximas 2 horas"');
+    }
+
+    // ROI insight
+    const roi = parseFloat(data.secondChance?.roi) || 0;
+    if (roi > 500) {
+      opportunities.push({
+        opportunity: `Second Chance tiene ROI de ${roi}%`,
+        potential: 'Muy rentable - considera enviar más agresivamente',
+        effort: 'low'
+      });
+    }
+
+    // Executive summary
+    let executiveSummary = '';
+    if (healthStatus === 'healthy') {
+      executiveSummary = 'Tu SMS marketing está funcionando bien. ';
+    } else if (healthStatus === 'warning') {
+      executiveSummary = 'Tu SMS marketing necesita atención en algunas áreas. ';
+    } else {
+      executiveSummary = '⚠️ Tu SMS marketing tiene problemas que requieren acción inmediata. ';
+    }
+
+    if (actionPlan.length > 0) {
+      executiveSummary += `Prioridad #1: ${actionPlan[0].title}. `;
+    }
+
+    const totalRevenue = data.health?.totalRevenue || 0;
+    if (totalRevenue > 0) {
+      executiveSummary += `Has generado $${totalRevenue} en revenue via SMS.`;
+    }
+
+    return {
+      success: true,
+      executiveSummary,
+      deepAnalysis: {
+        health: { status: healthStatus, analysis: healthAnalysis },
+        funnel: { analysis: 'Revisa el funnel de conversión para identificar puntos de fuga.' },
+        secondChance: {
+          analysis: data.secondChance?.conversionRate
+            ? `Second Chance convierte al ${data.secondChance.conversionRate} de los destinatarios.`
+            : 'Sin datos suficientes de Second Chance.'
+        },
+        timing: {
+          analysis: data.timing?.avgTimeToConvert
+            ? `El tiempo promedio hasta conversión es ${data.timing.avgTimeToConvert}.`
+            : 'Sin datos de timing disponibles.'
+        },
+        revenue: {
+          analysis: `Revenue total: $${data.health?.totalRevenue || 0}. ${roi > 0 ? `ROI de Second Chance: ${roi}%` : ''}`
+        }
+      },
+      actionPlan,
+      quickWins: quickWins.length > 0 ? quickWins : ['Revisa el copy de tus SMS', 'Optimiza el timing de envío'],
+      warnings,
+      opportunities,
+      secondChanceStrategy: {
+        currentPerformance: data.secondChance?.conversionRate
+          ? `Recovery rate: ${data.secondChance.conversionRate}`
+          : 'Sin datos',
+        optimizations: ['Ajustar timing a 6 horas', 'Probar diferentes copies'],
+        idealTiming: data.secondChance?.bestHour || '9:00-11:00 AM',
+        copyRecommendations: [
+          'Usa urgencia: "Solo 2 horas para usar tu 20% OFF"',
+          'Personaliza con el producto más popular'
+        ]
+      },
+      smsTemplateRecommendations: {
+        welcomeSms: {
+          currentEffectiveness: convRate >= 10 ? 'Bueno' : convRate >= 5 ? 'Regular' : 'Malo',
+          suggestions: ['Incluye el nombre del producto más vendido', 'Añade un emoji relevante 🥒']
+        },
+        secondChanceSms: {
+          currentEffectiveness: parseFloat(data.secondChance?.conversionRate) >= 15 ? 'Bueno' : 'Regular',
+          suggestions: ['Enfatiza que es la ÚLTIMA oportunidad', 'Menciona que el descuento expira en 2 horas']
+        }
+      },
+      revenueGoalStrategy: null,
+      generatedAt: new Date().toISOString(),
+      model: 'fallback-analysis',
+      tokensUsed: { input: 0, output: 0 },
+      isFallback: true,
+      hasBusinessContext: false,
+      analysisType: 'sms'
+    };
+  }
+
+  // ==================== EMAIL MARKETING INSIGHTS (LEGACY) ====================
+
   /**
    * Generar análisis profundo de email marketing
+   * @deprecated Usar generateSmsInsights en su lugar
    */
   async generateEmailInsights(metricsData) {
     if (!this.isAvailable()) {
