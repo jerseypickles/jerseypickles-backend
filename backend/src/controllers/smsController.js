@@ -490,7 +490,7 @@ const smsController = {
   },
 
   // ==================== 🆕 SECOND CHANCE JOB STATUS ====================
-  
+
   /**
    * GET /api/sms/second-chance/status
    */
@@ -522,6 +522,49 @@ const smsController = {
       res.status(500).json({
         success: false,
         error: 'Error getting job status'
+      });
+    }
+  },
+
+  // ==================== 🆕 SECOND CHANCE QUEUE DETAILS ====================
+
+  /**
+   * GET /api/sms/second-chance/queue
+   * Get detailed queue visibility for Second Chance SMS
+   * Shows exactly when each SMS is scheduled and will be sent
+   */
+  async getSecondChanceQueue(req, res) {
+    try {
+      if (!secondChanceSmsService) {
+        return res.status(503).json({
+          success: false,
+          error: 'Second Chance SMS service not available'
+        });
+      }
+
+      const { limit = 50 } = req.query;
+      const queueDetails = await secondChanceSmsService.getQueueDetails({
+        limit: parseInt(limit)
+      });
+
+      // Add job status
+      const jobStatus = secondChanceSmsJob?.getStatus() || { initialized: false };
+
+      res.json({
+        success: true,
+        job: {
+          ...jobStatus,
+          schedule: '30 * * * *', // Every hour at :30
+          description: 'Runs every hour to process scheduled Second Chance SMS'
+        },
+        ...queueDetails
+      });
+
+    } catch (error) {
+      console.error('❌ Second Chance Queue Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error getting queue details'
       });
     }
   },
