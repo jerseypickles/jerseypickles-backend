@@ -1,4 +1,4 @@
-// backend/server.js (v2.4.0 - SMS Marketing Integration)
+// backend/server.js (v2.5.0 - SMS Campaigns)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -42,12 +42,26 @@ try {
   console.log('   ⚠️ BusinessCalendar model:', e.message); 
 }
 
-// 📱 SMS SUBSCRIBER MODEL
+// 📱 SMS MODELS
 try { 
   require('./src/models/SmsSubscriber'); 
   console.log('   ✅ SmsSubscriber model loaded');
 } catch(e) { 
   console.log('   ⚠️ SmsSubscriber model:', e.message); 
+}
+
+try { 
+  require('./src/models/SmsCampaign'); 
+  console.log('   ✅ SmsCampaign model loaded');
+} catch(e) { 
+  console.log('   ⚠️ SmsCampaign model:', e.message); 
+}
+
+try { 
+  require('./src/models/SmsMessage'); 
+  console.log('   ✅ SmsMessage model loaded');
+} catch(e) { 
+  console.log('   ⚠️ SmsMessage model:', e.message); 
 }
 
 console.log('📦 Models ready');
@@ -159,7 +173,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({ 
     message: '🥒 Jersey Pickles Email & SMS Marketing API',
-    version: '2.4.0',
+    version: '2.5.0',
     status: 'running',
     features: {
       campaigns: '✅ Email Campaigns',
@@ -170,7 +184,8 @@ app.get('/', (req, res) => {
       ai_analytics: '✅ AI-Powered Insights',
       products: '✅ Product Analytics',
       calendar: '✅ Business Calendar',
-      sms_marketing: '✅ SMS Marketing (Telnyx)'
+      sms_marketing: '✅ SMS Marketing (Telnyx)',
+      sms_campaigns: '✅ SMS Campaigns'
     },
     endpoints: {
       health: '/health',
@@ -188,7 +203,8 @@ app.get('/', (req, res) => {
       ai: '/api/ai',
       products: '/api/products',
       calendar: '/api/calendar',
-      sms: '/api/sms'
+      sms: '/api/sms',
+      sms_campaigns: '/api/sms/campaigns'
     }
   });
 });
@@ -261,7 +277,7 @@ try {
   });
 }
 
-// 📱 SMS MARKETING ROUTES
+// 📱 SMS MARKETING ROUTES (Subscribers)
 try {
   const smsRoutes = require('./src/routes/sms');
   app.use('/api/sms', smsRoutes);
@@ -272,6 +288,21 @@ try {
     res.status(503).json({ 
       error: 'SMS Marketing feature is currently unavailable',
       message: 'Please check Telnyx configuration'
+    });
+  });
+}
+
+// 📱 SMS CAMPAIGNS ROUTES
+try {
+  const smsCampaignRoutes = require('./src/routes/smsCampaigns');
+  app.use('/api/sms/campaigns', smsCampaignRoutes);
+  console.log('✅ SMS Campaigns routes loaded');
+} catch (error) {
+  console.log('⚠️  SMS Campaigns routes not available:', error.message);
+  app.use('/api/sms/campaigns', (req, res) => {
+    res.status(503).json({ 
+      error: 'SMS Campaigns feature is currently unavailable',
+      message: 'Please check configuration'
     });
   });
 }
@@ -301,10 +332,11 @@ let aiAnalyticsAvailable = false;
 let productsAvailable = false;
 let calendarAvailable = false;
 let smsServiceAvailable = false;
+let smsCampaignsAvailable = false;
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║   🥒 Jersey Pickles Marketing Platform v2.4.0 ║');
+  console.log('║   🥒 Jersey Pickles Marketing Platform v2.5.0 ║');
   console.log('╚════════════════════════════════════════════════╝');
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -408,6 +440,20 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     }
   }, 4500);
   
+  // 📱 Verificar SMS Campaigns
+  setTimeout(() => {
+    console.log('\n📱 Verificando SMS Campaigns...');
+    try {
+      require('./src/models/SmsCampaign');
+      require('./src/models/SmsMessage');
+      smsCampaignsAvailable = true;
+      console.log('✅ SMS Campaigns disponible');
+    } catch (error) {
+      smsCampaignsAvailable = false;
+      console.log('⚠️  SMS Campaigns no disponible:', error.message);
+    }
+  }, 5000);
+  
   // Resumen de features
   setTimeout(() => {
     console.log('\n╔════════════════════════════════════════════════╗');
@@ -418,8 +464,9 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`║  Product Analytics:  ${productsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  Business Calendar:  ${calendarAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  SMS Marketing:      ${smsServiceAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
+    console.log(`║  SMS Campaigns:      ${smsCampaignsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log('╚════════════════════════════════════════════════╝');
-  }, 5500);
+  }, 6000);
 });
 
 // ==================== GRACEFUL SHUTDOWN ====================
