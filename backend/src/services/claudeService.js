@@ -506,6 +506,217 @@ IMPORTANTE:
     };
   }
 
+  // ==================== SMS MESSAGE SUGGESTIONS ====================
+
+  /**
+   * Generar sugerencias de mensajes SMS optimizados
+   * POST /api/ai/subjects/suggest
+   */
+  async suggestSmsMessages(context) {
+    const { baseMessage, campaignType, audienceType, objective, historicalData } = context;
+
+    // Fallback si Claude no está disponible
+    if (!this.isAvailable()) {
+      return this.getSmsSuggestionsFallback(baseMessage, campaignType);
+    }
+
+    const prompt = `Genera 5 variaciones optimizadas de un mensaje SMS para Jersey Pickles (pickles y olives gourmet de New Jersey).
+
+MENSAJE BASE: "${baseMessage || 'Mensaje promocional de descuento'}"
+
+CONTEXTO:
+- Tipo de campaña: ${campaignType || 'promocional'}
+- Audiencia: ${audienceType || 'todos los suscriptores'}
+- Objetivo: ${objective || 'conversión'}
+${historicalData ? `
+DATOS HISTÓRICOS:
+- Click rate promedio: ${historicalData.avgClickRate || 'N/A'}%
+- Mejor horario: ${historicalData.bestHour || 'N/A'}
+- Mensajes con emoji funcionan: ${historicalData.emojiPerformance || 'N/A'}
+` : ''}
+
+REGLAS PARA SMS:
+1. Máximo 160 caracteres para evitar segmentación
+2. Incluir call-to-action claro
+3. Urgencia aumenta conversión
+4. Emojis relevantes (🥒🫒) aumentan engagement
+5. Personalización con nombre si es posible
+6. Incluir el descuento/oferta claramente
+
+Responde SOLO con JSON válido:
+{
+  "suggestions": [
+    {
+      "message": "El mensaje SMS completo (máx 160 chars)",
+      "score": 85,
+      "reason": "Por qué funcionaría bien",
+      "techniques": ["urgencia", "emoji", "descuento"],
+      "charCount": 145,
+      "estimatedClickRate": "8-12%"
+    }
+  ],
+  "bestPractices": ["Consejo 1", "Consejo 2"],
+  "avoidList": ["Qué evitar 1", "Qué evitar 2"]
+}`;
+
+    try {
+      console.log('🧠 Generando sugerencias de SMS con Claude...');
+
+      const response = await this.client.messages.create({
+        model: this.model,
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt }]
+      });
+
+      const content = response.content[0]?.text;
+      const parsed = this.parseResponse(content);
+
+      return {
+        success: true,
+        ...parsed,
+        generatedAt: new Date().toISOString(),
+        model: this.model,
+        tokensUsed: {
+          input: response.usage?.input_tokens || 0,
+          output: response.usage?.output_tokens || 0
+        }
+      };
+
+    } catch (error) {
+      console.error('Error generando sugerencias SMS:', error.message);
+      return this.getSmsSuggestionsFallback(baseMessage, campaignType);
+    }
+  }
+
+  /**
+   * Fallback para sugerencias de SMS
+   */
+  getSmsSuggestionsFallback(baseMessage, campaignType) {
+    const suggestions = [
+      {
+        message: `🥒 ${baseMessage || '15% OFF'} en Jersey Pickles! Usa código SMS15. Solo hoy → jerseypickles.com`,
+        score: 82,
+        reason: 'Emoji + urgencia + código claro + CTA',
+        techniques: ['emoji', 'urgencia', 'descuento', 'cta'],
+        charCount: 85,
+        estimatedClickRate: '6-9%'
+      },
+      {
+        message: `Tu descuento exclusivo: ${baseMessage || '15% OFF'}! 🫒 Expira en 2h. No te lo pierdas → jerseypickles.com`,
+        score: 80,
+        reason: 'Exclusividad + emoji + tiempo limitado',
+        techniques: ['exclusividad', 'emoji', 'urgencia'],
+        charCount: 98,
+        estimatedClickRate: '5-8%'
+      },
+      {
+        message: `Hey! ${baseMessage || '15% OFF'} en pickles artesanales 🥒 Solo para ti. Código: SMS15 → jerseypickles.com`,
+        score: 78,
+        reason: 'Tono casual + personalización + emoji',
+        techniques: ['personalización', 'emoji', 'descuento'],
+        charCount: 95,
+        estimatedClickRate: '5-7%'
+      },
+      {
+        message: `ÚLTIMA OPORTUNIDAD: ${baseMessage || '15% OFF'} termina HOY 🥒 Usa SMS15 → jerseypickles.com`,
+        score: 85,
+        reason: 'Urgencia máxima + mayúsculas para atención',
+        techniques: ['urgencia', 'escasez', 'emoji'],
+        charCount: 82,
+        estimatedClickRate: '7-10%'
+      },
+      {
+        message: `Jersey Pickles: ${baseMessage || '15% OFF'} en tu próxima orden! 🫒 Código SMS15. Shop now!`,
+        score: 75,
+        reason: 'Directo y claro + marca visible',
+        techniques: ['branding', 'emoji', 'descuento'],
+        charCount: 78,
+        estimatedClickRate: '4-6%'
+      }
+    ];
+
+    return {
+      success: true,
+      suggestions: suggestions.sort((a, b) => b.score - a.score),
+      bestPractices: [
+        'Mantén el mensaje bajo 160 caracteres',
+        'Incluye siempre un CTA claro',
+        'Usa emojis relevantes (🥒🫒) para destacar',
+        'Añade urgencia con tiempo limitado'
+      ],
+      avoidList: [
+        'Mensajes genéricos sin personalización',
+        'Demasiados emojis (máx 2)',
+        'Enlaces largos sin acortar',
+        'Mayúsculas excesivas (spam)'
+      ],
+      generatedAt: new Date().toISOString(),
+      model: 'fallback-analysis',
+      isFallback: true
+    };
+  }
+
+  /**
+   * Predecir performance de campaña SMS con Claude
+   * POST /api/ai/campaigns/predict
+   */
+  async predictCampaignPerformance(campaignData, historicalStats) {
+    if (!this.isAvailable()) {
+      return null; // El caller usará cálculo basado en reglas
+    }
+
+    const prompt = `Analiza este mensaje SMS y predice su performance basándote en datos históricos.
+
+MENSAJE A ANALIZAR:
+"${campaignData.message}"
+
+CARACTERÍSTICAS:
+- Longitud: ${campaignData.message?.length || 0} caracteres
+- Tiene emoji: ${/[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]/u.test(campaignData.message) ? 'Sí' : 'No'}
+- Tiene descuento: ${/\d+%|off|descuento/i.test(campaignData.message) ? 'Sí' : 'No'}
+- Tiene urgencia: ${/hoy|ahora|última|expira|limitado/i.test(campaignData.message) ? 'Sí' : 'No'}
+
+AUDIENCIA: ${campaignData.audienceType || 'all_delivered'}
+TAMAÑO ESTIMADO: ${campaignData.estimatedAudience || 'N/A'} suscriptores
+
+DATOS HISTÓRICOS:
+- Delivery rate promedio: ${historicalStats?.avgDeliveryRate || 95}%
+- Click rate promedio: ${historicalStats?.avgClickRate || 5}%
+- Conversion rate promedio: ${historicalStats?.avgConversionRate || 8}%
+- Mejor campaña: ${historicalStats?.topCampaign?.name || 'N/A'} (${historicalStats?.topCampaign?.conversionRate || 'N/A'}%)
+
+Responde SOLO con JSON válido:
+{
+  "prediction": {
+    "deliveryRate": { "min": 93, "max": 97, "expected": 95 },
+    "clickRate": { "min": 4, "max": 8, "expected": 6 },
+    "conversionRate": { "min": 6, "max": 12, "expected": 9 },
+    "estimatedRevenue": { "min": 500, "max": 1200, "expected": 800 }
+  },
+  "messageScore": 82,
+  "strengths": ["Punto fuerte 1", "Punto fuerte 2"],
+  "weaknesses": ["Área de mejora 1"],
+  "recommendations": ["Sugerencia para mejorar 1", "Sugerencia 2"],
+  "comparisonToAverage": "above_average o average o below_average",
+  "confidence": "high o medium o low"
+}`;
+
+    try {
+      const response = await this.client.messages.create({
+        model: this.model,
+        max_tokens: 1000,
+        messages: [{ role: 'user', content: prompt }]
+      });
+
+      const content = response.content[0]?.text;
+      return this.parseResponse(content);
+
+    } catch (error) {
+      console.error('Error prediciendo campaign:', error.message);
+      return null;
+    }
+  }
+
   // ==================== EMAIL MARKETING INSIGHTS (LEGACY) ====================
 
   /**
