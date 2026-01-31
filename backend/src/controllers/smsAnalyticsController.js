@@ -2,6 +2,7 @@
 // 📊 SMS Analytics Controller - API endpoints para dashboard de analytics
 
 const smsAnalyticsService = require('../services/smsAnalyticsService');
+const SmsSubscriber = require('../models/SmsSubscriber');
 
 // Cargar claudeService de forma segura
 let claudeService = null;
@@ -13,7 +14,162 @@ try {
   console.log('⚠️  SMS Analytics Controller: Claude service not available');
 }
 
+// Cargar geoLocationService
+let geoLocationService = null;
+try {
+  geoLocationService = require('../services/geoLocationService');
+  console.log('📊 SMS Analytics Controller: GeoLocation service loaded');
+} catch (e) {
+  console.log('⚠️  SMS Analytics Controller: GeoLocation service not available');
+}
+
 const smsAnalyticsController = {
+  /**
+   * POST /api/sms/analytics/migrate-locations
+   * Migrar ubicaciones de suscriptores existentes sin datos de geolocalización
+   */
+  async migrateLocations(req, res) {
+    try {
+      if (!geoLocationService) {
+        return res.status(503).json({
+          success: false,
+          error: 'GeoLocation service not available'
+        });
+      }
+
+      // Buscar suscriptores sin ubicación
+      const subscribersWithoutLocation = await SmsSubscriber.find({
+        $or: [
+          { location: { $exists: false } },
+          { 'location.region': { $exists: false } },
+          { 'location.region': null },
+          { 'location.region': '' }
+        ],
+        ip: { $exists: true, $ne: null, $ne: '' }
+      }).limit(100); // Procesar en lotes de 100
+
+      if (subscribersWithoutLocation.length === 0) {
+        return res.json({
+          success: true,
+          message: 'No subscribers need location migration',
+          processed: 0,
+          remaining: 0
+        });
+      }
+
+      console.log(`📍 Migrating locations for ${subscribersWithoutLocation.length} subscribers...`);
+
+      let processed = 0;
+      let failed = 0;
+      const results = [];
+
+      for (const subscriber of subscribersWithoutLocation) {
+        try {
+          // Rate limiting - esperar 500ms entre requests
+          if (processed > 0) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
+
+          const locationData = await geoLocationService.getLocationFromIP(subscriber.ip);
+
+          if (locationData && locationData.region) {
+            subscriber.location = locationData;
+            await subscriber.save();
+            processed++;
+            results.push({
+              phone: subscriber.phone.slice(-4),
+              ip: subscriber.ip,
+              state: locationData.regionName,
+              success: true
+            });
+          } else {
+            failed++;
+            results.push({
+              phone: subscriber.phone.slice(-4),
+              ip: subscriber.ip,
+              error: 'Could not resolve location',
+              success: false
+            });
+          }
+        } catch (err) {
+          failed++;
+          results.push({
+            phone: subscriber.phone.slice(-4),
+            ip: subscriber.ip,
+            error: err.message,
+            success: false
+          });
+        }
+      }
+
+      // Contar cuántos quedan por migrar
+      const remaining = await SmsSubscriber.countDocuments({
+        $or: [
+          { location: { $exists: false } },
+          { 'location.region': { $exists: false } },
+          { 'location.region': null },
+          { 'location.region': '' }
+        ],
+        ip: { $exists: true, $ne: null, $ne: '' }
+      });
+
+      console.log(`✅ Migration batch complete: ${processed} success, ${failed} failed, ${remaining} remaining`);
+
+      res.json({
+        success: true,
+        message: `Processed ${processed} subscribers`,
+        processed,
+        failed,
+        remaining,
+        results: results.slice(0, 20) // Solo mostrar primeros 20 resultados
+      });
+
+    } catch (error) {
+      console.error('❌ Migration Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error migrating subscriber locations'
+      });
+    }
+  },
+
+  /**
+   * GET /api/sms/analytics/migration-status
+   * Estado de la migración de ubicaciones
+   */
+  async getMigrationStatus(req, res) {
+    try {
+      const [withLocation, withoutLocation, total] = await Promise.all([
+        SmsSubscriber.countDocuments({
+          'location.region': { $exists: true, $ne: null, $ne: '' }
+        }),
+        SmsSubscriber.countDocuments({
+          $or: [
+            { location: { $exists: false } },
+            { 'location.region': { $exists: false } },
+            { 'location.region': null },
+            { 'location.region': '' }
+          ]
+        }),
+        SmsSubscriber.countDocuments({})
+      ]);
+
+      res.json({
+        success: true,
+        total,
+        withLocation,
+        withoutLocation,
+        percentage: total > 0 ? Math.round((withLocation / total) * 100) : 0
+      });
+
+    } catch (error) {
+      console.error('❌ Migration Status Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error getting migration status'
+      });
+    }
+  },
   /**
    * GET /api/sms/analytics/map
    * Obtiene datos de suscriptores por estado para el mapa USA

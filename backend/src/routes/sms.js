@@ -92,4 +92,8 @@ router.get('/analytics/insights', optionalProtect, smsAnalyticsController.getAiI
 // Forzar generación de insights
 router.post('/analytics/insights/generate', optionalProtect, smsAnalyticsController.generateInsights);
 
+// 🆕 Migración de ubicaciones para suscriptores existentes
+router.get('/analytics/migration-status', optionalProtect, smsAnalyticsController.getMigrationStatus);
+router.post('/analytics/migrate-locations', optionalProtect, smsAnalyticsController.migrateLocations);
+
 module.exports = router;
