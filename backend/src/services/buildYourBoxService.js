@@ -451,6 +451,15 @@ Responde SOLO con JSON válido (sin markdown, sin backticks):
           if (end !== -1) jsonStr = jsonStr.substring(0, end + 1);
         }
         parsed = JSON.parse(jsonStr);
+
+        // Log para debug - ver qué retorna Claude
+        console.log('📦 Claude BYB parsed response keys:', Object.keys(parsed));
+        if (parsed.newProductIdeas?.length > 0) {
+          console.log('📦 Sample newProductIdea:', JSON.stringify(parsed.newProductIdeas[0]));
+        }
+        if (parsed.marketingIdeas?.length > 0) {
+          console.log('📦 Sample marketingIdea:', JSON.stringify(parsed.marketingIdeas[0]));
+        }
       } catch (parseError) {
         console.error('❌ Error parsing Claude response:', parseError.message);
         return this.generateFallbackInsights(data);
