@@ -1004,9 +1004,10 @@ class WebhooksController {
           clearTimeout(abandonedCartTracker.get(checkoutToken).timer);
         }
         
-        // Set new timer
+        // Set new timer - usar referencia directa al método
+        const self = this;
         const timer = setTimeout(async () => {
-          await this.processAbandonedCart(checkoutToken, email, checkout);
+          await self.processAbandonedCart(checkoutToken, email, checkout);
         }, abandonmentDelay);
         
         abandonedCartTracker.set(checkoutToken, {
@@ -1123,10 +1124,11 @@ class WebhooksController {
         if (abandonedCartTracker.has(checkoutToken)) {
           const tracked = abandonedCartTracker.get(checkoutToken);
           clearTimeout(tracked.timer);
-          
+
           const abandonmentDelay = 60 * 60 * 1000;
+          const self = this;
           const timer = setTimeout(async () => {
-            await this.processAbandonedCart(checkoutToken, email || tracked.email, checkout);
+            await self.processAbandonedCart(checkoutToken, email || tracked.email, checkout);
           }, abandonmentDelay);
           
           abandonedCartTracker.set(checkoutToken, {
