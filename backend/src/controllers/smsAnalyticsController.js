@@ -37,14 +37,26 @@ const smsAnalyticsController = {
         });
       }
 
+      // IPs de Cloudflare que no son útiles para geolocalizar
+      // Estos rangos son de Cloudflare proxy, no de usuarios reales
+      const cloudflareRanges = [
+        '172.68.', '172.69.', '172.70.', '172.71.',
+        '104.22.', '104.23.', '104.24.', '104.25.',
+        '162.159.', '108.162.', '141.101.', '173.245.',
+        '188.114.', '190.93.', '197.234.', '198.41.'
+      ];
+
+      const isCloudflareIP = (ip) => {
+        if (!ip) return true;
+        return cloudflareRanges.some(range => ip.startsWith(range));
+      };
+
       // Buscar suscriptores que necesitan geolocalización
-      // Un suscriptor necesita migración si:
-      // 1. No tiene location.source = 'ip-api' (no fue resuelto)
-      // 2. Y tiene una IP válida para resolver
+      // Excluir IPs de Cloudflare ya que no son útiles
       const subscribersWithoutLocation = await SmsSubscriber.find({
         ipAddress: { $exists: true, $ne: null, $ne: '' },
         'location.source': { $ne: 'ip-api' }
-      }).limit(100); // Procesar en lotes de 100
+      }).limit(40); // Reducido a 40 para respetar rate limit (45/min)
 
       if (subscribersWithoutLocation.length === 0) {
         return res.json({
@@ -59,13 +71,31 @@ const smsAnalyticsController = {
 
       let processed = 0;
       let failed = 0;
+      let skippedCloudflare = 0;
       const results = [];
 
       for (const subscriber of subscribersWithoutLocation) {
         try {
-          // Rate limiting - esperar 500ms entre requests
+          // Verificar si es IP de Cloudflare (no útil)
+          if (isCloudflareIP(subscriber.ipAddress)) {
+            // Marcar como procesado con ubicación "unknown"
+            subscriber.location = {
+              country: 'United States',
+              countryCode: 'US',
+              region: null,
+              regionName: null,
+              city: null,
+              source: 'cloudflare-ip', // Marcar como IP de Cloudflare
+              resolvedAt: new Date()
+            };
+            await subscriber.save();
+            skippedCloudflare++;
+            continue;
+          }
+
+          // Rate limiting - esperar 1.5 segundos entre requests (45/min = 1 cada 1.33s)
           if (processed > 0) {
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await new Promise(resolve => setTimeout(resolve, 1500));
           }
 
           const locationData = await geoLocationService.getLocationByIp(subscriber.ipAddress);
@@ -81,6 +111,12 @@ const smsAnalyticsController = {
               success: true
             });
           } else {
+            // Marcar como procesado pero sin ubicación
+            subscriber.location = {
+              ...locationData,
+              source: 'ip-api-failed'
+            };
+            await subscriber.save();
             failed++;
             results.push({
               phone: subscriber.phone.slice(-4),
@@ -90,6 +126,11 @@ const smsAnalyticsController = {
             });
           }
         } catch (err) {
+          // Si es error 429, detenemos y devolvemos lo que tenemos
+          if (err.message && err.message.includes('429')) {
+            console.log('⚠️ Rate limit hit, stopping batch early');
+            break;
+          }
           failed++;
           results.push({
             phone: subscriber.phone.slice(-4),
@@ -100,19 +141,24 @@ const smsAnalyticsController = {
         }
       }
 
-      // Contar cuántos quedan por migrar
+      if (skippedCloudflare > 0) {
+        console.log(`⚠️ Skipped ${skippedCloudflare} Cloudflare IPs (not useful for geolocation)`);
+      }
+
+      // Contar cuántos quedan por migrar (excluyendo ya procesados)
       const remaining = await SmsSubscriber.countDocuments({
         ipAddress: { $exists: true, $ne: null, $ne: '' },
-        'location.source': { $ne: 'ip-api' }
+        'location.source': { $nin: ['ip-api', 'cloudflare-ip', 'ip-api-failed'] }
       });
 
-      console.log(`✅ Migration batch complete: ${processed} success, ${failed} failed, ${remaining} remaining`);
+      console.log(`✅ Migration batch complete: ${processed} success, ${failed} failed, ${skippedCloudflare} cloudflare, ${remaining} remaining`);
 
       res.json({
         success: true,
         message: `Processed ${processed} subscribers`,
         processed,
         failed,
+        skippedCloudflare,
         remaining,
         results: results.slice(0, 20) // Solo mostrar primeros 20 resultados
       });
@@ -132,15 +178,19 @@ const smsAnalyticsController = {
    */
   async getMigrationStatus(req, res) {
     try {
-      const [withLocation, withoutLocation, total] = await Promise.all([
-        // Suscriptores con ubicación resuelta por IP
+      const [withLocation, cloudflareIps, pendingMigration, total] = await Promise.all([
+        // Suscriptores con ubicación resuelta exitosamente
         SmsSubscriber.countDocuments({
           'location.source': 'ip-api'
         }),
-        // Suscriptores sin ubicación resuelta (que tienen IP)
+        // Suscriptores con IPs de Cloudflare (no útiles)
+        SmsSubscriber.countDocuments({
+          'location.source': 'cloudflare-ip'
+        }),
+        // Suscriptores pendientes de migrar
         SmsSubscriber.countDocuments({
           ipAddress: { $exists: true, $ne: null, $ne: '' },
-          'location.source': { $ne: 'ip-api' }
+          'location.source': { $nin: ['ip-api', 'cloudflare-ip', 'ip-api-failed'] }
         }),
         SmsSubscriber.countDocuments({})
       ]);
@@ -149,8 +199,10 @@ const smsAnalyticsController = {
         success: true,
         total,
         withLocation,
-        withoutLocation,
-        percentage: total > 0 ? Math.round((withLocation / total) * 100) : 0
+        cloudflareIps,
+        withoutLocation: pendingMigration,
+        percentage: total > 0 ? Math.round((withLocation / total) * 100) : 0,
+        note: cloudflareIps > 0 ? `${cloudflareIps} subscribers have Cloudflare proxy IPs (cannot geolocate)` : null
       });
 
     } catch (error) {

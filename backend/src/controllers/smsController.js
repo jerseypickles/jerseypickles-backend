@@ -120,7 +120,13 @@ const smsController = {
       const normalizedSource = validSources.includes(source) ? source : 'popup';
 
       // 🆕 Obtener geolocalización por IP
-      const clientIp = req.ip || req.headers['x-forwarded-for']?.split(',')[0] || req.connection?.remoteAddress;
+      // Prioridad: CF-Connecting-IP (Cloudflare) > X-Real-IP > X-Forwarded-For > req.ip
+      const clientIp =
+        req.headers['cf-connecting-ip'] ||  // Cloudflare real IP
+        req.headers['x-real-ip'] ||          // Nginx real IP
+        req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+        req.ip ||
+        req.connection?.remoteAddress;
       let location = null;
       if (geoLocationService && clientIp) {
         try {
