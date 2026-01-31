@@ -186,7 +186,7 @@ const smsSubscriberSchema = new mongoose.Schema({
   },
   lineType: {
     type: String,
-    enum: ['mobile', 'landline', 'voip', 'unknown'],
+    enum: ['mobile', 'wireless', 'landline', 'voip', 'unknown'],
     default: 'unknown'
   },
   
