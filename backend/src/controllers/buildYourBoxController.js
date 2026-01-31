@@ -147,6 +147,30 @@ const buildYourBoxController = {
         error: 'Error getting stats'
       });
     }
+  },
+
+  /**
+   * GET /api/byb/insights
+   * AI-powered insights para escalar Build Your Box
+   */
+  async getAiInsights(req, res) {
+    try {
+      const { days = 30 } = req.query;
+      console.log(`🧠 Generating BYB AI insights for ${days} days...`);
+
+      const insights = await buildYourBoxService.generateAiInsights(parseInt(days));
+
+      res.json({
+        success: true,
+        ...insights
+      });
+    } catch (error) {
+      console.error('BYB AI Insights Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error generating AI insights'
+      });
+    }
   }
 };
 
