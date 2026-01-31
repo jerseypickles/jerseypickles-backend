@@ -1,8 +1,9 @@
 // backend/src/routes/sms.js
-// 📱 SMS Marketing Routes - Con Second Chance SMS
+// 📱 SMS Marketing Routes - Con Second Chance SMS y Analytics
 const express = require('express');
 const router = express.Router();
 const smsController = require('../controllers/smsController');
+const smsAnalyticsController = require('../controllers/smsAnalyticsController');
 
 // Intentar cargar middleware de auth (opcional)
 let protect = null;
@@ -61,5 +62,34 @@ router.post('/second-chance/recover', optionalProtect, smsController.recoverMiss
 
 // 🆕 Second Chance SMS - Detailed queue visibility
 router.get('/second-chance/queue', optionalProtect, smsController.getSecondChanceQueue);
+
+// ==================== 📊 SMS ANALYTICS ROUTES ====================
+
+// Overview completo (combina todas las métricas para dashboard)
+router.get('/analytics/overview', optionalProtect, smsAnalyticsController.getOverview);
+
+// Datos del mapa USA (suscriptores por estado)
+router.get('/analytics/map', optionalProtect, smsAnalyticsController.getMapData);
+
+// Feed de actividad en tiempo real
+router.get('/analytics/activity', optionalProtect, smsAnalyticsController.getRecentActivity);
+
+// Métricas del dashboard
+router.get('/analytics/metrics', optionalProtect, smsAnalyticsController.getDashboardMetrics);
+
+// Tendencias diarias (para gráficos)
+router.get('/analytics/trends', optionalProtect, smsAnalyticsController.getDailyTrends);
+
+// Top estados por métrica
+router.get('/analytics/top-states', optionalProtect, smsAnalyticsController.getTopStates);
+
+// Detalles de un estado específico
+router.get('/analytics/state/:code', optionalProtect, smsAnalyticsController.getStateDetails);
+
+// AI Insights (leer caché o generar)
+router.get('/analytics/insights', optionalProtect, smsAnalyticsController.getAiInsights);
+
+// Forzar generación de insights
+router.post('/analytics/insights/generate', optionalProtect, smsAnalyticsController.generateInsights);
 
 module.exports = router;

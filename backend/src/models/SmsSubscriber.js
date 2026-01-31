@@ -35,6 +35,21 @@ const smsSubscriberSchema = new mongoose.Schema({
   sourceUrl: String,
   ipAddress: String,
   userAgent: String,
+
+  // ==================== GEOLOCATION (IP-based) ====================
+  location: {
+    country: { type: String, default: 'United States' },
+    countryCode: { type: String, default: 'US' },
+    region: String,        // State code (e.g., 'NJ')
+    regionName: String,    // Full state name (e.g., 'New Jersey')
+    city: String,
+    zip: String,
+    lat: Number,
+    lng: Number,
+    timezone: { type: String, default: 'America/New_York' },
+    source: { type: String, enum: ['ip-api', 'manual', 'default'], default: 'default' },
+    resolvedAt: Date
+  },
   
   // ==================== FIRST SMS (15% OFF) ====================
   welcomeSmsSent: {
@@ -222,6 +237,9 @@ smsSubscriberSchema.index({ secondSmsScheduledFor: 1, secondSmsSent: 1 });
 smsSubscriberSchema.index({ createdAt: -1 });
 smsSubscriberSchema.index({ convertedWith: 1 });
 smsSubscriberSchema.index({ 'conversionData.convertedAt': -1 });
+// Geolocation indexes for map analytics
+smsSubscriberSchema.index({ 'location.region': 1, status: 1 });
+smsSubscriberSchema.index({ 'location.city': 1, 'location.region': 1 });
 
 // ==================== VIRTUALS ====================
 
@@ -297,6 +315,140 @@ smsSubscriberSchema.statics.findScheduledSecondSms = function(limit = 50) {
   })
   .sort({ secondSmsScheduledFor: 1 })
   .limit(limit);
+};
+
+// Get subscribers by US state for map visualization
+smsSubscriberSchema.statics.getSubscribersByState = async function(days = 30) {
+  const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  return this.aggregate([
+    {
+      $match: {
+        'location.countryCode': 'US',
+        'location.region': { $exists: true, $ne: null },
+        createdAt: { $gte: startDate }
+      }
+    },
+    {
+      $group: {
+        _id: '$location.region',
+        count: { $sum: 1 },
+        converted: { $sum: { $cond: ['$converted', 1, 0] } },
+        revenue: { $sum: { $ifNull: ['$conversionData.orderTotal', 0] } },
+        cities: { $addToSet: '$location.city' }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        state: '$_id',
+        subscribers: '$count',
+        converted: 1,
+        revenue: 1,
+        conversionRate: {
+          $cond: [
+            { $gt: ['$count', 0] },
+            { $multiply: [{ $divide: ['$converted', '$count'] }, 100] },
+            0
+          ]
+        },
+        topCities: { $slice: ['$cities', 5] }
+      }
+    },
+    { $sort: { subscribers: -1 } }
+  ]);
+};
+
+// Get recent activity for live feed
+smsSubscriberSchema.statics.getRecentActivity = async function(limit = 20, since = null) {
+  const query = {};
+
+  if (since) {
+    query.$or = [
+      { createdAt: { $gt: new Date(since) } },
+      { convertedAt: { $gt: new Date(since) } },
+      { welcomeSmsAt: { $gt: new Date(since) } },
+      { secondSmsAt: { $gt: new Date(since) } }
+    ];
+  }
+
+  const subscribers = await this.find(query)
+    .sort({ createdAt: -1 })
+    .limit(limit * 2) // Get more to filter
+    .select('phone phoneFormatted status createdAt location converted convertedAt convertedWith welcomeSmsAt welcomeSmsStatus secondSmsAt secondSmsStatus conversionData.orderTotal discountCode secondDiscountCode')
+    .lean();
+
+  // Transform to activity events
+  const activities = [];
+
+  for (const sub of subscribers) {
+    // Subscription event
+    if (sub.createdAt) {
+      activities.push({
+        type: 'subscription',
+        timestamp: sub.createdAt,
+        phone: sub.phoneFormatted || sub.phone?.slice(-4),
+        location: sub.location ? {
+          city: sub.location.city,
+          state: sub.location.region,
+          stateName: sub.location.regionName
+        } : null,
+        data: { status: sub.status }
+      });
+    }
+
+    // Conversion event
+    if (sub.converted && sub.convertedAt) {
+      activities.push({
+        type: 'conversion',
+        timestamp: sub.convertedAt,
+        phone: sub.phoneFormatted || sub.phone?.slice(-4),
+        location: sub.location ? {
+          city: sub.location.city,
+          state: sub.location.region,
+          stateName: sub.location.regionName
+        } : null,
+        data: {
+          convertedWith: sub.convertedWith,
+          orderTotal: sub.conversionData?.orderTotal,
+          discountCode: sub.convertedWith === 'second' ? sub.secondDiscountCode : sub.discountCode
+        }
+      });
+    }
+
+    // Welcome SMS sent
+    if (sub.welcomeSmsAt && sub.welcomeSmsStatus === 'delivered') {
+      activities.push({
+        type: 'welcome_sms',
+        timestamp: sub.welcomeSmsAt,
+        phone: sub.phoneFormatted || sub.phone?.slice(-4),
+        location: sub.location ? {
+          city: sub.location.city,
+          state: sub.location.region
+        } : null,
+        data: { status: sub.welcomeSmsStatus }
+      });
+    }
+
+    // Second chance SMS sent
+    if (sub.secondSmsAt && sub.secondSmsStatus === 'delivered') {
+      activities.push({
+        type: 'second_chance_sms',
+        timestamp: sub.secondSmsAt,
+        phone: sub.phoneFormatted || sub.phone?.slice(-4),
+        location: sub.location ? {
+          city: sub.location.city,
+          state: sub.location.region
+        } : null,
+        data: { status: sub.secondSmsStatus }
+      });
+    }
+  }
+
+  // Sort by timestamp and limit
+  return activities
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+    .slice(0, limit);
 };
 
 // Get conversion stats breakdown

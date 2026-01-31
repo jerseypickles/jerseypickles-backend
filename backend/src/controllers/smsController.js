@@ -1,8 +1,17 @@
 // backend/src/controllers/smsController.js
-// 📱 SMS Controller - Con Second Chance SMS Support
+// 📱 SMS Controller - Con Second Chance SMS Support y Geolocalización
 const SmsSubscriber = require('../models/SmsSubscriber');
 const telnyxService = require('../services/telnyxService');
 const smsConversionService = require('../services/smsConversionService');
+
+// Cargar geoLocationService de forma segura
+let geoLocationService = null;
+try {
+  geoLocationService = require('../services/geoLocationService');
+  console.log('📱 SMS Controller: GeoLocation service loaded');
+} catch (e) {
+  console.log('⚠️  SMS Controller: GeoLocation service not available');
+}
 
 // Cargar shopifyService de forma segura
 let shopifyService = null;
@@ -110,6 +119,18 @@ const smsController = {
       const validSources = ['popup', 'checkout', 'manual', 'import', 'landing_page', 'website-popup-sms', 'api', 'test'];
       const normalizedSource = validSources.includes(source) ? source : 'popup';
 
+      // 🆕 Obtener geolocalización por IP
+      const clientIp = req.ip || req.headers['x-forwarded-for']?.split(',')[0] || req.connection?.remoteAddress;
+      let location = null;
+      if (geoLocationService && clientIp) {
+        try {
+          location = await geoLocationService.getLocationByIp(clientIp);
+          console.log(`🌍 Geolocated ${clientIp} -> ${location.city}, ${location.regionName}`);
+        } catch (geoError) {
+          console.log('⚠️  Could not geolocate IP:', geoError.message);
+        }
+      }
+
       // Crear subscriber
       subscriber = new SmsSubscriber({
         phone: formattedPhone,
@@ -120,8 +141,22 @@ const smsController = {
         source: normalizedSource,
         shopifyPriceRuleId: shopifyDiscount?.priceRuleId || null,
         shopifyDiscountCodeId: shopifyDiscount?.discountId || null,
-        ipAddress: req.ip || req.headers['x-forwarded-for']?.split(',')[0],
+        ipAddress: clientIp,
         userAgent: req.headers['user-agent'],
+        // 🆕 Geolocalización
+        location: location ? {
+          country: location.country,
+          countryCode: location.countryCode,
+          region: location.region || geoLocationService.getUsState(location),
+          regionName: location.regionName,
+          city: location.city,
+          zip: location.zip,
+          lat: location.lat,
+          lng: location.lng,
+          timezone: location.timezone,
+          source: location.source,
+          resolvedAt: location.resolvedAt
+        } : null,
         // 🆕 Initialize second SMS fields
         secondSmsSent: false,
         converted: false,
