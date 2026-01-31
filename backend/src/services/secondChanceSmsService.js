@@ -37,8 +37,8 @@ const getPersonalMessage = (code) => {
 
 // ==================== SHOPIFY CLIENT ====================
 const getShopifyClient = () => {
-  const shopifyDomain = process.env.SHOPIFY_STORE_DOMAIN;
-  const accessToken = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+  const shopifyDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+  const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
   
   if (!shopifyDomain || !accessToken) {
     throw new Error('Shopify credentials not configured');
