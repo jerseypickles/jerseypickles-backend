@@ -315,111 +315,103 @@ class BuildYourBoxService {
    * Generar insights usando Claude AI
    */
   async generateClaudeInsights(claudeService, data) {
-    const prompt = `Eres un consultor experto en e-commerce de alimentos gourmet, específicamente en estrategias de "Build Your Box" para Jersey Pickles (pickles artesanales y olives gourmet de New Jersey).
+    const prompt = `Eres un experto en desarrollo de productos para Jersey Pickles, una empresa artesanal de pickles y olives gourmet de New Jersey.
+
+CONTEXTO DEL NEGOCIO:
+- Jersey Pickles vende pickles artesanales (pepinos, tomates, etc.) y olives gourmet
+- El "Build Your Box" permite a clientes elegir: Tipo de jar (Quart 32oz o Half Gallon) → Tamaño de box (4, 6, 8, 12 jars) → Productos individuales
+- Los clientes mezclan pickles y olives según su gusto
+- Es un negocio familiar artesanal, no industrial
 
 DATOS DE DEMANDA DE LOS ÚLTIMOS ${data.summary.period?.days || 30} DÍAS:
 
-═══════════════════════════════════════════════════════════
-📊 RESUMEN
-═══════════════════════════════════════════════════════════
-• Total de Boxes vendidos: ${data.summary.totalBoxes}
-• Total de Pedidos: ${data.summary.totalOrders}
+📊 RESUMEN:
+• Boxes vendidos: ${data.summary.totalBoxes}
+• Pedidos: ${data.summary.totalOrders}
 • Productos elegidos: ${data.summary.totalProducts} unidades
-• Promedio de productos por box: ${data.summary.avgProductsPerBox}
+• Promedio por box: ${data.summary.avgProductsPerBox} productos
 
-═══════════════════════════════════════════════════════════
-🏆 TOP 15 PRODUCTOS MÁS ELEGIDOS
-═══════════════════════════════════════════════════════════
+🏆 TOP PRODUCTOS MÁS ELEGIDOS:
 ${data.topProducts.map((p, i) => `${i + 1}. ${p.name}: ${p.totalQuantity} unidades (${p.orderCount} pedidos)`).join('\n')}
 
-═══════════════════════════════════════════════════════════
-📦 DISTRIBUCIÓN DE TAMAÑOS DE JAR
-═══════════════════════════════════════════════════════════
+📦 TAMAÑOS DE JAR:
 ${data.sizeDistribution.map(s => `• ${s.size}: ${s.count} boxes (${s.percentage}%)`).join('\n')}
 
-═══════════════════════════════════════════════════════════
-🤝 COMBOS FRECUENTES (productos que se piden juntos)
-═══════════════════════════════════════════════════════════
-${data.frequentCombos.length > 0 ? data.frequentCombos.map((c, i) => `${i + 1}. "${c.product1}" + "${c.product2}" → ${c.count} veces`).join('\n') : 'No hay suficientes datos de combos'}
+🤝 PRODUCTOS QUE SE PIDEN JUNTOS:
+${data.frequentCombos.length > 0 ? data.frequentCombos.map((c, i) => `${i + 1}. "${c.product1}" + "${c.product2}" → ${c.count} veces`).join('\n') : 'Sin datos suficientes'}
 
 ═══════════════════════════════════════════════════════════
-📈 TENDENCIA DE LOS ÚLTIMOS 14 DÍAS
-═══════════════════════════════════════════════════════════
-${data.trends.length > 0 ? data.trends.map(t => `${t.date}: ${t.boxes} boxes, ${t.products} productos`).join('\n') : 'Sin datos de tendencia'}
-
-═══════════════════════════════════════════════════════════
-🎯 TU TAREA
+🎯 GENERA RECOMENDACIONES EN ESTAS CATEGORÍAS:
 ═══════════════════════════════════════════════════════════
 
-Basándote en estos datos, proporciona recomendaciones ESPECÍFICAS y ACCIONABLES para:
+1. **IDEAS DE NUEVOS PRODUCTOS** (newProductIdeas)
+   - Basándote en los productos populares, sugiere RECETAS ESPECÍFICAS de nuevos productos
+   - Ejemplo: Si "Garlic Dill Pickles" es popular → "Roasted Garlic & Black Pepper Pickles"
+   - Ejemplo: Si "Hot Green Tomatoes" es popular → "Sweet Heat Green Tomatoes con miel y habanero"
+   - Piensa en: variaciones de sabor (más dulce, más picante, sabores únicos), productos de temporada, fusiones de sabores
+   - Incluye descripción del perfil de sabor
 
-1. **ESCALAR EL BUILD YOUR BOX**
-   - Cómo aumentar el ticket promedio
-   - Cómo aumentar la frecuencia de compra
-   - Oportunidades de upsell/cross-sell
+2. **MEJORAS AL BUILD YOUR BOX** (bybImprovements)
+   - Ideas para mejorar la experiencia de Build Your Box
+   - Ejemplo: "Agregar tamaño 16oz Sampler para clientes nuevos"
+   - Ejemplo: "Opción 'Mystery Jar' donde Jersey Pickles elige una sorpresa"
+   - Ejemplo: "Categoría 'Staff Picks' con los favoritos del equipo"
+   - Ejemplo: "Auto-sugerir productos complementarios basado en selección"
 
-2. **NUEVOS SABORES/PRODUCTOS**
-   - Basándote en los productos populares, ¿qué nuevos sabores podrían funcionar?
-   - ¿Hay gaps en la oferta? (ej: más opciones spicy, más variedades de olives, etc.)
-   - ¿Qué combos pre-armados podrías ofrecer basándote en los combos frecuentes?
+3. **ESTRATEGIAS DE ESCALADO** (scalingStrategies)
+   - Cómo aumentar ventas del Build Your Box
+   - Basado en los datos: qué tamaños promover, qué productos destacar
+   - Ideas de upsell dentro del flujo de Build Your Box
 
-3. **OPTIMIZACIÓN DE TAMAÑOS**
-   - ¿El mix de tamaños es óptimo?
-   - ¿Deberías incentivar más un tamaño específico?
+4. **IDEAS DE MARKETING** (marketingIdeas)
+   - Campañas SMS/Email específicas usando los productos más populares
+   - Ejemplo: "Campaña 'Garlic Lovers Week' destacando todos los productos con ajo"
 
-4. **ESTRATEGIAS DE MARKETING**
-   - Ideas específicas para SMS/email basadas en los productos top
-   - Promociones que podrían funcionar
-   - Contenido que destaque los productos favoritos
+5. **QUICK WINS** (quickWins)
+   - 3-5 acciones que se pueden implementar esta semana
 
-5. **BUNDLES SUGERIDOS**
-   - Basándote en los combos frecuentes, sugiere 2-3 bundles pre-armados con nombres creativos
-
-Responde SOLO con JSON válido (sin markdown, sin \`\`\`):
+Responde SOLO con JSON válido (sin markdown, sin backticks):
 {
-  "executiveSummary": "2-3 oraciones con el insight principal y la oportunidad más grande",
+  "executiveSummary": "2-3 oraciones: insight principal y oportunidad más grande basada en los datos",
+  "newProductIdeas": [
+    {
+      "name": "Nombre comercial del producto (ej: Honey Habanero Green Tomatoes)",
+      "description": "Descripción del producto y perfil de sabor",
+      "whyItWorks": "Por qué funcionaría basado en los datos de demanda",
+      "basedOn": ["Producto existente que inspira esta idea"],
+      "category": "pickle o olive",
+      "flavorProfile": "dulce/picante/ácido/savory/etc"
+    }
+  ],
+  "bybImprovements": [
+    {
+      "idea": "Título de la mejora",
+      "description": "Descripción detallada de la implementación",
+      "benefit": "Beneficio esperado para el negocio",
+      "effort": "low/medium/high"
+    }
+  ],
   "scalingStrategies": [
     {
       "title": "Título de la estrategia",
       "description": "Descripción detallada",
       "expectedImpact": "Impacto esperado (ej: +15% ticket promedio)",
-      "effort": "low/medium/high",
-      "priority": 1
+      "effort": "low/medium/high"
     }
   ],
-  "newProductIdeas": [
-    {
-      "product": "Nombre del producto sugerido",
-      "rationale": "Por qué funcionaría basado en los datos",
-      "basedOn": ["Producto existente 1", "Producto existente 2"]
-    }
-  ],
-  "bundleSuggestions": [
-    {
-      "name": "Nombre creativo del bundle",
-      "products": ["Producto 1", "Producto 2", "Producto 3"],
-      "size": "QUART o HALF_GALLON",
-      "rationale": "Por qué estos productos juntos",
-      "suggestedPrice": "Rango de precio sugerido"
-    }
-  ],
-  "sizeOptimization": {
-    "analysis": "Análisis del mix de tamaños actual",
-    "recommendation": "Qué cambiar y por qué"
-  },
   "marketingIdeas": [
     {
       "channel": "SMS o Email",
-      "idea": "Idea específica de campaña",
+      "campaignName": "Nombre de la campaña",
+      "message": "Ejemplo del mensaje o subject line",
       "targetProduct": "Producto a destacar",
       "timing": "Cuándo enviar"
     }
   ],
-  "quickWins": ["Acción rápida 1", "Acción rápida 2", "Acción rápida 3"],
+  "quickWins": ["Acción inmediata 1", "Acción inmediata 2", "Acción inmediata 3"],
   "dataInsights": {
-    "surprising": "Algo sorprendente en los datos",
-    "concern": "Algo que debería preocupar o monitorear",
-    "opportunity": "Oportunidad no obvia"
+    "surprising": "Algo interesante o inesperado en los datos",
+    "opportunity": "Oportunidad no obvia que detectas"
   }
 }`;
 
