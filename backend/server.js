@@ -478,17 +478,18 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     try {
       const secondChanceSmsJob = require('./src/jobs/secondChanceSmsJob');
       
-      // Initialize cron job - runs every hour at minute 30
+      // Initialize cron job - runs every 5 minutes, processes ALL pending
       // Only sends SMS between 9am-9pm Eastern Time
-      secondChanceSmsJob.init('30 * * * *');
-      
+      secondChanceSmsJob.init('*/5 * * * *');
+
       secondChanceSmsAvailable = true;
       console.log('✅ Second Chance SMS Job listo');
-      console.log('   ⏰ Schedule: Every hour at :30');
+      console.log('   ⏰ Schedule: Every 5 minutes');
       console.log('   🕐 Sending hours: 9am - 9pm (Eastern)');
-      console.log('   ⏳ Delay: 6-8 hours after first SMS');
+      console.log('   ⏳ Delay: 6+ hours after first SMS');
       console.log('   🎟️ Discount: 20% OFF (expires in 2 hours)');
       console.log('   📝 Code format: JP2-XXXXX');
+      console.log('   🔄 Processes ALL pending (max 500 per run)');
     } catch (error) {
       secondChanceSmsAvailable = false;
       console.log('⚠️  Second Chance SMS Job no disponible:', error.message);
