@@ -302,8 +302,23 @@ try {
 } catch (error) {
   console.log('⚠️  SMS Campaigns routes not available:', error.message);
   app.use('/api/sms/campaigns', (req, res) => {
-    res.status(503).json({ 
+    res.status(503).json({
       error: 'SMS Campaigns feature is currently unavailable',
+      message: 'Please check configuration'
+    });
+  });
+}
+
+// 📦 BUILD YOUR BOX ANALYTICS (DEMANDA) ROUTES
+try {
+  const bybRoutes = require('./src/routes/byb');
+  app.use('/api/byb', bybRoutes);
+  console.log('✅ Build Your Box Analytics routes loaded');
+} catch (error) {
+  console.log('⚠️  BYB routes not available:', error.message);
+  app.use('/api/byb', (req, res) => {
+    res.status(503).json({
+      error: 'Build Your Box Analytics feature is currently unavailable',
       message: 'Please check configuration'
     });
   });
