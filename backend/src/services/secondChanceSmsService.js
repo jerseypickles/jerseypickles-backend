@@ -13,8 +13,26 @@ const CONFIG = {
   maxHoursSinceFirst: 8,
   quietHoursStart: 21, // 9 PM
   quietHoursEnd: 9,    // 9 AM
-  messageTemplate: (code, expiresIn) => 
-    `🥒 Hey Pickle Fan! We noticed you haven't used your discount yet... Here's 20% OFF just for you! Use code ${code} at jerseypickles.com ⏰ Expires in ${expiresIn}! Reply STOP to opt-out`
+  // Personal, family-style message templates (rotates randomly)
+  messageTemplates: [
+    (code) => `Hi, it's Mike from Jersey Pickles! 🥒 I saw you were checking us out earlier. We're a small family business here in NJ, and we put a lot of love into every jar. Would love for you to try us - here's ${code} for 20% off. Hope to see you soon! - The Jersey Pickles Family 💚`,
+
+    (code) => `Hey there! Sarah here from Jersey Pickles 👋 Just wanted to reach out personally - we noticed you haven't completed your order. We're a family-run business and every customer means the world to us. Use ${code} for 20% off your first order. Handcrafted with love in NJ! 🥒💚`,
+
+    (code) => `Hi! This is the team at Jersey Pickles 🥒 We're a small family business making pickles the old-fashioned way right here in New Jersey. We'd love to welcome you to our pickle family! Here's a special code just for you: ${code} for 20% off. Made with love, The Jersey Pickles Crew 💚`
+  ],
+  // Fallback simple template
+  messageTemplate: (code, expiresIn) =>
+    `Hi from Jersey Pickles! 🥒 We're a small family business in NJ and we'd love for you to try our handcrafted pickles. Here's ${code} for 20% off your order. Made with love! - The JP Family 💚 Reply STOP to opt-out`
+};
+
+/**
+ * Get a personal message template (rotates to feel more natural)
+ */
+const getPersonalMessage = (code) => {
+  const templates = CONFIG.messageTemplates;
+  const randomIndex = Math.floor(Math.random() * templates.length);
+  return templates[randomIndex](code) + ' Reply STOP to opt-out';
 };
 
 // ==================== SHOPIFY CLIENT ====================
@@ -235,9 +253,11 @@ const processSubscriberForSecondSms = async (subscriber) => {
       return { success: false, reason: 'shopify_error', error: shopifyResult.error };
     }
     
-    // Build message
-    const message = CONFIG.messageTemplate(secondCode, '2 hours');
-    
+    // Build personal, family-style message
+    const message = getPersonalMessage(secondCode);
+
+    console.log(`   📝 Message style: Personal/Family (${message.length} chars)`);
+
     // Send SMS via Telnyx
     const smsResult = await telnyxService.sendSms(subscriber.phone, message);
     
