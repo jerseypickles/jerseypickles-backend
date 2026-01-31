@@ -157,12 +157,8 @@ const sendOrderConfirmation = async (order) => {
       return { success: false, reason: 'invalid_phone' };
     }
 
-    // Check opt-in
-    const { optedIn, subscriber } = await checkOptIn(formattedPhone);
-    if (!optedIn) {
-      console.log(`   ⚠️ Customer not opted-in to SMS`);
-      return { success: false, reason: 'not_opted_in' };
-    }
+    // Check if subscriber exists (optional - for linking purposes only)
+    const { subscriber } = await checkOptIn(formattedPhone);
 
     // Build message
     const customerName = extractCustomerName(order);
@@ -186,8 +182,8 @@ const sendOrderConfirmation = async (order) => {
       orderTotal: parseFloat(order.total_price || 0),
       message,
       messageLength: message.length,
-      optInVerified: true,
-      smsSubscriberId: subscriber?._id,
+      optInVerified: false, // Transactional SMS - no opt-in required
+      smsSubscriberId: subscriber?._id || null,
       status: 'pending'
     });
 
@@ -273,12 +269,8 @@ const sendShippingNotification = async (order, fulfillment) => {
       return { success: false, reason: 'invalid_phone' };
     }
 
-    // Check opt-in
-    const { optedIn, subscriber } = await checkOptIn(formattedPhone);
-    if (!optedIn) {
-      console.log(`   ⚠️ Customer not opted-in to SMS`);
-      return { success: false, reason: 'not_opted_in' };
-    }
+    // Check if subscriber exists (optional - for linking purposes only)
+    const { subscriber } = await checkOptIn(formattedPhone);
 
     // Build message
     const customerName = extractCustomerName(order);
@@ -308,8 +300,8 @@ const sendShippingNotification = async (order, fulfillment) => {
       fulfillmentId,
       message,
       messageLength: message.length,
-      optInVerified: true,
-      smsSubscriberId: subscriber?._id,
+      optInVerified: false, // Transactional SMS - no opt-in required
+      smsSubscriberId: subscriber?._id || null,
       status: 'pending'
     });
 
@@ -386,12 +378,8 @@ const sendDeliveryConfirmation = async (order, fulfillment) => {
       return { success: false, reason: 'invalid_phone' };
     }
 
-    // Check opt-in
-    const { optedIn, subscriber } = await checkOptIn(formattedPhone);
-    if (!optedIn) {
-      console.log(`   ⚠️ Customer not opted-in to SMS`);
-      return { success: false, reason: 'not_opted_in' };
-    }
+    // Check if subscriber exists (optional - for linking purposes only)
+    const { subscriber } = await checkOptIn(formattedPhone);
 
     // Build message
     const customerName = extractCustomerName(order);
@@ -414,8 +402,8 @@ const sendDeliveryConfirmation = async (order, fulfillment) => {
       fulfillmentId,
       message,
       messageLength: message.length,
-      optInVerified: true,
-      smsSubscriberId: subscriber?._id,
+      optInVerified: false, // Transactional SMS - no opt-in required
+      smsSubscriberId: subscriber?._id || null,
       status: 'pending'
     });
 
