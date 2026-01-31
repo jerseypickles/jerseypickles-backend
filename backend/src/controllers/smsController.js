@@ -1213,7 +1213,8 @@ smsController.getTriggersSettings = async (req, res) => {
 
 /**
  * PUT /api/sms/triggers/settings
- * Update trigger settings (enable/disable)
+ * Update trigger settings (enable/disable, custom templates)
+ * Supports both old format { triggerType, enabled } and new format { [triggerType]: { enabled, template } }
  */
 smsController.updateTriggersSettings = async (req, res) => {
   try {
@@ -1224,29 +1225,41 @@ smsController.updateTriggersSettings = async (req, res) => {
       });
     }
 
-    const { triggerType, enabled } = req.body;
+    const body = req.body;
 
-    if (!triggerType) {
-      return res.status(400).json({
-        success: false,
-        error: 'triggerType is required'
-      });
-    }
+    // Check if old format (single trigger)
+    if (body.triggerType) {
+      const { triggerType, enabled } = body;
+      const success = smsTransactionalService.toggleTrigger(triggerType, enabled);
 
-    const success = smsTransactionalService.toggleTrigger(triggerType, enabled);
+      if (!success) {
+        return res.status(400).json({
+          success: false,
+          error: `Invalid trigger type: ${triggerType}`
+        });
+      }
+    } else {
+      // New format: { [triggerType]: { enabled, template } }
+      const validTriggers = ['order_confirmation', 'shipping_notification', 'delivery_confirmation'];
 
-    if (!success) {
-      return res.status(400).json({
-        success: false,
-        error: `Invalid trigger type: ${triggerType}`
-      });
+      for (const [triggerType, config] of Object.entries(body)) {
+        if (!validTriggers.includes(triggerType)) continue;
+
+        // Update settings via updateSettings
+        const newSettings = {};
+        newSettings[triggerType] = {
+          ...smsTransactionalService.getSettings()[triggerType],
+          ...config
+        };
+        smsTransactionalService.updateSettings(newSettings);
+      }
     }
 
     const settings = smsTransactionalService.getSettings();
 
     res.json({
       success: true,
-      message: `Trigger ${triggerType} ${enabled ? 'enabled' : 'disabled'}`,
+      message: 'Settings updated',
       settings
     });
 
@@ -1348,6 +1361,8 @@ smsController.getTriggersTemplates = async (req, res) => {
     }
 
     const templates = smsTransactionalService.TEMPLATES;
+    const defaultTemplates = smsTransactionalService.DEFAULT_TEMPLATES;
+    const settings = smsTransactionalService.getSettings();
 
     // Generate previews with sample data
     const sampleData = {
@@ -1363,18 +1378,24 @@ smsController.getTriggersTemplates = async (req, res) => {
         name: 'Order Confirmation',
         description: 'Sent when a new order is placed',
         preview: templates.order_confirmation(sampleData),
+        template: settings.order_confirmation?.template || defaultTemplates.order_confirmation,
+        isCustom: !!settings.order_confirmation?.template,
         length: templates.order_confirmation(sampleData).length
       },
       shipping_notification: {
         name: 'Shipping Notification',
         description: 'Sent when order ships with tracking',
         preview: templates.shipping_notification(sampleData),
+        template: settings.shipping_notification?.template || defaultTemplates.shipping_notification,
+        isCustom: !!settings.shipping_notification?.template,
         length: templates.shipping_notification(sampleData).length
       },
       delivery_confirmation: {
         name: 'Delivery Confirmation',
         description: 'Sent when package is delivered',
         preview: templates.delivery_confirmation(sampleData),
+        template: settings.delivery_confirmation?.template || defaultTemplates.delivery_confirmation,
+        isCustom: !!settings.delivery_confirmation?.template,
         length: templates.delivery_confirmation(sampleData).length
       }
     };

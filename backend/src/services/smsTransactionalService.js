@@ -4,36 +4,56 @@ const SmsTransactional = require('../models/SmsTransactional');
 const SmsSubscriber = require('../models/SmsSubscriber');
 const telnyxService = require('./telnyxService');
 
-// ==================== MESSAGE TEMPLATES ====================
-const TEMPLATES = {
+// ==================== DEFAULT MESSAGE TEMPLATES ====================
+const DEFAULT_TEMPLATES = {
   // Order Confirmation - Warm, family-style, emphasize freshness
-  order_confirmation: (data) => {
-    const name = data.customerName?.split(' ')[0] || 'friend';
-    return `Hi ${name}! 🥒 Thank you so much for your order #${data.orderNumber}! We're so excited to have you as part of our pickle family. Your order is being prepared fresh with love right here in New Jersey - we ship everything super fresh straight to your door! We'll text you the moment it ships. Questions? We're here for you! - The Jersey Pickles Family 💚`;
-  },
+  order_confirmation: `Hi {customerName}! 🥒 Thank you so much for your order #{orderNumber}! We're so excited to have you as part of our pickle family. Your order is being prepared fresh with love right here in New Jersey - we ship everything super fresh straight to your door! We'll text you the moment it ships. Questions? We're here for you! - The Jersey Pickles Family 💚`,
 
   // Shipping Notification - Include tracking + support contact
-  shipping_notification: (data) => {
-    const name = data.customerName?.split(' ')[0] || 'friend';
-    const trackingInfo = data.trackingUrl
-      ? `Track your package: ${data.trackingUrl}`
-      : `Tracking #: ${data.trackingNumber}`;
-    return `Great news ${name}! 🎉 Your fresh Jersey Pickles just shipped and are on their way to you! 📦 ${trackingInfo} - If you notice anything unusual with your delivery or have any questions, please reach out to us at info@jerseypickles.com with your order #${data.orderNumber}. We're always here to help! - Jersey Pickles 🥒💚`;
-  },
+  shipping_notification: `Great news {customerName}! 🎉 Your fresh Jersey Pickles just shipped and are on their way to you! 📦 Track your package: {trackingUrl} - If you notice anything unusual with your delivery or have any questions, please reach out to us at info@jerseypickles.com with your order #{orderNumber}. We're always here to help! - Jersey Pickles 🥒💚`,
 
   // Delivery Confirmation - Request feedback + support for issues
+  delivery_confirmation: `Hi {customerName}! 🥒 Your Jersey Pickles have arrived! We hope you love them as much as we loved making them for you! If you notice any issues with your order or anything doesn't look right, please let us know right away at info@jerseypickles.com (include order #{orderNumber}) - we'll make it right! Enjoy your fresh pickles! 💚 - The JP Family`
+};
+
+// ==================== MESSAGE TEMPLATES (dynamic) ====================
+// These generate messages from templates, supporting variable replacement
+const TEMPLATES = {
+  order_confirmation: (data) => {
+    const template = triggerSettings.order_confirmation?.template || DEFAULT_TEMPLATES.order_confirmation;
+    return replaceVariables(template, data);
+  },
+  shipping_notification: (data) => {
+    const template = triggerSettings.shipping_notification?.template || DEFAULT_TEMPLATES.shipping_notification;
+    return replaceVariables(template, data);
+  },
   delivery_confirmation: (data) => {
-    const name = data.customerName?.split(' ')[0] || 'friend';
-    return `Hi ${name}! 🥒 Your Jersey Pickles have arrived! We hope you love them as much as we loved making them for you! If you notice any issues with your order or anything doesn't look right, please let us know right away at info@jerseypickles.com (include order #${data.orderNumber}) - we'll make it right! Enjoy your fresh pickles! 💚 - The JP Family`;
+    const template = triggerSettings.delivery_confirmation?.template || DEFAULT_TEMPLATES.delivery_confirmation;
+    return replaceVariables(template, data);
   }
+};
+
+/**
+ * Replace template variables with actual data
+ */
+const replaceVariables = (template, data) => {
+  const name = data.customerName?.split(' ')[0] || 'friend';
+  const trackingInfo = data.trackingUrl || data.trackingNumber || '';
+
+  return template
+    .replace(/\{customerName\}/g, name)
+    .replace(/\{orderNumber\}/g, data.orderNumber || '')
+    .replace(/\{orderTotal\}/g, data.orderTotal || '')
+    .replace(/\{trackingNumber\}/g, data.trackingNumber || '')
+    .replace(/\{trackingUrl\}/g, trackingInfo);
 };
 
 // ==================== TRIGGER SETTINGS ====================
 // In-memory settings (can be moved to DB later for dashboard control)
 let triggerSettings = {
-  order_confirmation: { enabled: true },
-  shipping_notification: { enabled: true },
-  delivery_confirmation: { enabled: true }
+  order_confirmation: { enabled: true, template: null },
+  shipping_notification: { enabled: true, template: null },
+  delivery_confirmation: { enabled: true, template: null }
 };
 
 // ==================== HELPER FUNCTIONS ====================
@@ -521,5 +541,6 @@ module.exports = {
   getRecent,
 
   // Templates (for preview)
-  TEMPLATES
+  TEMPLATES,
+  DEFAULT_TEMPLATES
 };
