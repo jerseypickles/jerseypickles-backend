@@ -337,29 +337,46 @@ const processSecondChanceBatch = async (limit = 20) => {
 
 /**
  * Schedule second SMS for subscribers (respecting quiet hours)
+ * FIXED: Incluye suscriptores con secondSmsScheduledFor undefined/null
+ * y también busca por welcomeSmsSentAt para compatibilidad
  */
 const scheduleSecondSmsForEligible = async () => {
   const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
-  
+
   // Find subscribers who need scheduling
+  // Incluye los que nunca fueron agendados (secondSmsScheduledFor no existe o es null)
   const subscribers = await SmsSubscriber.find({
     status: 'active',
     converted: false,
-    secondSmsSent: false,
-    secondSmsScheduledFor: null,
+    secondSmsSent: { $ne: true },
     welcomeSmsStatus: 'delivered',
-    welcomeSmsAt: { $lte: sixHoursAgo }
+    $and: [
+      // No tiene agendado el segundo SMS
+      {
+        $or: [
+          { secondSmsScheduledFor: null },
+          { secondSmsScheduledFor: { $exists: false } }
+        ]
+      },
+      // Han pasado al menos 6 horas desde el primer SMS
+      {
+        $or: [
+          { welcomeSmsAt: { $lte: sixHoursAgo } },
+          { welcomeSmsSentAt: { $lte: sixHoursAgo } }
+        ]
+      }
+    ]
   }).limit(100);
-  
+
   let scheduled = 0;
-  
+
   for (const subscriber of subscribers) {
     await subscriber.scheduleSecondSms();
     scheduled++;
   }
-  
+
   console.log(`📅 Scheduled ${scheduled} subscribers for second SMS`);
-  
+
   return { scheduled };
 };
 
