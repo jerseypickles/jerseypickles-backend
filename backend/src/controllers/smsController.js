@@ -39,6 +39,23 @@ try {
   // Job not available
 }
 
+// Cargar smsTransactionalService de forma segura
+let smsTransactionalService = null;
+try {
+  smsTransactionalService = require('../services/smsTransactionalService');
+  console.log('📱 SMS Controller: Transactional SMS service loaded');
+} catch (e) {
+  console.log('⚠️  SMS Controller: Transactional SMS service not available');
+}
+
+// Cargar modelo SmsTransactional
+let SmsTransactional = null;
+try {
+  SmsTransactional = require('../models/SmsTransactional');
+} catch (e) {
+  // Model not available
+}
+
 const smsController = {
   // ==================== SUSCRIBIR NUEVO NÚMERO ====================
   
@@ -1160,5 +1177,220 @@ async function handleInboundSms(webhookData) {
 // Export helper for second chance service
 smsController.generateDiscountCode = generateDiscountCode;
 smsController.createShopifyDiscountCode = createShopifyDiscountCode;
+
+// ==================== 📱 SMS TRANSACTIONAL TRIGGERS ====================
+
+/**
+ * GET /api/sms/triggers/settings
+ * Get trigger settings and stats
+ */
+smsController.getTriggersSettings = async (req, res) => {
+  try {
+    if (!smsTransactionalService) {
+      return res.status(503).json({
+        success: false,
+        error: 'SMS Transactional service not available'
+      });
+    }
+
+    const settings = smsTransactionalService.getSettings();
+    const stats = await smsTransactionalService.getStats(30);
+
+    res.json({
+      success: true,
+      settings,
+      stats
+    });
+
+  } catch (error) {
+    console.error('❌ Get Triggers Settings Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error getting trigger settings'
+    });
+  }
+};
+
+/**
+ * PUT /api/sms/triggers/settings
+ * Update trigger settings (enable/disable)
+ */
+smsController.updateTriggersSettings = async (req, res) => {
+  try {
+    if (!smsTransactionalService) {
+      return res.status(503).json({
+        success: false,
+        error: 'SMS Transactional service not available'
+      });
+    }
+
+    const { triggerType, enabled } = req.body;
+
+    if (!triggerType) {
+      return res.status(400).json({
+        success: false,
+        error: 'triggerType is required'
+      });
+    }
+
+    const success = smsTransactionalService.toggleTrigger(triggerType, enabled);
+
+    if (!success) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid trigger type: ${triggerType}`
+      });
+    }
+
+    const settings = smsTransactionalService.getSettings();
+
+    res.json({
+      success: true,
+      message: `Trigger ${triggerType} ${enabled ? 'enabled' : 'disabled'}`,
+      settings
+    });
+
+  } catch (error) {
+    console.error('❌ Update Triggers Settings Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error updating trigger settings'
+    });
+  }
+};
+
+/**
+ * GET /api/sms/triggers/stats
+ * Get transactional SMS statistics
+ */
+smsController.getTriggersStats = async (req, res) => {
+  try {
+    if (!smsTransactionalService) {
+      return res.status(503).json({
+        success: false,
+        error: 'SMS Transactional service not available'
+      });
+    }
+
+    const { days = 30 } = req.query;
+    const stats = await smsTransactionalService.getStats(parseInt(days));
+
+    res.json({
+      success: true,
+      ...stats
+    });
+
+  } catch (error) {
+    console.error('❌ Get Triggers Stats Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error getting trigger statistics'
+    });
+  }
+};
+
+/**
+ * GET /api/sms/triggers/history
+ * Get recent transactional SMS history
+ */
+smsController.getTriggersHistory = async (req, res) => {
+  try {
+    if (!SmsTransactional) {
+      return res.status(503).json({
+        success: false,
+        error: 'SmsTransactional model not available'
+      });
+    }
+
+    const { limit = 50, triggerType, status } = req.query;
+
+    const query = {};
+    if (triggerType) query.triggerType = triggerType;
+    if (status) query.status = status;
+
+    const history = await SmsTransactional.find(query)
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .lean();
+
+    // Mask phone numbers
+    const maskedHistory = history.map(sms => ({
+      ...sms,
+      phone: sms.phone ? `***-***-${sms.phone.slice(-4)}` : null
+    }));
+
+    res.json({
+      success: true,
+      count: maskedHistory.length,
+      history: maskedHistory
+    });
+
+  } catch (error) {
+    console.error('❌ Get Triggers History Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error getting trigger history'
+    });
+  }
+};
+
+/**
+ * GET /api/sms/triggers/templates
+ * Get message templates preview
+ */
+smsController.getTriggersTemplates = async (req, res) => {
+  try {
+    if (!smsTransactionalService) {
+      return res.status(503).json({
+        success: false,
+        error: 'SMS Transactional service not available'
+      });
+    }
+
+    const templates = smsTransactionalService.TEMPLATES;
+
+    // Generate previews with sample data
+    const sampleData = {
+      customerName: 'John',
+      orderNumber: '1234',
+      orderTotal: '49.99',
+      trackingNumber: 'USPS123456789',
+      trackingUrl: 'https://track.usps.com/123456789'
+    };
+
+    const previews = {
+      order_confirmation: {
+        name: 'Order Confirmation',
+        description: 'Sent when a new order is placed',
+        preview: templates.order_confirmation(sampleData),
+        length: templates.order_confirmation(sampleData).length
+      },
+      shipping_notification: {
+        name: 'Shipping Notification',
+        description: 'Sent when order ships with tracking',
+        preview: templates.shipping_notification(sampleData),
+        length: templates.shipping_notification(sampleData).length
+      },
+      delivery_confirmation: {
+        name: 'Delivery Confirmation',
+        description: 'Sent when package is delivered',
+        preview: templates.delivery_confirmation(sampleData),
+        length: templates.delivery_confirmation(sampleData).length
+      }
+    };
+
+    res.json({
+      success: true,
+      templates: previews
+    });
+
+  } catch (error) {
+    console.error('❌ Get Templates Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error getting templates'
+    });
+  }
+};
 
 module.exports = smsController;

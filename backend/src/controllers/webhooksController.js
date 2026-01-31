@@ -12,6 +12,15 @@ const crypto = require('crypto');
 // SMS Conversion Service
 const smsConversionService = require('../services/smsConversionService');
 
+// SMS Transactional Service (Order Confirmation, Shipping, Delivery)
+let smsTransactionalService = null;
+try {
+  smsTransactionalService = require('../services/smsTransactionalService');
+  console.log('✅ SMS Transactional Service loaded');
+} catch (err) {
+  console.log('⚠️ SMS Transactional Service not available:', err.message);
+}
+
 // Store for tracking abandoned carts (in production, use Redis)
 const abandonedCartTracker = new Map();
 
@@ -700,11 +709,43 @@ class WebhooksController {
       }
       
       console.log(`====================================================\n`);
-      
+
+      // ==================== SMS ORDER CONFIRMATION ====================
+      if (smsTransactionalService) {
+        try {
+          console.log('📱 Triggering Order Confirmation SMS...');
+          const smsResult = await smsTransactionalService.sendOrderConfirmation(shopifyOrder);
+
+          actions.push({
+            type: 'sms_order_confirmation',
+            details: {
+              success: smsResult.success,
+              reason: smsResult.reason || null,
+              messageId: smsResult.messageId || null
+            },
+            success: smsResult.success
+          });
+
+          if (smsResult.success) {
+            console.log('✅ Order confirmation SMS sent');
+          } else {
+            console.log(`⚠️ Order confirmation SMS not sent: ${smsResult.reason}`);
+          }
+        } catch (smsErr) {
+          console.log('⚠️ SMS Order Confirmation error:', smsErr.message);
+          actions.push({
+            type: 'sms_order_confirmation',
+            details: { error: smsErr.message },
+            success: false
+          });
+        }
+      }
+      // ==================== END SMS ORDER CONFIRMATION ====================
+
       await webhookLog.markProcessed(actions, flowsTriggered);
-      
+
       res.status(200).json({ success: true, logId: webhookLog._id });
-      
+
     } catch (error) {
       console.error('❌ Error en orderCreate:', error);
       if (webhookLog) await webhookLog.markFailed(error);
@@ -742,13 +783,53 @@ class WebhooksController {
           shopifyData: shopifyOrder
         }
       );
-      
+
       console.log('✅ Orden actualizada');
-      
-      await webhookLog.markProcessed([
+
+      const actions = [
         { type: 'order_updated', details: { orderId: shopifyOrder.id }, success: true }
-      ], []);
-      
+      ];
+
+      // ==================== SMS SHIPPING NOTIFICATION ====================
+      // Check for new fulfillments with tracking info
+      if (smsTransactionalService && shopifyOrder.fulfillments && shopifyOrder.fulfillments.length > 0) {
+        for (const fulfillment of shopifyOrder.fulfillments) {
+          // Only process if has tracking and is recent (created in last 5 minutes)
+          const hasTracking = fulfillment.tracking_number || fulfillment.tracking_url;
+          const createdAt = new Date(fulfillment.created_at);
+          const isRecent = (Date.now() - createdAt.getTime()) < 5 * 60 * 1000; // 5 minutes
+
+          if (hasTracking && isRecent) {
+            try {
+              console.log(`📱 Triggering Shipping SMS for fulfillment ${fulfillment.id}...`);
+              const smsResult = await smsTransactionalService.sendShippingNotification(shopifyOrder, fulfillment);
+
+              actions.push({
+                type: 'sms_shipping_notification',
+                details: {
+                  fulfillmentId: fulfillment.id,
+                  trackingNumber: fulfillment.tracking_number,
+                  success: smsResult.success,
+                  reason: smsResult.reason || null
+                },
+                success: smsResult.success
+              });
+
+              if (smsResult.success) {
+                console.log(`✅ Shipping SMS sent for fulfillment ${fulfillment.id}`);
+              } else {
+                console.log(`⚠️ Shipping SMS not sent: ${smsResult.reason}`);
+              }
+            } catch (smsErr) {
+              console.log('⚠️ SMS Shipping error:', smsErr.message);
+            }
+          }
+        }
+      }
+      // ==================== END SMS SHIPPING NOTIFICATION ====================
+
+      await webhookLog.markProcessed(actions, []);
+
       res.status(200).json({ success: true, logId: webhookLog._id });
       
     } catch (error) {

@@ -96,4 +96,21 @@ router.post('/analytics/insights/generate', optionalProtect, smsAnalyticsControl
 router.get('/analytics/migration-status', optionalProtect, smsAnalyticsController.getMigrationStatus);
 router.post('/analytics/migrate-locations', optionalProtect, smsAnalyticsController.migrateLocations);
 
+// ==================== 📱 SMS TRANSACTIONAL TRIGGERS ====================
+
+// Get trigger settings and stats
+router.get('/triggers/settings', optionalProtect, smsController.getTriggersSettings);
+
+// Update trigger settings (enable/disable)
+router.put('/triggers/settings', optionalProtect, smsController.updateTriggersSettings);
+
+// Get trigger statistics
+router.get('/triggers/stats', optionalProtect, smsController.getTriggersStats);
+
+// Get trigger history (recent SMS sent)
+router.get('/triggers/history', optionalProtect, smsController.getTriggersHistory);
+
+// Get message templates preview
+router.get('/triggers/templates', optionalProtect, smsController.getTriggersTemplates);
+
 module.exports = router;
