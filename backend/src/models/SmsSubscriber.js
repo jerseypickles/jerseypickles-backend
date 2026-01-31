@@ -267,18 +267,18 @@ smsSubscriberSchema.pre('save', function(next) {
 // ==================== STATICS ====================
 
 // Find subscribers eligible for second chance SMS
+// FIXED: Ahora busca >= 6 horas (sin límite superior) para no perder suscriptores
 smsSubscriberSchema.statics.findEligibleForSecondSms = function(limit = 50) {
   const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
-  const eightHoursAgo = new Date(Date.now() - 8 * 60 * 60 * 1000);
-  
+
   return this.find({
     status: 'active',
     converted: false,
     secondSmsSent: { $ne: true },
     welcomeSmsStatus: 'delivered',
     $or: [
-      { welcomeSmsAt: { $gte: eightHoursAgo, $lte: sixHoursAgo } },
-      { welcomeSmsSentAt: { $gte: eightHoursAgo, $lte: sixHoursAgo } }
+      { welcomeSmsAt: { $lte: sixHoursAgo } },
+      { welcomeSmsSentAt: { $lte: sixHoursAgo } }
     ]
   })
   .sort({ welcomeSmsAt: 1, welcomeSmsSentAt: 1 }) // Oldest first

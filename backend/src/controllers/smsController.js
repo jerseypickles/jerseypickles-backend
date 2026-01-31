@@ -490,7 +490,7 @@ const smsController = {
   },
 
   // ==================== 🆕 SECOND CHANCE JOB STATUS ====================
-  
+
   /**
    * GET /api/sms/second-chance/status
    */
@@ -503,12 +503,18 @@ const smsController = {
         nextSendingWindow: null
       };
 
-      // Get pending count
+      const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+
+      // Get pending count - subscribers eligible for second SMS
       const pendingSecondSms = await SmsSubscriber.countDocuments({
         status: 'active',
         converted: false,
         secondSmsSent: { $ne: true },
-        welcomeSmsStatus: 'delivered'
+        welcomeSmsStatus: 'delivered',
+        $or: [
+          { welcomeSmsAt: { $lte: sixHoursAgo } },
+          { welcomeSmsSentAt: { $lte: sixHoursAgo } }
+        ]
       });
 
       res.json({
@@ -522,6 +528,123 @@ const smsController = {
       res.status(500).json({
         success: false,
         error: 'Error getting job status'
+      });
+    }
+  },
+
+  // ==================== 🆕 RECOVER MISSED SUBSCRIBERS ====================
+
+  /**
+   * POST /api/sms/second-chance/recover
+   * Procesa todos los suscriptores que se perdieron (>6h sin segundo SMS)
+   */
+  async recoverMissedSubscribers(req, res) {
+    try {
+      if (!secondChanceSmsService) {
+        return res.status(503).json({
+          success: false,
+          error: 'Second Chance SMS service not available'
+        });
+      }
+
+      const { limit = 50, dryRun = false } = req.body;
+      const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+
+      // Find all eligible subscribers that were missed
+      const missedSubscribers = await SmsSubscriber.find({
+        status: 'active',
+        converted: false,
+        secondSmsSent: { $ne: true },
+        welcomeSmsStatus: 'delivered',
+        $or: [
+          { welcomeSmsAt: { $lte: sixHoursAgo } },
+          { welcomeSmsSentAt: { $lte: sixHoursAgo } }
+        ]
+      })
+      .sort({ welcomeSmsAt: 1, welcomeSmsSentAt: 1 })
+      .limit(parseInt(limit));
+
+      if (dryRun) {
+        // Just return info without processing
+        const subscriberInfo = missedSubscribers.map(sub => {
+          const smsTime = sub.welcomeSmsAt || sub.welcomeSmsSentAt;
+          const hoursSinceFirst = smsTime
+            ? ((Date.now() - new Date(smsTime).getTime()) / (1000 * 60 * 60)).toFixed(1)
+            : 'unknown';
+          return {
+            id: sub._id,
+            phone: sub.phone.replace(/(\+1\d{3})\d{4}(\d{4})/, '$1****$2'), // Mask phone
+            discountCode: sub.discountCode,
+            welcomeSmsAt: smsTime,
+            hoursSinceFirstSms: hoursSinceFirst,
+            status: sub.status
+          };
+        });
+
+        return res.json({
+          success: true,
+          dryRun: true,
+          message: `Found ${missedSubscribers.length} subscribers eligible for recovery`,
+          totalEligible: missedSubscribers.length,
+          subscribers: subscriberInfo
+        });
+      }
+
+      // Check if within sending hours
+      if (!secondChanceSmsService.isWithinSendingHours()) {
+        return res.status(400).json({
+          success: false,
+          error: 'Outside sending hours (9am-9pm). Use dryRun=true to preview.',
+          nextSendingTime: secondChanceSmsService.getNextSendingTime()
+        });
+      }
+
+      // Process subscribers
+      const results = {
+        processed: 0,
+        success: 0,
+        failed: 0,
+        details: []
+      };
+
+      console.log(`\n🔄 Starting recovery of ${missedSubscribers.length} missed subscribers...`);
+
+      for (const subscriber of missedSubscribers) {
+        const result = await secondChanceSmsService.processSubscriberForSecondSms(subscriber);
+
+        results.processed++;
+        results.details.push({
+          phone: subscriber.phone.replace(/(\+1\d{3})\d{4}(\d{4})/, '$1****$2'),
+          success: result.success,
+          code: result.code || null,
+          error: result.error || null
+        });
+
+        if (result.success) {
+          results.success++;
+        } else {
+          results.failed++;
+        }
+
+        // Rate limit: wait 1.2 seconds between SMS
+        if (results.processed < missedSubscribers.length) {
+          await new Promise(resolve => setTimeout(resolve, 1200));
+        }
+      }
+
+      console.log(`✅ Recovery complete: ${results.success} sent, ${results.failed} failed`);
+
+      res.json({
+        success: true,
+        message: `Processed ${results.processed} subscribers`,
+        ...results
+      });
+
+    } catch (error) {
+      console.error('❌ Recover Missed Subscribers Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error recovering missed subscribers'
       });
     }
   },
