@@ -1,29 +1,33 @@
 // backend/src/jobs/secondChanceSmsJob.js
-// 📱 Second Chance SMS Cron Job - Runs every hour
+// 📱 Second Chance SMS Cron Job - Runs every 5 minutes, processes ALL pending
 const cron = require('node-cron');
 const secondChanceSmsService = require('../services/secondChanceSmsService');
 
 let job = null;
 let isRunning = false;
 
+// Configuration
+const MAX_PER_RUN = 500; // Maximum SMS per job run (safety limit)
+const BATCH_SIZE = 50;   // Process in batches of 50
+
 /**
- * Process second chance SMS batch
- * Called by cron job every hour
+ * Process ALL pending second chance SMS
+ * Called by cron job every 5 minutes
  */
 const runSecondChanceJob = async () => {
   if (isRunning) {
     console.log('⏳ Second Chance SMS job already running, skipping...');
     return;
   }
-  
+
   isRunning = true;
   const startTime = Date.now();
-  
+
   console.log('\n╔════════════════════════════════════════════════╗');
   console.log('║     📱 SECOND CHANCE SMS JOB STARTED           ║');
   console.log(`║     ${new Date().toISOString()}             ║`);
   console.log('╚════════════════════════════════════════════════╝');
-  
+
   try {
     // Check if within sending hours
     if (!secondChanceSmsService.isWithinSendingHours()) {
@@ -33,17 +37,43 @@ const runSecondChanceJob = async () => {
       isRunning = false;
       return;
     }
-    
-    // Step 1: Schedule any eligible subscribers
+
+    // Step 1: Schedule any eligible subscribers (increased limit)
     console.log('\n📅 Step 1: Scheduling eligible subscribers...');
     const scheduleResult = await secondChanceSmsService.scheduleSecondSmsForEligible();
     console.log(`   Scheduled: ${scheduleResult.scheduled}`);
-    
-    // Step 2: Process scheduled SMS
-    console.log('\n📤 Step 2: Processing scheduled second SMS...');
-    const processResult = await secondChanceSmsService.processScheduledSecondSms(30);
-    
+
+    // Step 2: Process ALL scheduled SMS in batches
+    console.log('\n📤 Step 2: Processing ALL scheduled second SMS...');
+
+    let totalProcessed = 0;
+    let totalSuccess = 0;
+    let totalFailed = 0;
+    let batchNumber = 0;
+
+    // Keep processing until no more pending or hit safety limit
+    while (totalProcessed < MAX_PER_RUN) {
+      batchNumber++;
+      console.log(`   📦 Batch ${batchNumber}: Processing up to ${BATCH_SIZE}...`);
+
+      const batchResult = await secondChanceSmsService.processScheduledSecondSms(BATCH_SIZE);
+
+      if (batchResult.processed === 0) {
+        console.log(`   ✅ No more pending SMS to process`);
+        break;
+      }
+
+      totalProcessed += batchResult.processed;
+      totalSuccess += batchResult.success;
+      totalFailed += batchResult.failed;
+
+      console.log(`   Batch ${batchNumber}: ${batchResult.success} sent, ${batchResult.failed} failed`);
+    }
+
+    const processResult = { processed: totalProcessed, success: totalSuccess, failed: totalFailed };
+
     console.log(`\n📊 Results:`);
+    console.log(`   Total Batches: ${batchNumber}`);
     console.log(`   Processed: ${processResult.processed}`);
     console.log(`   Success: ${processResult.success}`);
     console.log(`   Failed: ${processResult.failed}`);
@@ -77,27 +107,28 @@ const runSecondChanceJob = async () => {
 
 /**
  * Initialize the cron job
- * @param {string} schedule - Cron schedule (default: every hour at minute 30)
+ * @param {string} schedule - Cron schedule (default: every 5 minutes)
  */
-const init = (schedule = '30 * * * *') => {
+const init = (schedule = '*/5 * * * *') => {
   if (job) {
     console.log('⚠️ Second Chance SMS job already initialized');
     return;
   }
-  
+
   console.log(`📱 Initializing Second Chance SMS Job...`);
-  console.log(`   Schedule: ${schedule}`);
-  console.log(`   Sending hours: 9:00 AM - 9:00 PM`);
-  console.log(`   Delay: 6-8 hours after first SMS`);
+  console.log(`   Schedule: ${schedule} (every 5 minutes)`);
+  console.log(`   Sending hours: 9:00 AM - 9:00 PM (Eastern)`);
+  console.log(`   Delay: 6+ hours after first SMS`);
   console.log(`   Discount: 20% OFF, expires in 2 hours`);
-  
+  console.log(`   Max per run: ${MAX_PER_RUN}, Batch size: ${BATCH_SIZE}`);
+
   job = cron.schedule(schedule, runSecondChanceJob, {
     scheduled: true,
     timezone: 'America/New_York' // Eastern Time
   });
-  
+
   console.log(`✅ Second Chance SMS Job scheduled`);
-  
+
   return job;
 };
 

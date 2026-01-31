@@ -15,15 +15,15 @@ const CONFIG = {
   quietHoursEnd: 9,    // 9 AM
   // Personal, family-style message templates (rotates randomly)
   messageTemplates: [
-    (code) => `Hi, it's Mike from Jersey Pickles! 🥒 I saw you were checking us out earlier. We're a small family business here in NJ, and we put a lot of love into every jar. Would love for you to try us - here's ${code} for 20% off. Hope to see you soon! - The Jersey Pickles Family 💚`,
+    (code) => `Hi, it's Mike from Jersey Pickles! 🥒 I saw you were checking us out earlier. We're a small family business here in NJ, and we put a lot of love into every jar. Use ${code} for 20% off at jerseypickles.com - The Jersey Pickles Family 💚`,
 
-    (code) => `Hey there! Sarah here from Jersey Pickles 👋 Just wanted to reach out personally - we noticed you haven't completed your order. We're a family-run business and every customer means the world to us. Use ${code} for 20% off your first order. Handcrafted with love in NJ! 🥒💚`,
+    (code) => `Hey there! Sarah here from Jersey Pickles 👋 We noticed you haven't completed your order. We're a family-run business and every customer means the world to us. Use ${code} for 20% off at jerseypickles.com 🥒💚`,
 
-    (code) => `Hi! This is the team at Jersey Pickles 🥒 We're a small family business making pickles the old-fashioned way right here in New Jersey. We'd love to welcome you to our pickle family! Here's a special code just for you: ${code} for 20% off. Made with love, The Jersey Pickles Crew 💚`
+    (code) => `Hi from the Jersey Pickles team! 🥒 We're a small family business making pickles the old-fashioned way in NJ. Use ${code} for 20% off at jerseypickles.com - Made with love! 💚`
   ],
   // Fallback simple template
   messageTemplate: (code, expiresIn) =>
-    `Hi from Jersey Pickles! 🥒 We're a small family business in NJ and we'd love for you to try our handcrafted pickles. Here's ${code} for 20% off your order. Made with love! - The JP Family 💚 Reply STOP to opt-out`
+    `Hi from Jersey Pickles! 🥒 We're a small family business in NJ. Use ${code} for 20% off at jerseypickles.com - The JP Family 💚 Reply STOP to opt-out`
 };
 
 /**
@@ -386,7 +386,7 @@ const scheduleSecondSmsForEligible = async () => {
         ]
       }
     ]
-  }).limit(100);
+  }).limit(500); // Increased limit to handle all pending
 
   let scheduled = 0;
 
