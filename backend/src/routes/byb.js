@@ -29,4 +29,7 @@ router.get('/trends', optionalProtect, buildYourBoxController.getTrends);
 // Combinaciones frecuentes
 router.get('/combos', optionalProtect, buildYourBoxController.getFrequentCombos);
 
+// AI Insights para escalar Build Your Box
+router.get('/insights', optionalProtect, buildYourBoxController.getAiInsights);
+
 module.exports = router;
