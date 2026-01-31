@@ -37,15 +37,13 @@ const smsAnalyticsController = {
         });
       }
 
-      // Buscar suscriptores sin ubicación
+      // Buscar suscriptores que necesitan geolocalización
+      // Un suscriptor necesita migración si:
+      // 1. No tiene location.source = 'ip-api' (no fue resuelto)
+      // 2. Y tiene una IP válida para resolver
       const subscribersWithoutLocation = await SmsSubscriber.find({
-        $or: [
-          { location: { $exists: false } },
-          { 'location.region': { $exists: false } },
-          { 'location.region': null },
-          { 'location.region': '' }
-        ],
-        ip: { $exists: true, $ne: null, $ne: '' }
+        ipAddress: { $exists: true, $ne: null, $ne: '' },
+        'location.source': { $ne: 'ip-api' }
       }).limit(100); // Procesar en lotes de 100
 
       if (subscribersWithoutLocation.length === 0) {
@@ -70,7 +68,7 @@ const smsAnalyticsController = {
             await new Promise(resolve => setTimeout(resolve, 500));
           }
 
-          const locationData = await geoLocationService.getLocationFromIP(subscriber.ip);
+          const locationData = await geoLocationService.getLocationByIp(subscriber.ipAddress);
 
           if (locationData && locationData.region) {
             subscriber.location = locationData;
@@ -78,7 +76,7 @@ const smsAnalyticsController = {
             processed++;
             results.push({
               phone: subscriber.phone.slice(-4),
-              ip: subscriber.ip,
+              ip: subscriber.ipAddress,
               state: locationData.regionName,
               success: true
             });
@@ -86,7 +84,7 @@ const smsAnalyticsController = {
             failed++;
             results.push({
               phone: subscriber.phone.slice(-4),
-              ip: subscriber.ip,
+              ip: subscriber.ipAddress,
               error: 'Could not resolve location',
               success: false
             });
@@ -95,7 +93,7 @@ const smsAnalyticsController = {
           failed++;
           results.push({
             phone: subscriber.phone.slice(-4),
-            ip: subscriber.ip,
+            ip: subscriber.ipAddress,
             error: err.message,
             success: false
           });
@@ -104,13 +102,8 @@ const smsAnalyticsController = {
 
       // Contar cuántos quedan por migrar
       const remaining = await SmsSubscriber.countDocuments({
-        $or: [
-          { location: { $exists: false } },
-          { 'location.region': { $exists: false } },
-          { 'location.region': null },
-          { 'location.region': '' }
-        ],
-        ip: { $exists: true, $ne: null, $ne: '' }
+        ipAddress: { $exists: true, $ne: null, $ne: '' },
+        'location.source': { $ne: 'ip-api' }
       });
 
       console.log(`✅ Migration batch complete: ${processed} success, ${failed} failed, ${remaining} remaining`);
@@ -140,16 +133,14 @@ const smsAnalyticsController = {
   async getMigrationStatus(req, res) {
     try {
       const [withLocation, withoutLocation, total] = await Promise.all([
+        // Suscriptores con ubicación resuelta por IP
         SmsSubscriber.countDocuments({
-          'location.region': { $exists: true, $ne: null, $ne: '' }
+          'location.source': 'ip-api'
         }),
+        // Suscriptores sin ubicación resuelta (que tienen IP)
         SmsSubscriber.countDocuments({
-          $or: [
-            { location: { $exists: false } },
-            { 'location.region': { $exists: false } },
-            { 'location.region': null },
-            { 'location.region': '' }
-          ]
+          ipAddress: { $exists: true, $ne: null, $ne: '' },
+          'location.source': { $ne: 'ip-api' }
         }),
         SmsSubscriber.countDocuments({})
       ]);
