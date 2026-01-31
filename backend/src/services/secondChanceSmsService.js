@@ -424,20 +424,20 @@ const processScheduledSecondSms = async (limit = 20) => {
  */
 const getSecondChanceStats = async () => {
   const breakdown = await SmsSubscriber.getConversionBreakdown();
-  
+
   // Calculate rates
-  const firstConversionRate = breakdown.firstSms.delivered > 0 
+  const firstConversionRate = breakdown.firstSms.delivered > 0
     ? ((breakdown.conversions.first / breakdown.firstSms.delivered) * 100).toFixed(1)
     : '0';
-    
+
   const secondConversionRate = breakdown.secondSms.delivered > 0
     ? ((breakdown.conversions.second / breakdown.secondSms.delivered) * 100).toFixed(1)
     : '0';
-    
+
   const recoveryRate = breakdown.secondSms.sent > 0
     ? ((breakdown.conversions.second / breakdown.secondSms.sent) * 100).toFixed(1)
     : '0';
-  
+
   return {
     ...breakdown,
     rates: {
@@ -445,6 +445,207 @@ const getSecondChanceStats = async () => {
       secondConversion: secondConversionRate,
       recovery: recoveryRate
     }
+  };
+};
+
+/**
+ * Get detailed queue visibility for Second Chance SMS
+ * Shows exactly when each SMS is scheduled and will be sent
+ */
+const getQueueDetails = async (options = {}) => {
+  const { limit = 50 } = options;
+  const now = new Date();
+  const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const eightHoursAgo = new Date(Date.now() - 8 * 60 * 60 * 1000);
+
+  // ==================== QUEUE BREAKDOWN ====================
+
+  // 1. Ready to send NOW (scheduled time has passed, within sending hours)
+  const readyToSend = await SmsSubscriber.find({
+    status: 'active',
+    converted: false,
+    secondSmsSent: { $ne: true },
+    secondSmsScheduledFor: { $lte: now }
+  })
+  .sort({ secondSmsScheduledFor: 1 })
+  .limit(limit)
+  .select('phone phoneFormatted welcomeSmsAt welcomeSmsSentAt secondSmsScheduledFor createdAt discountCode')
+  .lean();
+
+  // 2. Scheduled for later (have a future scheduled time)
+  const scheduledForLater = await SmsSubscriber.find({
+    status: 'active',
+    converted: false,
+    secondSmsSent: { $ne: true },
+    secondSmsScheduledFor: { $gt: now }
+  })
+  .sort({ secondSmsScheduledFor: 1 })
+  .limit(limit)
+  .select('phone phoneFormatted welcomeSmsAt welcomeSmsSentAt secondSmsScheduledFor createdAt discountCode')
+  .lean();
+
+  // 3. Eligible but not yet scheduled (6-8h window, no scheduled time)
+  const eligibleNotScheduled = await SmsSubscriber.find({
+    status: 'active',
+    converted: false,
+    secondSmsSent: { $ne: true },
+    welcomeSmsStatus: 'delivered',
+    secondSmsScheduledFor: null,
+    $or: [
+      { welcomeSmsAt: { $gte: eightHoursAgo, $lte: sixHoursAgo } },
+      { welcomeSmsSentAt: { $gte: eightHoursAgo, $lte: sixHoursAgo } }
+    ]
+  })
+  .sort({ welcomeSmsAt: 1, welcomeSmsSentAt: 1 })
+  .limit(limit)
+  .select('phone phoneFormatted welcomeSmsAt welcomeSmsSentAt secondSmsScheduledFor createdAt discountCode')
+  .lean();
+
+  // 4. Waiting (< 6 hours since first SMS)
+  const waitingForEligibility = await SmsSubscriber.find({
+    status: 'active',
+    converted: false,
+    secondSmsSent: { $ne: true },
+    welcomeSmsStatus: 'delivered',
+    $or: [
+      { welcomeSmsAt: { $gt: sixHoursAgo } },
+      { welcomeSmsSentAt: { $gt: sixHoursAgo } }
+    ]
+  })
+  .sort({ welcomeSmsAt: 1, welcomeSmsSentAt: 1 })
+  .limit(limit)
+  .select('phone phoneFormatted welcomeSmsAt welcomeSmsSentAt secondSmsScheduledFor createdAt discountCode')
+  .lean();
+
+  // ==================== RECENT ACTIVITY ====================
+
+  // Recently sent second SMS (last 24 hours)
+  const recentlySent = await SmsSubscriber.find({
+    secondSmsSent: true,
+    secondSmsAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+  })
+  .sort({ secondSmsAt: -1 })
+  .limit(20)
+  .select('phone phoneFormatted secondSmsAt secondSmsStatus secondDiscountCode converted convertedWith')
+  .lean();
+
+  // ==================== FORMAT RESULTS ====================
+
+  const maskPhone = (phone) => {
+    if (!phone) return '***';
+    // Show last 4 digits: ***-***-1234
+    return `***-***-${phone.slice(-4)}`;
+  };
+
+  const formatQueueItem = (sub, includeScheduledFor = true) => {
+    const firstSmsTime = sub.welcomeSmsAt || sub.welcomeSmsSentAt;
+    const hoursSinceFirst = firstSmsTime
+      ? ((now - new Date(firstSmsTime)) / (1000 * 60 * 60)).toFixed(1)
+      : null;
+
+    const item = {
+      id: sub._id,
+      phone: maskPhone(sub.phone),
+      phoneFormatted: sub.phoneFormatted ? maskPhone(sub.phoneFormatted) : null,
+      subscribedAt: sub.createdAt,
+      firstSmsAt: firstSmsTime,
+      hoursSinceFirstSms: hoursSinceFirst ? parseFloat(hoursSinceFirst) : null,
+      discountCode: sub.discountCode
+    };
+
+    if (includeScheduledFor && sub.secondSmsScheduledFor) {
+      item.scheduledFor = sub.secondSmsScheduledFor;
+      const msUntilSend = new Date(sub.secondSmsScheduledFor) - now;
+      item.minutesUntilSend = Math.max(0, Math.round(msUntilSend / (1000 * 60)));
+      item.timeUntilSend = formatTimeUntil(msUntilSend);
+    }
+
+    return item;
+  };
+
+  const formatTimeUntil = (ms) => {
+    if (ms <= 0) return 'Now';
+    const minutes = Math.floor(ms / (1000 * 60));
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+
+    if (hours > 0) {
+      return `${hours}h ${mins}m`;
+    }
+    return `${mins}m`;
+  };
+
+  // ==================== CALCULATE ESTIMATES ====================
+
+  const withinHours = isWithinSendingHours();
+  const nextWindow = getNextSendingTime();
+
+  // Estimate processing time (1.2s per SMS + some buffer)
+  const readyCount = readyToSend.length;
+  const estimatedProcessingMinutes = Math.ceil((readyCount * 1.5) / 60);
+
+  return {
+    summary: {
+      readyToSendNow: readyToSend.length,
+      scheduledForLater: scheduledForLater.length,
+      eligibleNotScheduled: eligibleNotScheduled.length,
+      waitingForEligibility: waitingForEligibility.length,
+      totalInQueue: readyToSend.length + scheduledForLater.length + eligibleNotScheduled.length + waitingForEligibility.length,
+      recentlySent24h: recentlySent.length
+    },
+
+    sendingWindow: {
+      isOpen: withinHours,
+      currentHour: now.getHours(),
+      allowedHours: `${CONFIG.quietHoursEnd}:00 - ${CONFIG.quietHoursStart}:00`,
+      nextWindowOpens: withinHours ? null : nextWindow,
+      nextWindowOpensIn: withinHours ? null : formatTimeUntil(nextWindow - now)
+    },
+
+    estimates: {
+      readyToProcess: readyCount,
+      estimatedProcessingTime: `~${estimatedProcessingMinutes} minutes`,
+      rateLimit: '1.2 seconds per SMS'
+    },
+
+    queues: {
+      // Ready to send immediately
+      readyNow: readyToSend.map(sub => formatQueueItem(sub, true)),
+
+      // Scheduled for a future time
+      scheduled: scheduledForLater.map(sub => formatQueueItem(sub, true)),
+
+      // Eligible but needs scheduling (will be picked up by next cron run)
+      eligiblePendingSchedule: eligibleNotScheduled.map(sub => {
+        const item = formatQueueItem(sub, false);
+        item.willBeScheduledFor = withinHours ? 'Next cron run' : nextWindow;
+        return item;
+      }),
+
+      // Still waiting for 6h window
+      waitingForWindow: waitingForEligibility.map(sub => {
+        const item = formatQueueItem(sub, false);
+        const firstSmsTime = sub.welcomeSmsAt || sub.welcomeSmsSentAt;
+        if (firstSmsTime) {
+          const eligibleAt = new Date(new Date(firstSmsTime).getTime() + 6 * 60 * 60 * 1000);
+          item.eligibleAt = eligibleAt;
+          item.eligibleIn = formatTimeUntil(eligibleAt - now);
+        }
+        return item;
+      })
+    },
+
+    recentActivity: recentlySent.map(sub => ({
+      id: sub._id,
+      phone: maskPhone(sub.phone),
+      sentAt: sub.secondSmsAt,
+      status: sub.secondSmsStatus,
+      discountCode: sub.secondDiscountCode,
+      converted: sub.converted,
+      convertedWith: sub.convertedWith
+    })),
+
+    timestamp: now
   };
 };
 
@@ -456,6 +657,7 @@ module.exports = {
   scheduleSecondSmsForEligible,
   processScheduledSecondSms,
   getSecondChanceStats,
+  getQueueDetails,
   isWithinSendingHours,
   getNextSendingTime,
   generateUniqueSecondCode,

@@ -59,4 +59,7 @@ router.get('/second-chance/status', optionalProtect, smsController.getSecondChan
 // 🆕 Second Chance SMS - Recover missed subscribers (procesa los que se perdieron)
 router.post('/second-chance/recover', optionalProtect, smsController.recoverMissedSubscribers);
 
+// 🆕 Second Chance SMS - Detailed queue visibility
+router.get('/second-chance/queue', optionalProtect, smsController.getSecondChanceQueue);
+
 module.exports = router;
