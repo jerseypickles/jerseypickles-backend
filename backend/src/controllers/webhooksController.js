@@ -959,22 +959,53 @@ class WebhooksController {
             refundAmount: order.total_price,
             email: customer.email
           });
-          
+
           if (result?.flowsTriggered) {
             result.flowsTriggered.forEach(f => flowsTriggered.push(f));
           }
-          
+
           actions.push({
             type: 'flow_trigger_order_cancelled',
             details: { cancelReason: order.cancel_reason },
             success: true
           });
-          
+
         } catch (err) {
           console.log('Flow service not available:', err.message);
         }
       }
-      
+
+      // ==================== SMS ORDER CANCELLED ====================
+      if (smsTransactionalService) {
+        try {
+          console.log('📱 Triggering Order Cancelled SMS...');
+          const smsResult = await smsTransactionalService.sendOrderCancelled(order, order.cancel_reason);
+
+          actions.push({
+            type: 'sms_order_cancelled',
+            details: {
+              success: smsResult.success,
+              reason: smsResult.reason || null,
+              messageId: smsResult.messageId || null
+            },
+            success: smsResult.success
+          });
+
+          if (smsResult.success) {
+            console.log(`   ✅ Order cancelled SMS triggered for order #${order.order_number || order.id}`);
+          } else {
+            console.log(`   ⚠️ Order cancelled SMS skipped: ${smsResult.reason}`);
+          }
+        } catch (err) {
+          console.log('📱 SMS Order Cancelled error:', err.message);
+          actions.push({
+            type: 'sms_order_cancelled',
+            details: { error: err.message },
+            success: false
+          });
+        }
+      }
+
       await webhookLog.markProcessed(actions, flowsTriggered);
       
       res.status(200).json({ success: true, logId: webhookLog._id });

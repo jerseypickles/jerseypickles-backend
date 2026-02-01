@@ -9,11 +9,76 @@ const DEFAULT_TEMPLATES = {
   // Order Confirmation - Warm, family-style, emphasize freshness
   order_confirmation: `Hi {customerName}! 🥒 Thank you so much for your order #{orderNumber}! We're so excited to have you as part of our pickle family. Your order is being prepared fresh with love right here in New Jersey - we ship everything super fresh straight to your door! We'll text you the moment it ships. Questions? We're here for you! - The Jersey Pickles Family 💚`,
 
-  // Shipping Notification - Include tracking + support contact
-  shipping_notification: `Great news {customerName}! 🎉 Your fresh Jersey Pickles just shipped and are on their way to you! 📦 Track your package: {trackingUrl} - If you notice anything unusual with your delivery or have any questions, please reach out to us at info@jerseypickles.com with your order #{orderNumber}. We're always here to help! - Jersey Pickles 🥒💚`,
+  // Shipping Notification - Include tracking (short URL) + support contact
+  shipping_notification: `Great news {customerName}! 🎉 Your Jersey Pickles order #{orderNumber} just shipped! 📦 Track: {trackingUrl} Questions? Email info@jerseypickles.com - Jersey Pickles 🥒💚`,
 
   // Delivery Confirmation - Request feedback + support for issues
-  delivery_confirmation: `Hi {customerName}! 🥒 Your Jersey Pickles have arrived! We hope you love them as much as we loved making them for you! If you notice any issues with your order or anything doesn't look right, please let us know right away at info@jerseypickles.com (include order #{orderNumber}) - we'll make it right! Enjoy your fresh pickles! 💚 - The JP Family`
+  delivery_confirmation: `Hi {customerName}! 🥒 Your Jersey Pickles have arrived! We hope you love them as much as we loved making them for you! If you notice any issues with your order or anything doesn't look right, please let us know right away at info@jerseypickles.com (include order #{orderNumber}) - we'll make it right! Enjoy your fresh pickles! 💚 - The JP Family`,
+
+  // Order Cancelled - Inform customer about cancellation
+  order_cancelled: `Hi {customerName}, we're sorry to inform you that your order #{orderNumber} has been cancelled. {cancelReason}If you have any questions or didn't request this, please contact us at info@jerseypickles.com. We hope to serve you again soon! - Jersey Pickles 🥒`
+};
+
+// ==================== URL SHORTENING ====================
+/**
+ * Create a short tracking URL
+ * Uses carrier-specific short URLs when possible
+ */
+const shortenTrackingUrl = (trackingUrl, trackingNumber, trackingCompany) => {
+  if (!trackingUrl && !trackingNumber) return '';
+
+  // Carrier-specific short URL patterns
+  const carrierShortUrls = {
+    'UPS': (num) => `https://ups.com/track?tracknum=${num}`,
+    'USPS': (num) => `https://tools.usps.com/go/TrackConfirmAction?tLabels=${num}`,
+    'FedEx': (num) => `https://fedex.com/fedextrack/?trknbr=${num}`,
+    'DHL': (num) => `https://dhl.com/en/express/tracking.html?AWB=${num}`,
+    'OnTrac': (num) => `https://ontrac.com/tracking/?number=${num}`
+  };
+
+  // If we have tracking company and number, use short URL
+  if (trackingCompany && trackingNumber) {
+    const companyKey = Object.keys(carrierShortUrls).find(
+      key => trackingCompany.toLowerCase().includes(key.toLowerCase())
+    );
+    if (companyKey) {
+      return carrierShortUrls[companyKey](trackingNumber);
+    }
+  }
+
+  // If original URL is already short enough (< 50 chars), use it
+  if (trackingUrl && trackingUrl.length < 50) {
+    return trackingUrl;
+  }
+
+  // If we have tracking number but no company match, just show the number
+  if (trackingNumber && !trackingUrl) {
+    return `Tracking #: ${trackingNumber}`;
+  }
+
+  // For long URLs, try to extract and use just the tracking number with carrier
+  if (trackingUrl) {
+    // Detect carrier from URL and create short version
+    if (trackingUrl.includes('ups.com')) {
+      const match = trackingUrl.match(/trackNums?=([A-Z0-9]+)/i);
+      if (match) return `https://ups.com/track?tracknum=${match[1]}`;
+    }
+    if (trackingUrl.includes('usps.com')) {
+      const match = trackingUrl.match(/tLabels=([A-Z0-9]+)/i);
+      if (match) return `https://tools.usps.com/go/TrackConfirmAction?tLabels=${match[1]}`;
+    }
+    if (trackingUrl.includes('fedex.com')) {
+      const match = trackingUrl.match(/trknbr=([A-Z0-9]+)/i);
+      if (match) return `https://fedex.com/fedextrack/?trknbr=${match[1]}`;
+    }
+  }
+
+  // Fallback: if URL is too long, just show tracking number
+  if (trackingUrl && trackingUrl.length > 60 && trackingNumber) {
+    return `Tracking #: ${trackingNumber}`;
+  }
+
+  return trackingUrl || `Tracking #: ${trackingNumber}`;
 };
 
 // ==================== MESSAGE TEMPLATES (dynamic) ====================
@@ -25,10 +90,16 @@ const TEMPLATES = {
   },
   shipping_notification: (data) => {
     const template = triggerSettings.shipping_notification?.template || DEFAULT_TEMPLATES.shipping_notification;
-    return replaceVariables(template, data);
+    // Use shortened tracking URL
+    const shortUrl = shortenTrackingUrl(data.trackingUrl, data.trackingNumber, data.trackingCompany);
+    return replaceVariables(template, { ...data, trackingUrl: shortUrl });
   },
   delivery_confirmation: (data) => {
     const template = triggerSettings.delivery_confirmation?.template || DEFAULT_TEMPLATES.delivery_confirmation;
+    return replaceVariables(template, data);
+  },
+  order_cancelled: (data) => {
+    const template = triggerSettings.order_cancelled?.template || DEFAULT_TEMPLATES.order_cancelled;
     return replaceVariables(template, data);
   }
 };
@@ -39,13 +110,15 @@ const TEMPLATES = {
 const replaceVariables = (template, data) => {
   const name = data.customerName?.split(' ')[0] || 'friend';
   const trackingInfo = data.trackingUrl || data.trackingNumber || '';
+  const cancelReason = data.cancelReason ? `Reason: ${data.cancelReason}. ` : '';
 
   return template
     .replace(/\{customerName\}/g, name)
     .replace(/\{orderNumber\}/g, data.orderNumber || '')
     .replace(/\{orderTotal\}/g, data.orderTotal || '')
     .replace(/\{trackingNumber\}/g, data.trackingNumber || '')
-    .replace(/\{trackingUrl\}/g, trackingInfo);
+    .replace(/\{trackingUrl\}/g, trackingInfo)
+    .replace(/\{cancelReason\}/g, cancelReason);
 };
 
 // ==================== TRIGGER SETTINGS ====================
@@ -53,7 +126,8 @@ const replaceVariables = (template, data) => {
 let triggerSettings = {
   order_confirmation: { enabled: true, template: null },
   shipping_notification: { enabled: true, template: null },
-  delivery_confirmation: { enabled: true, template: null }
+  delivery_confirmation: { enabled: true, template: null },
+  order_cancelled: { enabled: true, template: null }
 };
 
 // ==================== HELPER FUNCTIONS ====================
@@ -439,6 +513,111 @@ const sendDeliveryConfirmation = async (order, fulfillment) => {
   }
 };
 
+/**
+ * Send Order Cancelled SMS
+ * Triggered by: orders/cancelled webhook
+ */
+const sendOrderCancelled = async (order, cancelReason = null) => {
+  const triggerType = 'order_cancelled';
+
+  try {
+    // Check if trigger is enabled
+    if (!triggerSettings[triggerType]?.enabled) {
+      console.log(`📱 [${triggerType}] Trigger disabled, skipping`);
+      return { success: false, reason: 'trigger_disabled' };
+    }
+
+    const orderId = order.id?.toString();
+    const orderNumber = order.order_number || order.name?.replace('#', '') || orderId;
+
+    console.log(`📱 [${triggerType}] Processing order #${orderNumber}`);
+
+    // Check if already sent
+    const alreadySent = await SmsTransactional.alreadySent(orderId, triggerType);
+    if (alreadySent) {
+      console.log(`   ⏭️ Already sent, skipping`);
+      return { success: false, reason: 'already_sent' };
+    }
+
+    // Get phone
+    const phone = extractPhone(order);
+    if (!phone) {
+      console.log(`   ⚠️ No phone number found`);
+      return { success: false, reason: 'no_phone' };
+    }
+
+    const formattedPhone = formatPhone(phone);
+    if (!formattedPhone) {
+      console.log(`   ⚠️ Invalid phone format: ${phone}`);
+      return { success: false, reason: 'invalid_phone' };
+    }
+
+    // Check if subscriber exists (optional - for linking purposes only)
+    const { subscriber } = await checkOptIn(formattedPhone);
+
+    // Extract cancel reason from order if not provided
+    const reason = cancelReason || order.cancel_reason || null;
+
+    // Build message
+    const customerName = extractCustomerName(order);
+    const message = TEMPLATES[triggerType]({
+      customerName,
+      orderNumber,
+      cancelReason: reason
+    });
+
+    // Create log entry
+    const smsLog = new SmsTransactional({
+      triggerType,
+      phone: formattedPhone,
+      phoneFormatted: phone,
+      customerName,
+      customerEmail: order.email || order.customer?.email,
+      customerId: order.customer?.id?.toString(),
+      shopifyOrderId: orderId,
+      orderNumber,
+      orderName: order.name,
+      orderTotal: parseFloat(order.total_price || 0),
+      message,
+      messageLength: message.length,
+      optInVerified: false, // Transactional SMS - no opt-in required
+      smsSubscriberId: subscriber?._id || null,
+      status: 'pending',
+      metadata: { cancelReason: reason }
+    });
+
+    await smsLog.save();
+
+    // Send SMS
+    console.log(`   📤 Sending cancellation SMS to ${formattedPhone}...`);
+    const result = await telnyxService.sendSms(formattedPhone, message);
+
+    // Update log
+    smsLog.telnyxMessageId = result.messageId;
+    smsLog.status = result.success ? 'sent' : 'failed';
+    smsLog.sentAt = result.success ? new Date() : null;
+    smsLog.error = result.error || null;
+    smsLog.statusUpdatedAt = new Date();
+    await smsLog.save();
+
+    if (result.success) {
+      console.log(`   ✅ Order cancellation SMS sent for #${orderNumber}`);
+    } else {
+      console.log(`   ❌ Failed to send: ${result.error}`);
+    }
+
+    return {
+      success: result.success,
+      messageId: result.messageId,
+      logId: smsLog._id
+    };
+
+  } catch (error) {
+    console.error(`❌ [${triggerType}] Error:`, error);
+    return { success: false, reason: 'error', error: error.message };
+  }
+};
+
 // ==================== SETTINGS MANAGEMENT ====================
 
 /**
@@ -518,6 +697,7 @@ module.exports = {
   sendOrderConfirmation,
   sendShippingNotification,
   sendDeliveryConfirmation,
+  sendOrderCancelled,
 
   // Settings
   getSettings,
