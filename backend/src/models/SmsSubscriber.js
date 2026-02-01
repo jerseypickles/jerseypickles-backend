@@ -249,6 +249,18 @@ const smsSubscriberSchema = new mongoose.Schema({
   },
   unsubscribeKeyword: {
     type: String // The exact keyword used (STOP, UNSUBSCRIBE, etc.)
+  },
+
+  // ==================== PENDING UNSUBSCRIBE (Two-step STOP) ====================
+  pendingUnsubscribe: {
+    type: Boolean,
+    default: false
+  },
+  pendingUnsubscribeAt: {
+    type: Date // When first STOP was received
+  },
+  pendingUnsubscribeExpires: {
+    type: Date // Auto-cancel pending after 10 minutes
   }
 
 }, {
