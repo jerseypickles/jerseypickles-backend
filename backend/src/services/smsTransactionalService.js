@@ -16,7 +16,10 @@ const DEFAULT_TEMPLATES = {
   delivery_confirmation: `Hi {customerName}! 🥒 Your Jersey Pickles have arrived! We hope you love them as much as we loved making them for you! If you notice any issues with your order or anything doesn't look right, please let us know right away at info@jerseypickles.com (include order #{orderNumber}) - we'll make it right! Enjoy your fresh pickles! 💚 - The JP Family`,
 
   // Order Cancelled - Inform customer about cancellation
-  order_cancelled: `Hi {customerName}, we're sorry to inform you that your order #{orderNumber} has been cancelled. {cancelReason}If you have any questions or didn't request this, please contact us at info@jerseypickles.com. We hope to serve you again soon! - Jersey Pickles 🥒`
+  order_cancelled: `Hi {customerName}, we're sorry to inform you that your order #{orderNumber} has been cancelled. {cancelReason}If you have any questions or didn't request this, please contact us at info@jerseypickles.com. We hope to serve you again soon! - Jersey Pickles 🥒`,
+
+  // Delayed Shipment - Apology for orders unfulfilled > 72 hours
+  delayed_shipment: `Hi {customerName}! 🥒 We wanted to reach out about your order #{orderNumber}. We're working hard to get your fresh pickles ready, but we're experiencing a slight delay. Rest assured, your order will ship very soon and we'll text you the tracking info the moment it does! Thank you so much for your patience - we promise it'll be worth the wait! Questions? Email info@jerseypickles.com - Jersey Pickles 💚`
 };
 
 // ==================== URL SHORTENING ====================
@@ -101,6 +104,10 @@ const TEMPLATES = {
   order_cancelled: (data) => {
     const template = triggerSettings.order_cancelled?.template || DEFAULT_TEMPLATES.order_cancelled;
     return replaceVariables(template, data);
+  },
+  delayed_shipment: (data) => {
+    const template = triggerSettings.delayed_shipment?.template || DEFAULT_TEMPLATES.delayed_shipment;
+    return replaceVariables(template, data);
   }
 };
 
@@ -127,7 +134,8 @@ let triggerSettings = {
   order_confirmation: { enabled: true, template: null },
   shipping_notification: { enabled: true, template: null },
   delivery_confirmation: { enabled: true, template: null },
-  order_cancelled: { enabled: true, template: null }
+  order_cancelled: { enabled: true, template: null },
+  delayed_shipment: { enabled: true, template: null, delayHours: 72 }
 };
 
 // ==================== HELPER FUNCTIONS ====================
@@ -618,6 +626,117 @@ const sendOrderCancelled = async (order, cancelReason = null) => {
   }
 };
 
+/**
+ * Send Delayed Shipment Notification SMS
+ * Triggered by: Scheduled job checking for unfulfilled orders > 72 hours
+ */
+const sendDelayedShipmentNotification = async (order) => {
+  const triggerType = 'delayed_shipment';
+
+  try {
+    // Check if trigger is enabled
+    if (!triggerSettings[triggerType]?.enabled) {
+      console.log(`📱 [${triggerType}] Trigger disabled, skipping`);
+      return { success: false, reason: 'trigger_disabled' };
+    }
+
+    const orderId = order.id?.toString();
+    const orderNumber = order.order_number || order.name?.replace('#', '') || orderId;
+
+    console.log(`📱 [${triggerType}] Processing order #${orderNumber}`);
+
+    // Check if already sent
+    const alreadySent = await SmsTransactional.alreadySent(orderId, triggerType);
+    if (alreadySent) {
+      console.log(`   ⏭️ Already sent, skipping`);
+      return { success: false, reason: 'already_sent' };
+    }
+
+    // Get phone
+    const phone = extractPhone(order);
+    if (!phone) {
+      console.log(`   ⚠️ No phone number found`);
+      return { success: false, reason: 'no_phone' };
+    }
+
+    const formattedPhone = formatPhone(phone);
+    if (!formattedPhone) {
+      console.log(`   ⚠️ Invalid phone format: ${phone}`);
+      return { success: false, reason: 'invalid_phone' };
+    }
+
+    // Check if subscriber exists (optional - for linking purposes only)
+    const { subscriber } = await checkOptIn(formattedPhone);
+
+    // Build message
+    const customerName = extractCustomerName(order);
+    const message = TEMPLATES[triggerType]({
+      customerName,
+      orderNumber
+    });
+
+    // Create log entry
+    const smsLog = new SmsTransactional({
+      triggerType,
+      phone: formattedPhone,
+      phoneFormatted: phone,
+      customerName,
+      customerEmail: order.email || order.customer?.email,
+      customerId: order.customer?.id?.toString(),
+      shopifyOrderId: orderId,
+      orderNumber,
+      orderName: order.name,
+      orderTotal: parseFloat(order.total_price || 0),
+      message,
+      messageLength: message.length,
+      optInVerified: false,
+      smsSubscriberId: subscriber?._id || null,
+      status: 'pending',
+      metadata: {
+        orderCreatedAt: order.created_at,
+        hoursDelayed: Math.round((Date.now() - new Date(order.created_at).getTime()) / (1000 * 60 * 60))
+      }
+    });
+
+    await smsLog.save();
+
+    // Send SMS
+    console.log(`   📤 Sending delayed shipment SMS to ${formattedPhone}...`);
+    const result = await telnyxService.sendSms(formattedPhone, message);
+
+    // Update log
+    smsLog.telnyxMessageId = result.messageId;
+    smsLog.status = result.success ? 'sent' : 'failed';
+    smsLog.sentAt = result.success ? new Date() : null;
+    smsLog.error = result.error || null;
+    smsLog.statusUpdatedAt = new Date();
+    await smsLog.save();
+
+    if (result.success) {
+      console.log(`   ✅ Delayed shipment SMS sent for #${orderNumber}`);
+    } else {
+      console.log(`   ❌ Failed to send: ${result.error}`);
+    }
+
+    return {
+      success: result.success,
+      messageId: result.messageId,
+      logId: smsLog._id
+    };
+
+  } catch (error) {
+    console.error(`❌ [${triggerType}] Error:`, error);
+    return { success: false, reason: 'error', error: error.message };
+  }
+};
+
+/**
+ * Get delay hours setting for delayed shipment trigger
+ */
+const getDelayHours = () => {
+  return triggerSettings.delayed_shipment?.delayHours || 72;
+};
+
 // ==================== SETTINGS MANAGEMENT ====================
 
 /**
@@ -698,11 +817,13 @@ module.exports = {
   sendShippingNotification,
   sendDeliveryConfirmation,
   sendOrderCancelled,
+  sendDelayedShipmentNotification,
 
   // Settings
   getSettings,
   updateSettings,
   toggleTrigger,
+  getDelayHours,
 
   // Stats
   getStats,

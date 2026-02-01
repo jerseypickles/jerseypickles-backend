@@ -518,7 +518,29 @@ const server = app.listen(PORT, '0.0.0.0', () => {
       console.log('⚠️  Second Chance SMS Job no disponible:', error.message);
     }
   }, 5500);
-  
+
+  // Inicializar Delayed Shipment SMS Job
+  let delayedShipmentAvailable = false;
+  setTimeout(() => {
+    console.log('\n📦 Inicializando Delayed Shipment SMS Job...');
+    try {
+      const delayedShipmentJob = require('./src/jobs/delayedShipmentJob');
+
+      // Initialize cron job - runs every 6 hours
+      // Only sends SMS between 9am-9pm Eastern Time
+      delayedShipmentJob.init('0 */6 * * *');
+
+      delayedShipmentAvailable = true;
+      console.log('✅ Delayed Shipment SMS Job listo');
+      console.log('   ⏰ Schedule: Every 6 hours');
+      console.log('   🕐 Sending hours: 9am - 9pm (Eastern)');
+      console.log('   ⏳ Threshold: 72+ hours unfulfilled');
+    } catch (error) {
+      delayedShipmentAvailable = false;
+      console.log('⚠️  Delayed Shipment SMS Job no disponible:', error.message);
+    }
+  }, 6000);
+
   // Resumen de features
   setTimeout(() => {
     console.log('\n╔════════════════════════════════════════════════╗');
@@ -531,8 +553,9 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`║  SMS Marketing:      ${smsServiceAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  SMS Campaigns:      ${smsCampaignsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  Second Chance SMS:  ${secondChanceSmsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
+    console.log(`║  Delayed Shipment:   ${delayedShipmentAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log('╚════════════════════════════════════════════════╝');
-  }, 6500);
+  }, 7000);
 });
 
 // ==================== GRACEFUL SHUTDOWN ====================
