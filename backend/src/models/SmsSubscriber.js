@@ -942,12 +942,32 @@ smsSubscriberSchema.statics.getUnsubscribeAnalytics = async function(dateRange =
 
     keywords: s.byKeyword,
 
-    feedback: s.recentFeedback.map(f => ({
-      phone: f.phone ? `***${f.phone.slice(-4)}` : 'N/A',
-      feedback: f.feedback,
-      reason: reasonLabels[f.reason] || f.reason,
-      date: f.unsubscribedAt
-    }))
+    feedback: s.recentFeedback.map(f => {
+      // Clean up feedback text from two-step STOP system
+      let cleanFeedback = f.feedback;
+      if (cleanFeedback && cleanFeedback.startsWith('Feedback option:')) {
+        // Convert "Feedback option: 1 (too_many_texts)" to human-readable
+        const feedbackMap = {
+          '1': 'Demasiados mensajes',
+          '2': 'No me interesa',
+          '3': 'Precios muy altos',
+          '4': 'Otro motivo'
+        };
+        const match = cleanFeedback.match(/Feedback option: (\d)/);
+        if (match && feedbackMap[match[1]]) {
+          cleanFeedback = feedbackMap[match[1]];
+        }
+      } else if (cleanFeedback === 'Confirmed via second STOP (skipped feedback)') {
+        cleanFeedback = 'Saltó la encuesta (doble STOP)';
+      }
+
+      return {
+        phone: f.phone ? `***${f.phone.slice(-4)}` : 'N/A',
+        feedback: cleanFeedback,
+        reason: reasonLabels[f.reason] || f.reason,
+        date: f.unsubscribedAt
+      };
+    })
   };
 };
 
