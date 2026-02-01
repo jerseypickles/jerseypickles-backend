@@ -513,17 +513,44 @@ function formatPhoneForSearch(phone) {
  * Actualiza el estado de un SMS en la DB
  */
 async function updateSmsStatus(webhookData) {
-  if (!SmsSubscriber) return;
-  
   try {
-    // Buscar por messageId en welcomeSmsMessageId
-    let subscriber = await SmsSubscriber.findOne({ 
-      welcomeSmsMessageId: webhookData.messageId 
+    // 1. Update SmsTransactional (order confirmation, shipping, delivery)
+    try {
+      const SmsTransactional = require('../models/SmsTransactional');
+      const transactionalSms = await SmsTransactional.findOne({
+        telnyxMessageId: webhookData.messageId
+      });
+
+      if (transactionalSms) {
+        transactionalSms.status = webhookData.status;
+        transactionalSms.statusUpdatedAt = new Date();
+
+        if (webhookData.status === 'delivered') {
+          transactionalSms.deliveredAt = new Date();
+        }
+
+        if (webhookData.errors?.length > 0) {
+          transactionalSms.error = webhookData.errors[0]?.detail || 'Unknown error';
+        }
+
+        await transactionalSms.save();
+        console.log(`   ✅ Updated Transactional SMS status: ${transactionalSms.orderNumber} -> ${webhookData.status}`);
+        return;
+      }
+    } catch (e) {
+      // SmsTransactional model might not exist
+    }
+
+    // 2. Update SmsSubscriber (welcome SMS)
+    if (!SmsSubscriber) return;
+
+    let subscriber = await SmsSubscriber.findOne({
+      welcomeSmsMessageId: webhookData.messageId
     });
 
     if (subscriber) {
       subscriber.welcomeSmsStatus = webhookData.status;
-      
+
       if (webhookData.status === 'delivered') {
         subscriber.welcomeSmsSentAt = subscriber.welcomeSmsSentAt || new Date();
         subscriber.totalSmsDelivered = (subscriber.totalSmsDelivered || 0) + 1;
