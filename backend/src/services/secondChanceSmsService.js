@@ -185,37 +185,90 @@ const createShopifyDiscountCode = async (code, expiresAt) => {
 // ==================== QUIET HOURS CHECK ====================
 
 /**
- * Check if current time is within allowed sending hours
+ * Get current hour in Eastern Time
+ * Handles both EST (UTC-5) and EDT (UTC-4) automatically
  */
-const isWithinSendingHours = () => {
+const getEasternHour = () => {
   const now = new Date();
-  const hour = now.getHours();
-  return hour >= CONFIG.quietHoursEnd && hour < CONFIG.quietHoursStart;
+  // Use Intl to get the correct Eastern time (handles DST automatically)
+  const easternTime = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: 'numeric',
+    hour12: false
+  }).format(now);
+  return parseInt(easternTime, 10);
 };
 
 /**
- * Get next available sending time
+ * Check if current time is within allowed sending hours (9 AM - 9 PM Eastern)
+ */
+const isWithinSendingHours = () => {
+  const hour = getEasternHour();
+  const isWithin = hour >= CONFIG.quietHoursEnd && hour < CONFIG.quietHoursStart;
+  console.log(`⏰ Eastern Time check: ${hour}:00 ET - Within sending hours (9-21): ${isWithin}`);
+  return isWithin;
+};
+
+/**
+ * Get next available sending time (in Eastern Time)
  */
 const getNextSendingTime = () => {
   const now = new Date();
-  const hour = now.getHours();
-  
+  const hour = getEasternHour();
+
   if (hour >= CONFIG.quietHoursEnd && hour < CONFIG.quietHoursStart) {
     // Within allowed hours, can send now
     return new Date(now.getTime() + 60000); // 1 minute buffer
   }
-  
-  // Calculate next 9 AM
-  const nextSend = new Date(now);
-  
+
+  // Calculate next 9 AM Eastern
+  // Create a date string in Eastern timezone, then parse it
+  const easternDateStr = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(now);
+
+  // Parse: MM/DD/YYYY
+  const [month, day, year] = easternDateStr.split('/');
+
+  // If after 9 PM ET, next day at 9 AM ET
+  // If before 9 AM ET, today at 9 AM ET
+  let targetDay = parseInt(day, 10);
   if (hour >= CONFIG.quietHoursStart) {
-    // After 9 PM, next day at 9 AM
+    targetDay += 1;
+  }
+
+  // Create the next 9 AM Eastern time
+  // Use a specific Eastern time string and convert to UTC
+  const targetDateStr = `${year}-${month}-${String(targetDay).padStart(2, '0')}T09:00:00`;
+
+  // Create date in Eastern and get UTC equivalent
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false
+  });
+
+  // Simple approach: 9 AM ET is either 14:00 UTC (EST) or 13:00 UTC (EDT)
+  // Check if we're in DST
+  const jan = new Date(now.getFullYear(), 0, 1);
+  const jul = new Date(now.getFullYear(), 6, 1);
+  const stdOffset = Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
+  const isDST = now.getTimezoneOffset() < stdOffset;
+
+  const nextSend = new Date(now);
+  if (hour >= CONFIG.quietHoursStart) {
     nextSend.setDate(nextSend.getDate() + 1);
   }
-  // Before 9 AM, today at 9 AM
-  
-  nextSend.setHours(CONFIG.quietHoursEnd, 0, 0, 0);
-  
+
+  // Set to 9 AM Eastern (14:00 UTC in EST, 13:00 UTC in EDT)
+  // Eastern is UTC-5 (EST) or UTC-4 (EDT)
+  const etOffset = isDST ? 4 : 5;
+  nextSend.setUTCHours(CONFIG.quietHoursEnd + etOffset, 0, 0, 0);
+
   return nextSend;
 };
 
