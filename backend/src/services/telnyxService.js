@@ -394,7 +394,23 @@ class TelnyxService {
    */
   async sendStartConfirmation(to) {
     const text = `🥒 Jersey Pickles: Welcome back! You're now subscribed to our VIP Text Club. Reply STOP to opt out anytime.`;
-    
+
+    return this.sendSms(to, text, { type: 'system' });
+  }
+
+  /**
+   * Send feedback request before unsubscribing (two-step STOP)
+   * First STOP triggers this, second STOP confirms unsubscribe
+   */
+  async sendUnsubscribeFeedbackRequest(to) {
+    const text = `Jersey Pickles: Before you go, we'd love your feedback! What could we improve?\n\n` +
+      `Reply:\n` +
+      `1 - Too many texts\n` +
+      `2 - Not interested\n` +
+      `3 - Prices too high\n` +
+      `4 - Other\n\n` +
+      `Or reply STOP again to unsubscribe immediately.`;
+
     return this.sendSms(to, text, { type: 'system' });
   }
 
