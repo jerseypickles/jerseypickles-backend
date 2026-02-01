@@ -459,6 +459,30 @@ const smsAnalyticsController = {
   },
 
   /**
+   * GET /api/sms/analytics/unsubscribes
+   * Analytics completo de bajas y churn
+   */
+  async getUnsubscribeAnalytics(req, res) {
+    try {
+      const { days = 30 } = req.query;
+      const analytics = await SmsSubscriber.getUnsubscribeAnalytics(parseInt(days));
+
+      res.json({
+        success: true,
+        ...analytics,
+        generatedAt: new Date().toISOString()
+      });
+
+    } catch (error) {
+      console.error('❌ Unsubscribe Analytics Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error getting unsubscribe analytics'
+      });
+    }
+  },
+
+  /**
    * GET /api/sms/analytics/overview
    * Resumen completo para dashboard (combina múltiples endpoints)
    */
