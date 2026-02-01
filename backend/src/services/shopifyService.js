@@ -504,5 +504,43 @@ async createSmsDiscount(code, percentOff = 15, expirationDays = 30) {
   }
 }
 
+  /**
+   * Get unfulfilled orders older than specified hours
+   * @param {number} hoursOld - Minimum age of order in hours (default 72)
+   * @param {number} limit - Max orders to return (default 50)
+   */
+  async getUnfulfilledOrders(hoursOld = 72, limit = 50) {
+    try {
+      const cutoffDate = new Date();
+      cutoffDate.setHours(cutoffDate.getHours() - hoursOld);
+
+      console.log(`🔍 Fetching unfulfilled orders older than ${hoursOld} hours...`);
+      console.log(`   Cutoff date: ${cutoffDate.toISOString()}`);
+
+      // Shopify API query for unfulfilled orders
+      const response = await axios.get(
+        `${this.baseUrl}/orders.json`,
+        {
+          headers: this.getHeaders(),
+          params: {
+            fulfillment_status: 'unfulfilled',
+            financial_status: 'paid',
+            status: 'open',
+            created_at_max: cutoffDate.toISOString(),
+            limit: limit
+          }
+        }
+      );
+
+      const orders = response.data.orders || [];
+      console.log(`   Found ${orders.length} unfulfilled orders older than ${hoursOld} hours`);
+
+      return orders;
+
+    } catch (error) {
+      console.error('❌ Error fetching unfulfilled orders:', error.response?.data || error.message);
+      throw error;
+    }
+  }
 
 module.exports = new ShopifyService();

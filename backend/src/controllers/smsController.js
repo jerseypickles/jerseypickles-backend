@@ -1406,6 +1406,15 @@ smsController.getTriggersTemplates = async (req, res) => {
         template: settings.order_cancelled?.template || defaultTemplates.order_cancelled,
         isCustom: !!settings.order_cancelled?.template,
         length: templates.order_cancelled(sampleData).length
+      },
+      delayed_shipment: {
+        name: 'Delayed Shipment',
+        description: 'Sent when order is unfulfilled for 72+ hours',
+        preview: templates.delayed_shipment(sampleData),
+        template: settings.delayed_shipment?.template || defaultTemplates.delayed_shipment,
+        isCustom: !!settings.delayed_shipment?.template,
+        length: templates.delayed_shipment(sampleData).length,
+        delayHours: settings.delayed_shipment?.delayHours || 72
       }
     };
 
