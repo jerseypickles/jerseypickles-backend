@@ -502,7 +502,6 @@ async createSmsDiscount(code, percentOff = 15, expirationDays = 30) {
     };
   }
   }
-}
 
   /**
    * Get unfulfilled orders older than specified hours
@@ -542,5 +541,6 @@ async createSmsDiscount(code, percentOff = 15, expirationDays = 30) {
       throw error;
     }
   }
+}
 
 module.exports = new ShopifyService();
