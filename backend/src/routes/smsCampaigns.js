@@ -64,6 +64,9 @@ router.post('/:id/cancel', optionalProtect, smsCampaignController.cancel);
 // Get campaign stats
 router.get('/:id/stats', optionalProtect, smsCampaignController.getStats);
 
+// Get campaign click stats
+router.get('/:id/clicks', optionalProtect, smsCampaignController.getClickStats);
+
 // ==================== TRACKING (PUBLIC) ====================
 
 // Track click (no auth - accessed from SMS links)
