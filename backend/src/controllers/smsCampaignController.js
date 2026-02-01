@@ -4,6 +4,7 @@ const SmsCampaign = require('../models/SmsCampaign');
 const SmsMessage = require('../models/SmsMessage');
 const SmsSubscriber = require('../models/SmsSubscriber');
 const telnyxService = require('../services/telnyxService');
+const urlShortenerService = require('../services/urlShortenerService');
 
 const smsCampaignController = {
   
@@ -635,8 +636,61 @@ const smsCampaignController = {
     }
   },
   
+  // ==================== CLICK STATS ====================
+
+  /**
+   * GET /api/sms/campaigns/:id/clicks
+   * Get click statistics for a campaign
+   */
+  async getClickStats(req, res) {
+    try {
+      const campaign = await SmsCampaign.findById(req.params.id);
+
+      if (!campaign) {
+        return res.status(404).json({ success: false, error: 'Campaign not found' });
+      }
+
+      const clickStats = await urlShortenerService.getCampaignClickStats(campaign._id);
+
+      // Also get click count from messages
+      const messageClickStats = await SmsMessage.aggregate([
+        { $match: { campaign: campaign._id } },
+        {
+          $group: {
+            _id: null,
+            totalMessages: { $sum: 1 },
+            clicked: { $sum: { $cond: ['$clicked', 1, 0] } }
+          }
+        }
+      ]);
+
+      const messageStats = messageClickStats[0] || { totalMessages: 0, clicked: 0 };
+
+      res.json({
+        success: true,
+        campaignId: campaign._id,
+        campaignName: campaign.name,
+        clicks: {
+          total: clickStats.totalClicks || 0,
+          unique: clickStats.uniqueClicks || 0,
+          messagesClicked: messageStats.clicked,
+          ctr: messageStats.totalMessages > 0
+            ? ((messageStats.clicked / messageStats.totalMessages) * 100).toFixed(1)
+            : '0'
+        },
+        topUrls: clickStats.topUrls || [],
+        timeline: clickStats.timeline || [],
+        conversions: clickStats.converted || 0
+      });
+
+    } catch (error) {
+      console.error('❌ Get Click Stats Error:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
   // ==================== OVERALL STATS ====================
-  
+
   /**
    * GET /api/sms/campaigns/stats/overview
    * Overall SMS campaign statistics
@@ -712,21 +766,40 @@ async function processCampaignQueue(campaignId) {
           console.log(`📱 Campaign paused/cancelled during processing`);
           return;
         }
-        
+
         try {
-          // Send SMS
-          const result = await telnyxService.sendSms(msg.phone, msg.message);
-          
+          // Process URLs in message - replace with short URLs for tracking
+          let finalMessage = msg.message;
+          try {
+            const { processedMessage } = await urlShortenerService.processMessageUrls(
+              msg.message,
+              {
+                sourceType: 'sms_campaign',
+                campaignId: campaignId,
+                subscriberId: msg.subscriber,
+                messageId: msg._id,
+                discountCode: msg.discountCode
+              }
+            );
+            finalMessage = processedMessage;
+          } catch (urlError) {
+            console.log(`⚠️ URL shortening failed, using original message:`, urlError.message);
+          }
+
+          // Send SMS with processed message
+          const result = await telnyxService.sendSms(msg.phone, finalMessage);
+
           // Update message record
           await SmsMessage.findByIdAndUpdate(msg._id, {
             status: result.success ? 'queued' : 'failed',
             messageId: result.messageId,
+            message: finalMessage, // Store the processed message
             queuedAt: result.success ? new Date() : undefined,
             failedAt: result.success ? undefined : new Date(),
             errorMessage: result.error,
             carrier: result.carrier
           });
-          
+
           // Update campaign stats
           if (result.success) {
             await SmsCampaign.findByIdAndUpdate(campaignId, {
@@ -737,21 +810,21 @@ async function processCampaignQueue(campaignId) {
               $inc: { 'stats.failed': 1, 'stats.queued': -1 }
             });
           }
-          
+
         } catch (error) {
           console.error(`❌ Error sending SMS to ${msg.phone}:`, error.message);
-          
+
           await SmsMessage.findByIdAndUpdate(msg._id, {
             status: 'failed',
             failedAt: new Date(),
             errorMessage: error.message
           });
-          
+
           await SmsCampaign.findByIdAndUpdate(campaignId, {
             $inc: { 'stats.failed': 1, 'stats.queued': -1 }
           });
         }
-        
+
         // Rate limit delay
         await sleep(DELAY_BETWEEN_SMS);
       }

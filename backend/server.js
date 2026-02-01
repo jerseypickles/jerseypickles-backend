@@ -57,11 +57,25 @@ try {
   console.log('   ⚠️ SmsCampaign model:', e.message); 
 }
 
-try { 
-  require('./src/models/SmsMessage'); 
+try {
+  require('./src/models/SmsMessage');
   console.log('   ✅ SmsMessage model loaded');
-} catch(e) { 
-  console.log('   ⚠️ SmsMessage model:', e.message); 
+} catch(e) {
+  console.log('   ⚠️ SmsMessage model:', e.message);
+}
+
+try {
+  require('./src/models/SmsTransactional');
+  console.log('   ✅ SmsTransactional model loaded');
+} catch(e) {
+  console.log('   ⚠️ SmsTransactional model:', e.message);
+}
+
+try {
+  require('./src/models/ShortUrl');
+  console.log('   ✅ ShortUrl model loaded');
+} catch(e) {
+  console.log('   ⚠️ ShortUrl model:', e.message);
 }
 
 console.log('📦 Models ready');
@@ -329,6 +343,15 @@ app.use('/api/track', require('./src/routes/tracking'));
 app.use('/api/analytics', require('./src/routes/analytics'));
 app.use('/api/upload', require('./src/routes/upload'));
 app.use('/api/popup', require('./src/routes/popup'));
+
+// 🔗 SHORT URL ROUTES (for SMS link tracking)
+try {
+  const shortUrlRoutes = require('./src/routes/shortUrl');
+  app.use('/s', shortUrlRoutes);
+  console.log('✅ Short URL routes loaded (/s/:code)');
+} catch (error) {
+  console.log('⚠️  Short URL routes not available:', error.message);
+}
 
 app.use('*', (req, res) => {
   res.status(404).json({ 
