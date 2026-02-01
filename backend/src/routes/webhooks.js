@@ -572,17 +572,18 @@ async function updateSmsStatus(webhookData) {
 
 /**
  * Maneja SMS entrantes (opt-out, etc.)
+ * ✅ ENHANCED: Captura analytics detalladas para unsubscribes
  */
 async function handleInboundSms(webhookData) {
   if (!SmsSubscriber) return;
-  
+
   try {
     const fromPhone = formatPhoneForSearch(webhookData.fromPhone);
-    
+
     if (!fromPhone) return;
 
     const subscriber = await SmsSubscriber.findOne({ phone: fromPhone });
-    
+
     if (!subscriber) {
       console.log(`📨 Inbound SMS from unknown number: ${fromPhone}`);
       return;
@@ -590,17 +591,80 @@ async function handleInboundSms(webhookData) {
 
     // Manejar opt-out keywords
     const text = (webhookData.text || '').toLowerCase().trim();
-    const optOutKeywords = ['stop', 'unsubscribe', 'cancel', 'quit', 'end'];
-    const optInKeywords = ['start', 'yes', 'unstop'];
-    
-    if (optOutKeywords.includes(text)) {
-      subscriber.status = 'unsubscribed';
-      subscriber.unsubscribedAt = new Date();
-      subscriber.unsubscribeReason = 'stop_keyword';
-      await subscriber.save();
-      
-      console.log(`🚫 Unsubscribed via SMS STOP: ${fromPhone}`);
-      
+    const optOutKeywords = ['stop', 'unsubscribe', 'cancel', 'quit', 'end', 'para', 'parar', 'baja'];
+    const optInKeywords = ['start', 'yes', 'unstop', 'subscribe'];
+
+    // 🆕 Detectar feedback adicional en el mensaje
+    // Ej: "STOP too many texts" o "STOP precios altos"
+    const feedbackKeywords = {
+      'too many': 'too_many_texts',
+      'demasiados': 'too_many_texts',
+      'muchos mensajes': 'too_many_texts',
+      'not interested': 'not_interested',
+      'no interesado': 'not_interested',
+      'no me interesa': 'not_interested',
+      'didnt sign': 'didnt_signup',
+      'no me registre': 'didnt_signup',
+      'never signed': 'didnt_signup',
+      'precio': 'prices_high',
+      'price': 'prices_high',
+      'caro': 'prices_high',
+      'expensive': 'prices_high',
+      'shipping': 'shipping_issues',
+      'envio': 'shipping_issues',
+      'delivery': 'shipping_issues',
+      'found elsewhere': 'found_elsewhere',
+      'otro lugar': 'found_elsewhere',
+      'amazon': 'found_elsewhere'
+    };
+
+    // Verificar si es opt-out
+    const isOptOut = optOutKeywords.some(kw => text.startsWith(kw) || text === kw);
+
+    if (isOptOut) {
+      // Detectar keyword exacto usado
+      const keywordUsed = optOutKeywords.find(kw => text.startsWith(kw) || text === kw) || 'stop';
+
+      // Detectar razón basada en feedback adicional
+      let detectedReason = 'stop_keyword';
+      let feedbackText = null;
+
+      // Buscar feedback keywords en el mensaje
+      for (const [keyword, reason] of Object.entries(feedbackKeywords)) {
+        if (text.includes(keyword)) {
+          detectedReason = reason;
+          // Extraer texto después del keyword de stop como feedback
+          const stopKeywordMatch = optOutKeywords.find(kw => text.startsWith(kw));
+          if (stopKeywordMatch && text.length > stopKeywordMatch.length + 1) {
+            feedbackText = text.slice(stopKeywordMatch.length).trim();
+          }
+          break;
+        }
+      }
+
+      // Si el mensaje tiene más texto además del keyword, guardarlo como feedback
+      if (!feedbackText) {
+        const stopKeywordMatch = optOutKeywords.find(kw => text.startsWith(kw));
+        if (stopKeywordMatch && text.length > stopKeywordMatch.length + 1) {
+          feedbackText = text.slice(stopKeywordMatch.length).trim();
+        }
+      }
+
+      // 🆕 Usar el nuevo método recordUnsubscribe para analytics completas
+      await subscriber.recordUnsubscribe({
+        source: 'reply_stop',
+        reason: detectedReason,
+        keyword: keywordUsed.toUpperCase(),
+        feedback: feedbackText
+      });
+
+      console.log(`🚫 Unsubscribed via SMS: ${fromPhone}`);
+      console.log(`   Keyword: ${keywordUsed.toUpperCase()}`);
+      console.log(`   Reason: ${detectedReason}`);
+      if (feedbackText) console.log(`   Feedback: "${feedbackText}"`);
+      console.log(`   SMS count before unsub: ${subscriber.smsCountBeforeUnsub}`);
+      console.log(`   Time to unsub: ${subscriber.timeToUnsubscribe} minutes`);
+
       // Enviar confirmación de opt-out
       try {
         const telnyxService = require('../services/telnyxService');
@@ -608,17 +672,25 @@ async function handleInboundSms(webhookData) {
       } catch (e) {
         console.log('Could not send STOP confirmation:', e.message);
       }
-      
-    } else if (optInKeywords.includes(text)) {
+
+    } else if (optInKeywords.some(kw => text === kw || text.startsWith(kw))) {
       // Re-subscribe
       if (subscriber.status === 'unsubscribed') {
-        subscriber.status = 'active';
+        subscriber.status = 'subscribed';
+        subscriber.subscribedAt = new Date(); // Nueva fecha de suscripción
+        // Limpiar datos de unsubscribe anteriores
         subscriber.unsubscribedAt = null;
         subscriber.unsubscribeReason = null;
+        subscriber.unsubscribeSource = null;
+        subscriber.unsubscribeAfterSms = null;
+        subscriber.timeToUnsubscribe = null;
+        subscriber.smsCountBeforeUnsub = null;
+        subscriber.unsubscribeFeedback = null;
+        subscriber.unsubscribeKeyword = null;
         await subscriber.save();
-        
+
         console.log(`✅ Re-subscribed via SMS START: ${fromPhone}`);
-        
+
         // Enviar confirmación
         try {
           const telnyxService = require('../services/telnyxService');
@@ -627,8 +699,8 @@ async function handleInboundSms(webhookData) {
           console.log('Could not send START confirmation:', e.message);
         }
       }
-      
-    } else if (text === 'help' || text === 'info') {
+
+    } else if (text === 'help' || text === 'info' || text === 'ayuda') {
       // Enviar mensaje de ayuda
       try {
         const telnyxService = require('../services/telnyxService');
@@ -636,7 +708,7 @@ async function handleInboundSms(webhookData) {
       } catch (e) {
         console.log('Could not send HELP response:', e.message);
       }
-      
+
     } else {
       console.log(`📨 Inbound SMS from ${fromPhone}: ${webhookData.text}`);
     }

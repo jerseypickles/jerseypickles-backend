@@ -223,9 +223,34 @@ const smsSubscriberSchema = new mongoose.Schema({
     type: Date
   },
   unsubscribeReason: {
-    type: String
+    type: String,
+    enum: ['stop_keyword', 'too_many_texts', 'not_interested', 'didnt_signup', 'prices_high', 'shipping_issues', 'found_elsewhere', 'other', 'manual', 'carrier_block', null],
+    default: null
+  },
+  // Additional unsubscribe analytics
+  unsubscribeSource: {
+    type: String,
+    enum: ['reply_stop', 'manual', 'complaint', 'carrier_block', 'api', null],
+    default: null
+  },
+  unsubscribeAfterSms: {
+    type: String,
+    enum: ['welcome', 'second_chance', 'campaign', 'none', null],
+    default: null
+  },
+  timeToUnsubscribe: {
+    type: Number // Minutes from subscription to unsubscribe
+  },
+  smsCountBeforeUnsub: {
+    type: Number // How many SMS received before unsubscribing
+  },
+  unsubscribeFeedback: {
+    type: String // Optional text feedback from user
+  },
+  unsubscribeKeyword: {
+    type: String // The exact keyword used (STOP, UNSUBSCRIBE, etc.)
   }
-  
+
 }, {
   timestamps: true
 });
@@ -621,6 +646,334 @@ smsSubscriberSchema.methods.scheduleSecondSms = function() {
   }
   
   this.secondSmsScheduledFor = scheduledTime;
+  return this.save();
+};
+
+// ==================== UNSUBSCRIBE ANALYTICS ====================
+
+// Get comprehensive unsubscribe analytics
+smsSubscriberSchema.statics.getUnsubscribeAnalytics = async function(dateRange = 30) {
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - dateRange);
+
+  const stats = await this.aggregate([
+    {
+      $facet: {
+        // Total subscribers and unsubscribes
+        totals: [
+          {
+            $group: {
+              _id: null,
+              totalSubscribers: { $sum: 1 },
+              totalUnsubscribed: {
+                $sum: { $cond: [{ $eq: ['$status', 'unsubscribed'] }, 1, 0] }
+              },
+              activeSubscribers: {
+                $sum: { $cond: [{ $eq: ['$status', 'subscribed'] }, 1, 0] }
+              }
+            }
+          }
+        ],
+
+        // Recent unsubscribes in date range
+        recentUnsubscribes: [
+          {
+            $match: {
+              status: 'unsubscribed',
+              unsubscribedAt: { $gte: startDate }
+            }
+          },
+          { $count: 'count' }
+        ],
+
+        // Unsubscribe by reason
+        byReason: [
+          {
+            $match: { status: 'unsubscribed' }
+          },
+          {
+            $group: {
+              _id: '$unsubscribeReason',
+              count: { $sum: 1 }
+            }
+          },
+          { $sort: { count: -1 } }
+        ],
+
+        // Unsubscribe by source
+        bySource: [
+          {
+            $match: { status: 'unsubscribed' }
+          },
+          {
+            $group: {
+              _id: '$unsubscribeSource',
+              count: { $sum: 1 }
+            }
+          },
+          { $sort: { count: -1 } }
+        ],
+
+        // Unsubscribe after which SMS
+        byTriggerSms: [
+          {
+            $match: { status: 'unsubscribed' }
+          },
+          {
+            $group: {
+              _id: '$unsubscribeAfterSms',
+              count: { $sum: 1 }
+            }
+          },
+          { $sort: { count: -1 } }
+        ],
+
+        // Average time to unsubscribe
+        avgTimeToUnsub: [
+          {
+            $match: {
+              status: 'unsubscribed',
+              timeToUnsubscribe: { $exists: true, $ne: null }
+            }
+          },
+          {
+            $group: {
+              _id: null,
+              avgMinutes: { $avg: '$timeToUnsubscribe' },
+              minMinutes: { $min: '$timeToUnsubscribe' },
+              maxMinutes: { $max: '$timeToUnsubscribe' }
+            }
+          }
+        ],
+
+        // Average SMS count before unsub
+        avgSmsBeforeUnsub: [
+          {
+            $match: {
+              status: 'unsubscribed',
+              smsCountBeforeUnsub: { $exists: true, $ne: null }
+            }
+          },
+          {
+            $group: {
+              _id: null,
+              avgCount: { $avg: '$smsCountBeforeUnsub' }
+            }
+          }
+        ],
+
+        // Unsubscribes by day (last 30 days)
+        byDay: [
+          {
+            $match: {
+              status: 'unsubscribed',
+              unsubscribedAt: { $gte: startDate }
+            }
+          },
+          {
+            $group: {
+              _id: {
+                $dateToString: { format: '%Y-%m-%d', date: '$unsubscribedAt' }
+              },
+              count: { $sum: 1 }
+            }
+          },
+          { $sort: { _id: 1 } }
+        ],
+
+        // Keywords used
+        byKeyword: [
+          {
+            $match: {
+              status: 'unsubscribed',
+              unsubscribeKeyword: { $exists: true, $ne: null }
+            }
+          },
+          {
+            $group: {
+              _id: { $toUpper: '$unsubscribeKeyword' },
+              count: { $sum: 1 }
+            }
+          },
+          { $sort: { count: -1 } }
+        ],
+
+        // Recent feedback
+        recentFeedback: [
+          {
+            $match: {
+              status: 'unsubscribed',
+              unsubscribeFeedback: { $exists: true, $ne: null, $ne: '' }
+            }
+          },
+          {
+            $project: {
+              phone: 1,
+              feedback: '$unsubscribeFeedback',
+              reason: '$unsubscribeReason',
+              unsubscribedAt: 1
+            }
+          },
+          { $sort: { unsubscribedAt: -1 } },
+          { $limit: 20 }
+        ],
+
+        // Churn rate by week
+        weeklyChurn: [
+          {
+            $match: {
+              unsubscribedAt: { $gte: startDate }
+            }
+          },
+          {
+            $group: {
+              _id: {
+                week: { $isoWeek: '$unsubscribedAt' },
+                year: { $isoWeekYear: '$unsubscribedAt' }
+              },
+              unsubscribes: { $sum: 1 }
+            }
+          },
+          { $sort: { '_id.year': -1, '_id.week': -1 } },
+          { $limit: 4 }
+        ]
+      }
+    }
+  ]);
+
+  const s = stats[0];
+  const totals = s.totals[0] || { totalSubscribers: 0, totalUnsubscribed: 0, activeSubscribers: 0 };
+
+  // Calculate churn rate
+  const churnRate = totals.totalSubscribers > 0
+    ? ((totals.totalUnsubscribed / totals.totalSubscribers) * 100).toFixed(2)
+    : '0.00';
+
+  // Format reasons with labels
+  const reasonLabels = {
+    stop_keyword: 'Respondió STOP',
+    too_many_texts: 'Demasiados mensajes',
+    not_interested: 'No interesado',
+    didnt_signup: 'No se registró',
+    prices_high: 'Precios altos',
+    shipping_issues: 'Problemas de envío',
+    found_elsewhere: 'Encontró en otro lugar',
+    other: 'Otro motivo',
+    manual: 'Baja manual',
+    carrier_block: 'Bloqueado por operador',
+    null: 'Sin especificar'
+  };
+
+  const sourceLabels = {
+    reply_stop: 'Respondió STOP',
+    manual: 'Baja manual',
+    complaint: 'Queja/Reporte',
+    carrier_block: 'Bloqueado',
+    api: 'Vía API',
+    null: 'Sin especificar'
+  };
+
+  const triggerLabels = {
+    welcome: 'SMS de Bienvenida',
+    second_chance: 'SMS Second Chance',
+    campaign: 'Campaña',
+    none: 'Sin SMS previo',
+    null: 'Sin especificar'
+  };
+
+  return {
+    summary: {
+      totalSubscribers: totals.totalSubscribers,
+      totalUnsubscribed: totals.totalUnsubscribed,
+      activeSubscribers: totals.activeSubscribers,
+      churnRate: `${churnRate}%`,
+      recentUnsubscribes: s.recentUnsubscribes[0]?.count || 0,
+      period: `${dateRange} días`
+    },
+
+    byReason: s.byReason.map(r => ({
+      reason: r._id,
+      label: reasonLabels[r._id] || r._id || 'Sin especificar',
+      count: r.count,
+      percentage: totals.totalUnsubscribed > 0
+        ? ((r.count / totals.totalUnsubscribed) * 100).toFixed(1) + '%'
+        : '0%'
+    })),
+
+    bySource: s.bySource.map(r => ({
+      source: r._id,
+      label: sourceLabels[r._id] || r._id || 'Sin especificar',
+      count: r.count
+    })),
+
+    byTriggerSms: s.byTriggerSms.map(r => ({
+      trigger: r._id,
+      label: triggerLabels[r._id] || r._id || 'Sin especificar',
+      count: r.count
+    })),
+
+    timing: {
+      avgTimeToUnsubscribe: s.avgTimeToUnsub[0] ? {
+        minutes: Math.round(s.avgTimeToUnsub[0].avgMinutes),
+        hours: (s.avgTimeToUnsub[0].avgMinutes / 60).toFixed(1),
+        days: (s.avgTimeToUnsub[0].avgMinutes / 1440).toFixed(1)
+      } : null,
+      avgSmsBeforeUnsub: s.avgSmsBeforeUnsub[0]?.avgCount
+        ? Math.round(s.avgSmsBeforeUnsub[0].avgCount * 10) / 10
+        : null
+    },
+
+    trends: {
+      byDay: s.byDay,
+      weeklyChurn: s.weeklyChurn
+    },
+
+    keywords: s.byKeyword,
+
+    feedback: s.recentFeedback.map(f => ({
+      phone: f.phone ? `***${f.phone.slice(-4)}` : 'N/A',
+      feedback: f.feedback,
+      reason: reasonLabels[f.reason] || f.reason,
+      date: f.unsubscribedAt
+    }))
+  };
+};
+
+// Record unsubscribe with full analytics
+smsSubscriberSchema.methods.recordUnsubscribe = async function(data = {}) {
+  this.status = 'unsubscribed';
+  this.unsubscribedAt = new Date();
+
+  // Calculate time to unsubscribe (in minutes)
+  if (this.subscribedAt) {
+    this.timeToUnsubscribe = Math.round(
+      (this.unsubscribedAt - this.subscribedAt) / (1000 * 60)
+    );
+  }
+
+  // Count SMS received before unsubscribe
+  let smsCount = 0;
+  if (this.firstSmsStatus === 'delivered') smsCount++;
+  if (this.secondSmsStatus === 'delivered') smsCount++;
+  this.smsCountBeforeUnsub = smsCount;
+
+  // Determine which SMS triggered the unsub
+  if (data.afterSms) {
+    this.unsubscribeAfterSms = data.afterSms;
+  } else if (this.secondSmsSent && this.secondSmsStatus === 'delivered') {
+    this.unsubscribeAfterSms = 'second_chance';
+  } else if (this.firstSmsStatus === 'delivered') {
+    this.unsubscribeAfterSms = 'welcome';
+  } else {
+    this.unsubscribeAfterSms = 'none';
+  }
+
+  // Set source, reason, keyword, feedback
+  this.unsubscribeSource = data.source || 'reply_stop';
+  this.unsubscribeReason = data.reason || 'stop_keyword';
+  this.unsubscribeKeyword = data.keyword || null;
+  this.unsubscribeFeedback = data.feedback || null;
+
   return this.save();
 };
 
