@@ -1370,7 +1370,8 @@ smsController.getTriggersTemplates = async (req, res) => {
       orderNumber: '1234',
       orderTotal: '49.99',
       trackingNumber: 'USPS123456789',
-      trackingUrl: 'https://track.usps.com/123456789'
+      trackingUrl: 'https://track.usps.com/123456789',
+      cancelReason: 'Customer requested cancellation'
     };
 
     const previews = {
@@ -1397,6 +1398,14 @@ smsController.getTriggersTemplates = async (req, res) => {
         template: settings.delivery_confirmation?.template || defaultTemplates.delivery_confirmation,
         isCustom: !!settings.delivery_confirmation?.template,
         length: templates.delivery_confirmation(sampleData).length
+      },
+      order_cancelled: {
+        name: 'Order Cancelled',
+        description: 'Sent when an order is cancelled',
+        preview: templates.order_cancelled(sampleData),
+        template: settings.order_cancelled?.template || defaultTemplates.order_cancelled,
+        isCustom: !!settings.order_cancelled?.template,
+        length: templates.order_cancelled(sampleData).length
       }
     };
 
