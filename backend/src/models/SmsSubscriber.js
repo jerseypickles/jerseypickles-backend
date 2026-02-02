@@ -286,14 +286,14 @@ smsSubscriberSchema.virtual('eligibleForSecondSms').get(function() {
   if (this.secondSmsSent) return false;
   if (this.status !== 'active') return false;
   if (this.welcomeSmsStatus !== 'delivered') return false;
-  
-  // Must be at least 6 hours since first SMS
+
+  // Must be at least 24 hours since first SMS (changed from 6 hours)
   const smsTime = this.welcomeSmsAt || this.welcomeSmsSentAt;
   if (!smsTime) return false;
-  
+
   const hoursSinceFirst = (Date.now() - new Date(smsTime).getTime()) / (1000 * 60 * 60);
-  
-  return hoursSinceFirst >= 6;
+
+  return hoursSinceFirst >= 24;
 });
 
 // Conversion status label for frontend
@@ -322,9 +322,9 @@ smsSubscriberSchema.pre('save', function(next) {
 // ==================== STATICS ====================
 
 // Find subscribers eligible for second chance SMS
-// FIXED: Ahora busca >= 6 horas (sin límite superior) para no perder suscriptores
+// Changed from 6 hours to 24 hours - give them time to "forget" before reminder
 smsSubscriberSchema.statics.findEligibleForSecondSms = function(limit = 50) {
-  const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
   return this.find({
     status: 'active',
@@ -332,8 +332,8 @@ smsSubscriberSchema.statics.findEligibleForSecondSms = function(limit = 50) {
     secondSmsSent: { $ne: true },
     welcomeSmsStatus: 'delivered',
     $or: [
-      { welcomeSmsAt: { $lte: sixHoursAgo } },
-      { welcomeSmsSentAt: { $lte: sixHoursAgo } }
+      { welcomeSmsAt: { $lte: twentyFourHoursAgo } },
+      { welcomeSmsSentAt: { $lte: twentyFourHoursAgo } }
     ]
   })
   .sort({ welcomeSmsAt: 1, welcomeSmsSentAt: 1 }) // Oldest first
