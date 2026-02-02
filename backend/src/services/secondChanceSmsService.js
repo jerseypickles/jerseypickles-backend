@@ -8,22 +8,22 @@ const crypto = require('crypto');
 const CONFIG = {
   discountPercent: 20,
   codePrefix: 'JP2',
-  expirationHours: 2,
-  minHoursSinceFirst: 6,
-  maxHoursSinceFirst: 8,
+  expirationHours: 24, // Changed from 2 to 24 hours - more time to convert
+  minHoursSinceFirst: 24, // Changed from 6 to 24 hours - let them "forget" first
+  maxHoursSinceFirst: 48, // Changed from 8 to 48 hours
   quietHoursStart: 21, // 9 PM
   quietHoursEnd: 9,    // 9 AM
-  // Personal, family-style message templates (rotates randomly)
+  // Urgency-focused message templates (rotates randomly)
   messageTemplates: [
-    (code) => `Hi, it's Mike from Jersey Pickles! 🥒 I saw you were checking us out earlier. We're a small family business here in NJ, and we put a lot of love into every jar. Use ${code} for 20% off at jerseypickles.com - The Jersey Pickles Family 💚`,
+    (code) => `Hey! Your 20% OFF code ${code} expires in 24hrs ⏰ Over 500 pickle lovers ordered this month - don't miss out! jerseypickles.com 🥒`,
 
-    (code) => `Hey there! Sarah here from Jersey Pickles 👋 We noticed you haven't completed your order. We're a family-run business and every customer means the world to us. Use ${code} for 20% off at jerseypickles.com 🥒💚`,
+    (code) => `Last chance! 🔥 We saved you 20% OFF with code ${code} - but it expires tomorrow. Our spicy pickles are almost sold out! jerseypickles.com`,
 
-    (code) => `Hi from the Jersey Pickles team! 🥒 We're a small family business making pickles the old-fashioned way in NJ. Use ${code} for 20% off at jerseypickles.com - Made with love! 💚`
+    (code) => `Quick reminder: Your exclusive 20% OFF (${code}) expires soon! 🥒 Free shipping on orders $50+ at jerseypickles.com - don't miss this deal!`
   ],
   // Fallback simple template
   messageTemplate: (code, expiresIn) =>
-    `Hi from Jersey Pickles! 🥒 We're a small family business in NJ. Use ${code} for 20% off at jerseypickles.com - The JP Family 💚 Reply STOP to opt-out`
+    `Last chance! Use ${code} for 20% OFF at jerseypickles.com - expires in 24hrs! 🥒 Reply STOP to opt-out`
 };
 
 /**
@@ -410,11 +410,10 @@ const processSecondChanceBatch = async (limit = 20) => {
 
 /**
  * Schedule second SMS for subscribers (respecting quiet hours)
- * FIXED: Incluye suscriptores con secondSmsScheduledFor undefined/null
- * y también busca por welcomeSmsSentAt para compatibilidad
+ * Changed from 6 hours to 24 hours - better conversion timing
  */
 const scheduleSecondSmsForEligible = async () => {
-  const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
   // Find subscribers who need scheduling
   // Incluye los que nunca fueron agendados (secondSmsScheduledFor no existe o es null)
@@ -431,11 +430,11 @@ const scheduleSecondSmsForEligible = async () => {
           { secondSmsScheduledFor: { $exists: false } }
         ]
       },
-      // Han pasado al menos 6 horas desde el primer SMS
+      // Han pasado al menos 24 horas desde el primer SMS
       {
         $or: [
-          { welcomeSmsAt: { $lte: sixHoursAgo } },
-          { welcomeSmsSentAt: { $lte: sixHoursAgo } }
+          { welcomeSmsAt: { $lte: twentyFourHoursAgo } },
+          { welcomeSmsSentAt: { $lte: twentyFourHoursAgo } }
         ]
       }
     ]
