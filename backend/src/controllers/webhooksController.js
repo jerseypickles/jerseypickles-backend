@@ -857,14 +857,31 @@ class WebhooksController {
       });
       
       console.log('📦 Webhook: Order Fulfilled', order.id);
-      
+
       await webhookLog.markProcessing();
-      
+
       const actions = [];
       const flowsTriggered = [];
-      
-      const customer = await Customer.findOne({ 
-        shopifyId: order.customer?.id?.toString() 
+
+      // ==================== REMOVE FROM DELAYED SHIPMENT QUEUE ====================
+      try {
+        const DelayedShipmentQueue = require('../models/DelayedShipmentQueue');
+        const queueResult = await DelayedShipmentQueue.markFulfilled(order.id);
+        if (queueResult) {
+          console.log(`✅ Order #${order.order_number} removed from delayed shipment queue`);
+          actions.push({
+            type: 'delayed_queue_removed',
+            details: { orderId: order.id, orderNumber: order.order_number },
+            success: true
+          });
+        }
+      } catch (queueErr) {
+        console.log('⚠️ Could not update delayed queue:', queueErr.message);
+      }
+      // ==================== END DELAYED SHIPMENT QUEUE ====================
+
+      const customer = await Customer.findOne({
+        shopifyId: order.customer?.id?.toString()
       });
       
       if (customer) {

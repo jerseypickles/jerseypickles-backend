@@ -193,6 +193,46 @@ delayedShipmentQueueSchema.statics.removeByOrderIds = async function(orderIds) {
 };
 
 /**
+ * Mark order as fulfilled (remove from active queue)
+ */
+delayedShipmentQueueSchema.statics.markFulfilled = async function(orderId) {
+  return this.findOneAndUpdate(
+    { orderId: orderId.toString(), status: { $in: ['pending', 'queued'] } },
+    {
+      $set: {
+        status: 'skipped',
+        skipReason: 'fulfilled'
+      }
+    },
+    { new: true }
+  );
+};
+
+/**
+ * Remove orders that are no longer unfulfilled (cleanup during sync)
+ * @param {Array} currentUnfulfilledOrderIds - Array of order IDs that are still unfulfilled
+ */
+delayedShipmentQueueSchema.statics.cleanupFulfilledOrders = async function(currentUnfulfilledOrderIds) {
+  const stringIds = currentUnfulfilledOrderIds.map(id => id.toString());
+
+  // Find orders in queue that are NOT in the current unfulfilled list
+  const result = await this.updateMany(
+    {
+      status: { $in: ['pending', 'queued'] },
+      orderId: { $nin: stringIds }
+    },
+    {
+      $set: {
+        status: 'skipped',
+        skipReason: 'fulfilled'
+      }
+    }
+  );
+
+  return result;
+};
+
+/**
  * Get queue stats
  */
 delayedShipmentQueueSchema.statics.getStats = async function() {
