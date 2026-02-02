@@ -527,8 +527,8 @@ const getSecondChanceStats = async () => {
 const getQueueDetails = async (options = {}) => {
   const { limit = 50 } = options;
   const now = new Date();
-  const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
-  const eightHoursAgo = new Date(Date.now() - 8 * 60 * 60 * 1000);
+  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const fortyEightHoursAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
 
   // ==================== QUEUE BREAKDOWN ====================
 
@@ -556,7 +556,7 @@ const getQueueDetails = async (options = {}) => {
   .select('phone phoneFormatted welcomeSmsAt welcomeSmsSentAt secondSmsScheduledFor createdAt discountCode')
   .lean();
 
-  // 3. Eligible but not yet scheduled (6-8h window, no scheduled time)
+  // 3. Eligible but not yet scheduled (24-48h window, no scheduled time)
   const eligibleNotScheduled = await SmsSubscriber.find({
     status: 'active',
     converted: false,
@@ -564,8 +564,8 @@ const getQueueDetails = async (options = {}) => {
     welcomeSmsStatus: 'delivered',
     secondSmsScheduledFor: null,
     $or: [
-      { welcomeSmsAt: { $gte: eightHoursAgo, $lte: sixHoursAgo } },
-      { welcomeSmsSentAt: { $gte: eightHoursAgo, $lte: sixHoursAgo } }
+      { welcomeSmsAt: { $gte: fortyEightHoursAgo, $lte: twentyFourHoursAgo } },
+      { welcomeSmsSentAt: { $gte: fortyEightHoursAgo, $lte: twentyFourHoursAgo } }
     ]
   })
   .sort({ welcomeSmsAt: 1, welcomeSmsSentAt: 1 })
@@ -573,15 +573,15 @@ const getQueueDetails = async (options = {}) => {
   .select('phone phoneFormatted welcomeSmsAt welcomeSmsSentAt secondSmsScheduledFor createdAt discountCode')
   .lean();
 
-  // 4. Waiting (< 6 hours since first SMS)
+  // 4. Waiting (< 24 hours since first SMS)
   const waitingForEligibility = await SmsSubscriber.find({
     status: 'active',
     converted: false,
     secondSmsSent: { $ne: true },
     welcomeSmsStatus: 'delivered',
     $or: [
-      { welcomeSmsAt: { $gt: sixHoursAgo } },
-      { welcomeSmsSentAt: { $gt: sixHoursAgo } }
+      { welcomeSmsAt: { $gt: twentyFourHoursAgo } },
+      { welcomeSmsSentAt: { $gt: twentyFourHoursAgo } }
     ]
   })
   .sort({ welcomeSmsAt: 1, welcomeSmsSentAt: 1 })
@@ -694,12 +694,12 @@ const getQueueDetails = async (options = {}) => {
         return item;
       }),
 
-      // Still waiting for 6h window
+      // Still waiting for 24h window
       waitingForWindow: waitingForEligibility.map(sub => {
         const item = formatQueueItem(sub, false);
         const firstSmsTime = sub.welcomeSmsAt || sub.welcomeSmsSentAt;
         if (firstSmsTime) {
-          const eligibleAt = new Date(new Date(firstSmsTime).getTime() + 6 * 60 * 60 * 1000);
+          const eligibleAt = new Date(new Date(firstSmsTime).getTime() + 24 * 60 * 60 * 1000);
           item.eligibleAt = eligibleAt;
           item.eligibleIn = formatTimeUntil(eligibleAt - now);
         }

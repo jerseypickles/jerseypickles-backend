@@ -570,17 +570,17 @@ const smsController = {
         nextSendingWindow: null
       };
 
-      const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-      // Get pending count - subscribers eligible for second SMS
+      // Get pending count - subscribers eligible for second SMS (24h after first)
       const pendingSecondSms = await SmsSubscriber.countDocuments({
         status: 'active',
         converted: false,
         secondSmsSent: { $ne: true },
         welcomeSmsStatus: 'delivered',
         $or: [
-          { welcomeSmsAt: { $lte: sixHoursAgo } },
-          { welcomeSmsSentAt: { $lte: sixHoursAgo } }
+          { welcomeSmsAt: { $lte: twentyFourHoursAgo } },
+          { welcomeSmsSentAt: { $lte: twentyFourHoursAgo } }
         ]
       });
 
@@ -615,17 +615,17 @@ const smsController = {
       }
 
       const { limit = 50, dryRun = false } = req.body;
-      const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-      // Find all eligible subscribers that were missed
+      // Find all eligible subscribers that were missed (24h after first SMS)
       const missedSubscribers = await SmsSubscriber.find({
         status: 'active',
         converted: false,
         secondSmsSent: { $ne: true },
         welcomeSmsStatus: 'delivered',
         $or: [
-          { welcomeSmsAt: { $lte: sixHoursAgo } },
-          { welcomeSmsSentAt: { $lte: sixHoursAgo } }
+          { welcomeSmsAt: { $lte: twentyFourHoursAgo } },
+          { welcomeSmsSentAt: { $lte: twentyFourHoursAgo } }
         ]
       })
       .sort({ welcomeSmsAt: 1, welcomeSmsSentAt: 1 })
@@ -975,10 +975,10 @@ function getConversionStatus(sub) {
   if (sub.secondSmsSent && !sub.converted) return 'no_conversion';
   if (!sub.secondSmsSent && sub.welcomeSmsStatus === 'delivered' && !sub.converted) {
     const smsTime = sub.welcomeSmsAt || sub.welcomeSmsSentAt;
-    const hoursSinceFirst = smsTime 
+    const hoursSinceFirst = smsTime
       ? (Date.now() - new Date(smsTime).getTime()) / (1000 * 60 * 60)
       : 0;
-    if (hoursSinceFirst >= 6) return 'pending_second';
+    if (hoursSinceFirst >= 24) return 'pending_second';
     return 'waiting';
   }
   return 'waiting';
