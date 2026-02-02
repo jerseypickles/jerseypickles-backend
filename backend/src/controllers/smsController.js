@@ -56,6 +56,15 @@ try {
   // Model not available
 }
 
+// Cargar delayedShipmentJob de forma segura
+let delayedShipmentJob = null;
+try {
+  delayedShipmentJob = require('../jobs/delayedShipmentJob');
+  console.log('📱 SMS Controller: Delayed Shipment Job loaded');
+} catch (e) {
+  console.log('⚠️  SMS Controller: Delayed Shipment Job not available');
+}
+
 const smsController = {
   // ==================== SUSCRIBIR NUEVO NÚMERO ====================
   
@@ -1428,6 +1437,130 @@ smsController.getTriggersTemplates = async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Error getting templates'
+    });
+  }
+};
+
+// ==================== DELAYED SHIPMENT QUEUE ====================
+
+/**
+ * GET /api/sms/triggers/delayed-queue/status
+ * Get delayed shipment job status and queue stats
+ */
+smsController.getDelayedQueueStatus = async (req, res) => {
+  try {
+    if (!delayedShipmentJob) {
+      return res.status(503).json({
+        success: false,
+        error: 'Delayed shipment job not available'
+      });
+    }
+
+    const status = await delayedShipmentJob.getStatus();
+
+    res.json({
+      success: true,
+      ...status
+    });
+
+  } catch (error) {
+    console.error('❌ Get Delayed Queue Status Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error getting queue status'
+    });
+  }
+};
+
+/**
+ * GET /api/sms/triggers/delayed-queue/items
+ * Get delayed shipment queue items
+ */
+smsController.getDelayedQueueItems = async (req, res) => {
+  try {
+    if (!delayedShipmentJob) {
+      return res.status(503).json({
+        success: false,
+        error: 'Delayed shipment job not available'
+      });
+    }
+
+    const { status = 'all', limit = 50, skip = 0 } = req.query;
+
+    const result = await delayedShipmentJob.getQueueItems({
+      status,
+      limit: parseInt(limit),
+      skip: parseInt(skip)
+    });
+
+    res.json({
+      success: true,
+      ...result
+    });
+
+  } catch (error) {
+    console.error('❌ Get Delayed Queue Items Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error getting queue items'
+    });
+  }
+};
+
+/**
+ * POST /api/sms/triggers/delayed-queue/sync
+ * Manually sync orders to queue
+ */
+smsController.syncDelayedQueue = async (req, res) => {
+  try {
+    if (!delayedShipmentJob) {
+      return res.status(503).json({
+        success: false,
+        error: 'Delayed shipment job not available'
+      });
+    }
+
+    const result = await delayedShipmentJob.syncNow();
+
+    res.json({
+      success: true,
+      ...result
+    });
+
+  } catch (error) {
+    console.error('❌ Sync Delayed Queue Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error syncing queue'
+    });
+  }
+};
+
+/**
+ * POST /api/sms/triggers/delayed-queue/run
+ * Manually run the delayed shipment job
+ */
+smsController.runDelayedJob = async (req, res) => {
+  try {
+    if (!delayedShipmentJob) {
+      return res.status(503).json({
+        success: false,
+        error: 'Delayed shipment job not available'
+      });
+    }
+
+    const result = await delayedShipmentJob.runNow();
+
+    res.json({
+      success: true,
+      ...result
+    });
+
+  } catch (error) {
+    console.error('❌ Run Delayed Job Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error running job'
     });
   }
 };
