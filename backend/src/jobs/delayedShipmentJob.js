@@ -3,9 +3,12 @@
 const cron = require('node-cron');
 const shopifyService = require('../services/shopifyService');
 const smsTransactionalService = require('../services/smsTransactionalService');
+const DelayedShipmentQueue = require('../models/DelayedShipmentQueue');
 
 let job = null;
+let syncJob = null;
 let isRunning = false;
+let isSyncing = false;
 
 // Configuration
 const DEFAULT_DELAY_HOURS = 72;
@@ -19,6 +22,52 @@ const isWithinSendingHours = () => {
   const eastern = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
   const hour = eastern.getHours();
   return hour >= 9 && hour < 21;
+};
+
+/**
+ * Sync unfulfilled orders from Shopify to queue
+ */
+const syncOrdersToQueue = async () => {
+  if (isSyncing) {
+    console.log('⏳ Queue sync already running, skipping...');
+    return;
+  }
+
+  isSyncing = true;
+  console.log('\n📦 Syncing unfulfilled orders to queue...');
+
+  try {
+    const delayHours = smsTransactionalService.getDelayHours();
+
+    // Get all unfulfilled orders (not just old ones)
+    const orders = await shopifyService.getUnfulfilledOrders(0, 100);
+
+    if (orders.length === 0) {
+      console.log('   ✅ No unfulfilled orders found');
+      return { synced: 0 };
+    }
+
+    let added = 0;
+    let updated = 0;
+
+    for (const order of orders) {
+      const result = await DelayedShipmentQueue.upsertOrder(order, delayHours);
+      if (result.createdAt && result.createdAt.getTime() === result.updatedAt.getTime()) {
+        added++;
+      } else {
+        updated++;
+      }
+    }
+
+    console.log(`   ✅ Synced ${orders.length} orders (${added} new, ${updated} updated)`);
+    return { synced: orders.length, added, updated };
+
+  } catch (error) {
+    console.error('❌ Queue sync error:', error.message);
+    return { error: error.message };
+  } finally {
+    isSyncing = false;
+  }
 };
 
 /**
@@ -41,7 +90,9 @@ const runDelayedShipmentJob = async () => {
   try {
     // Check if within sending hours
     if (!isWithinSendingHours()) {
-      console.log('⏰ Outside sending hours (9am-9pm Eastern). Skipping...');
+      console.log('⏰ Outside sending hours (9am-9pm Eastern). Skipping send...');
+      // Still sync orders even outside hours
+      await syncOrdersToQueue();
       isRunning = false;
       return { skipped: true, reason: 'outside_hours' };
     }
@@ -57,52 +108,77 @@ const runDelayedShipmentJob = async () => {
     const delayHours = smsTransactionalService.getDelayHours();
     console.log(`\n🔍 Looking for orders unfulfilled > ${delayHours} hours...`);
 
-    // Get unfulfilled orders from Shopify
-    const orders = await shopifyService.getUnfulfilledOrders(delayHours, MAX_PER_RUN);
+    // Sync orders to queue first
+    await syncOrdersToQueue();
 
-    if (orders.length === 0) {
-      console.log('✅ No delayed orders found. All good!');
+    // Get orders ready to send from queue
+    const queuedOrders = await DelayedShipmentQueue.getReadyToSend(MAX_PER_RUN);
+
+    if (queuedOrders.length === 0) {
+      console.log('✅ No orders ready to send. All good!');
       isRunning = false;
       return { processed: 0, success: 0, skipped: 0 };
     }
 
-    console.log(`\n📤 Processing ${orders.length} delayed orders...`);
+    console.log(`\n📤 Processing ${queuedOrders.length} queued orders...`);
 
     let processed = 0;
     let success = 0;
     let skipped = 0;
     let failed = 0;
 
-    for (const order of orders) {
+    for (const queueItem of queuedOrders) {
       processed++;
-      const orderNumber = order.order_number || order.name?.replace('#', '');
-      const hoursOld = Math.round((Date.now() - new Date(order.created_at).getTime()) / (1000 * 60 * 60));
+      const orderNumber = queueItem.orderNumber;
+      const hoursOld = queueItem.hoursUnfulfilled;
 
-      console.log(`\n   [${processed}/${orders.length}] Order #${orderNumber} (${hoursOld}h old)`);
+      console.log(`\n   [${processed}/${queuedOrders.length}] Order #${orderNumber} (${hoursOld}h old)`);
 
       try {
-        const result = await smsTransactionalService.sendDelayedShipmentNotification(order);
+        // Build order object for SMS service
+        const orderData = {
+          id: queueItem.orderId,
+          order_number: queueItem.orderNumber,
+          customer: {
+            first_name: queueItem.customerName?.split(' ')[0],
+            last_name: queueItem.customerName?.split(' ').slice(1).join(' ')
+          },
+          shipping_address: {
+            phone: queueItem.phone
+          },
+          created_at: queueItem.orderCreatedAt
+        };
+
+        const result = await smsTransactionalService.sendDelayedShipmentNotification(orderData);
 
         if (result.success) {
           success++;
+          await DelayedShipmentQueue.markSent(queueItem.orderId, result.messageId);
           console.log(`   ✅ SMS sent successfully`);
         } else if (result.reason === 'already_sent') {
           skipped++;
+          await DelayedShipmentQueue.markSkipped(queueItem.orderId, 'already_sent');
           console.log(`   ⏭️ Already notified, skipping`);
         } else if (result.reason === 'no_phone') {
           skipped++;
+          await DelayedShipmentQueue.markSkipped(queueItem.orderId, 'no_phone');
           console.log(`   ⚠️ No phone number, skipping`);
         } else {
           failed++;
+          await DelayedShipmentQueue.markFailed(queueItem.orderId, result.reason);
           console.log(`   ❌ Failed: ${result.reason}`);
         }
       } catch (err) {
         failed++;
+        await DelayedShipmentQueue.markFailed(queueItem.orderId, err.message);
         console.error(`   ❌ Error: ${err.message}`);
       }
     }
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+
+    // Get updated queue stats
+    const queueStats = await DelayedShipmentQueue.getStats();
 
     console.log('\n╔════════════════════════════════════════════════╗');
     console.log('║           DELAYED SHIPMENT JOB RESULTS         ║');
@@ -111,10 +187,11 @@ const runDelayedShipmentJob = async () => {
     console.log(`║  SMS Sent:          ${success.toString().padStart(4)}                      ║`);
     console.log(`║  Skipped:           ${skipped.toString().padStart(4)}                      ║`);
     console.log(`║  Failed:            ${failed.toString().padStart(4)}                      ║`);
+    console.log(`║  Still in Queue:    ${queueStats.pending.toString().padStart(4)}                      ║`);
     console.log(`║  Duration:          ${duration.padStart(4)}s                     ║`);
     console.log('╚════════════════════════════════════════════════╝\n');
 
-    return { processed, success, skipped, failed };
+    return { processed, success, skipped, failed, queueStats };
 
   } catch (error) {
     console.error('❌ Delayed Shipment Job Error:', error);
@@ -172,21 +249,48 @@ const runNow = async () => {
 };
 
 /**
- * Get job status
+ * Get job status with queue info
  */
-const getStatus = () => {
+const getStatus = async () => {
+  let queueStats = { pending: 0, queued: 0, sent: 0, skipped: 0, failed: 0 };
+
+  try {
+    queueStats = await DelayedShipmentQueue.getStats();
+  } catch (e) {
+    console.log('Could not get queue stats:', e.message);
+  }
+
   return {
     initialized: !!job,
     running: isRunning,
+    syncing: isSyncing,
     withinSendingHours: isWithinSendingHours(),
     delayHours: smsTransactionalService.getDelayHours(),
-    triggerEnabled: smsTransactionalService.getSettings().delayed_shipment?.enabled
+    triggerEnabled: smsTransactionalService.getSettings().delayed_shipment?.enabled,
+    queue: queueStats
   };
+};
+
+/**
+ * Get queue items for frontend
+ */
+const getQueueItems = async (options = {}) => {
+  return DelayedShipmentQueue.getQueueItems(options);
+};
+
+/**
+ * Sync orders to queue manually
+ */
+const syncNow = async () => {
+  console.log('🔧 Syncing orders to queue manually...');
+  return syncOrdersToQueue();
 };
 
 module.exports = {
   init,
   stop,
   runNow,
-  getStatus
+  syncNow,
+  getStatus,
+  getQueueItems
 };

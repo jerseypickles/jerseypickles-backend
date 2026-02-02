@@ -116,4 +116,18 @@ router.get('/triggers/history', optionalProtect, smsController.getTriggersHistor
 // Get message templates preview
 router.get('/triggers/templates', optionalProtect, smsController.getTriggersTemplates);
 
+// ==================== DELAYED SHIPMENT QUEUE ====================
+
+// Get delayed shipment queue status
+router.get('/triggers/delayed-queue/status', optionalProtect, smsController.getDelayedQueueStatus);
+
+// Get delayed shipment queue items
+router.get('/triggers/delayed-queue/items', optionalProtect, smsController.getDelayedQueueItems);
+
+// Sync orders to queue manually
+router.post('/triggers/delayed-queue/sync', optionalProtect, smsController.syncDelayedQueue);
+
+// Run delayed shipment job manually
+router.post('/triggers/delayed-queue/run', optionalProtect, smsController.runDelayedJob);
+
 module.exports = router;
