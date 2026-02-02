@@ -42,9 +42,16 @@ const syncOrdersToQueue = async () => {
     // Get all unfulfilled orders (not just old ones)
     const orders = await shopifyService.getUnfulfilledOrders(0, 100);
 
+    // Clean up orders that are no longer unfulfilled (were fulfilled in Shopify)
+    const currentOrderIds = orders.map(o => o.id);
+    const cleanupResult = await DelayedShipmentQueue.cleanupFulfilledOrders(currentOrderIds);
+    if (cleanupResult.modifiedCount > 0) {
+      console.log(`   🧹 Marked ${cleanupResult.modifiedCount} fulfilled orders as skipped`);
+    }
+
     if (orders.length === 0) {
       console.log('   ✅ No unfulfilled orders found');
-      return { synced: 0 };
+      return { synced: 0, cleaned: cleanupResult.modifiedCount || 0 };
     }
 
     let added = 0;
@@ -60,7 +67,7 @@ const syncOrdersToQueue = async () => {
     }
 
     console.log(`   ✅ Synced ${orders.length} orders (${added} new, ${updated} updated)`);
-    return { synced: orders.length, added, updated };
+    return { synced: orders.length, added, updated, cleaned: cleanupResult.modifiedCount || 0 };
 
   } catch (error) {
     console.error('❌ Queue sync error:', error.message);
