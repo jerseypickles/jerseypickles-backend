@@ -55,4 +55,17 @@ router.get('/ticket-analysis', optionalProtect, buildYourBoxController.getTicket
 // Week-over-week comparison
 router.get('/week-over-week', optionalProtect, buildYourBoxController.getWeekOverWeek);
 
+// ============================================
+// FUNNEL TRACKING ENDPOINTS
+// ============================================
+
+// Record funnel event (POST from Shopify tracking)
+router.post('/funnel/event', buildYourBoxController.recordFunnelEvent);
+
+// Get funnel analytics
+router.get('/funnel/analytics', optionalProtect, buildYourBoxController.getFunnelAnalytics);
+
+// Get funnel trends
+router.get('/funnel/trends', optionalProtect, buildYourBoxController.getFunnelTrends);
+
 module.exports = router;
