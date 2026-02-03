@@ -1,8 +1,9 @@
 // backend/src/services/buildYourBoxService.js
 // Service para analizar demanda de productos en Build Your Box
-// Enhanced with Opportunity Dashboard metrics
+// Enhanced with Opportunity Dashboard metrics and Funnel Tracking
 
 const Order = require('../models/Order');
+const BybFunnelEvent = require('../models/BybFunnelEvent');
 
 class BuildYourBoxService {
   constructor() {
@@ -701,6 +702,7 @@ class BuildYourBoxService {
   async getOpportunityDashboard(days = 30) {
     console.log(`📊 Building BYB Opportunity Dashboard for ${days} days...`);
 
+    // Run all queries with error handling for each
     const [
       stats,
       combos,
@@ -708,17 +710,32 @@ class BuildYourBoxService {
       ticketAnalysis,
       weekOverWeek
     ] = await Promise.all([
-      this.getDemandStats(days),
-      this.getFrequentCombos(days),
-      this.getTrendingProducts(Math.min(days, 14)), // Max 14 days for trending
-      this.getTicketAnalysis(days),
-      this.getWeekOverWeek()
+      this.getDemandStats(days).catch(err => {
+        console.error('❌ Error in getDemandStats:', err.message);
+        return { summary: {}, topProducts: [], sizeDistribution: [], boxSizeDistribution: [], geoDistribution: [], trends: [], upsellMetrics: { extraOlive: {} } };
+      }),
+      this.getFrequentCombos(days).catch(err => {
+        console.error('❌ Error in getFrequentCombos:', err.message);
+        return [];
+      }),
+      this.getTrendingProducts(Math.min(days, 14)).catch(err => {
+        console.error('❌ Error in getTrendingProducts:', err.message);
+        return { trending: [], rising: [], falling: [], newProducts: [] };
+      }),
+      this.getTicketAnalysis(days).catch(err => {
+        console.error('❌ Error in getTicketAnalysis:', err.message);
+        return { overall: {}, byBoxConfig: [], opportunities: [] };
+      }),
+      this.getWeekOverWeek().catch(err => {
+        console.error('❌ Error in getWeekOverWeek:', err.message);
+        return { thisWeek: {}, lastWeek: {}, changes: {} };
+      })
     ]);
 
-    // Calculate total opportunity value
+    // Calculate total opportunity value (with safe access)
     const opportunities = {
       extraOlive: stats.upsellMetrics?.extraOlive?.missedRevenue || 0,
-      boxUpgrades: ticketAnalysis.opportunities.reduce((sum, o) => sum + o.potentialRevenue, 0)
+      boxUpgrades: (ticketAnalysis.opportunities || []).reduce((sum, o) => sum + (o.potentialRevenue || 0), 0)
     };
     opportunities.total = opportunities.extraOlive + opportunities.boxUpgrades;
 
@@ -738,12 +755,12 @@ class BuildYourBoxService {
     }
 
     // Insight 2: Box size upgrade opportunity
-    const smallBoxes = ticketAnalysis.byBoxConfig.filter(
+    const smallBoxes = (ticketAnalysis.byBoxConfig || []).filter(
       c => c.jarType === 'QUART' && c.jarCount <= 6
     );
     if (smallBoxes.length > 0) {
-      const smallBoxCount = smallBoxes.reduce((sum, c) => sum + c.orderCount, 0);
-      const totalOrders = ticketAnalysis.overall.totalOrders;
+      const smallBoxCount = smallBoxes.reduce((sum, c) => sum + (c.orderCount || 0), 0);
+      const totalOrders = ticketAnalysis.overall?.totalOrders || 1;
       const smallBoxPercent = Math.round((smallBoxCount / totalOrders) * 100);
 
       if (smallBoxPercent > 40) {
@@ -759,7 +776,7 @@ class BuildYourBoxService {
     }
 
     // Insight 3: Trending products
-    if (trending.rising.length > 0) {
+    if (trending.rising?.length > 0) {
       const topRising = trending.rising[0];
       insights.push({
         type: 'trend',
@@ -772,7 +789,7 @@ class BuildYourBoxService {
     }
 
     // Insight 4: Falling products (if any significant drops)
-    if (trending.falling.length > 0) {
+    if (trending.falling?.length > 0) {
       const topFalling = trending.falling[0];
       if (topFalling.changePercent < -30) {
         insights.push({
@@ -1075,6 +1092,311 @@ Responde SOLO con JSON válido (sin markdown, sin backticks):
       console.error('❌ Error calling Claude for BYB insights:', error.message);
       return this.generateFallbackInsights(data);
     }
+  }
+
+  // ============================================
+  // FUNNEL TRACKING METHODS
+  // ============================================
+
+  /**
+   * Record a funnel event
+   */
+  async recordFunnelEvent(eventData) {
+    try {
+      const event = new BybFunnelEvent({
+        sessionId: eventData.sessionId,
+        customerId: eventData.customerId,
+        step: eventData.step,
+        metadata: eventData.metadata || {},
+        timeOnPreviousStep: eventData.timeOnPreviousStep,
+        deviceInfo: eventData.deviceInfo || {},
+        utmParams: eventData.utmParams || {},
+        pageUrl: eventData.pageUrl,
+        referrer: eventData.referrer
+      });
+
+      await event.save();
+      console.log(`📊 BYB Funnel: Recorded ${eventData.step} for session ${eventData.sessionId}`);
+      return { success: true, eventId: event._id };
+    } catch (error) {
+      console.error('❌ Error recording funnel event:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Get funnel analytics for a time period
+   */
+  async getFunnelAnalytics(days = 30) {
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days);
+    startDate.setHours(0, 0, 0, 0);
+
+    // Get raw funnel stats
+    const rawStats = await BybFunnelEvent.getFunnelStats(startDate, new Date());
+
+    // Define step order for funnel visualization
+    const stepOrder = [
+      'step_0_landing',
+      'step_1_type_selected',
+      'step_2_size_selected',
+      'step_3_adding_products',
+      'step_4_products_complete',
+      'step_5_extra_olive_shown',
+      'step_6_review',
+      'step_7_checkout_started',
+      'step_8_purchase_complete'
+    ];
+
+    const stepLabels = {
+      'step_0_landing': 'Viewed BYB Page',
+      'step_1_type_selected': 'Selected Jar Type',
+      'step_2_size_selected': 'Selected Box Size',
+      'step_3_adding_products': 'Started Adding Products',
+      'step_4_products_complete': 'Filled All Slots',
+      'step_5_extra_olive_shown': 'Saw Extra Olive Upsell',
+      'step_5_extra_olive_accepted': 'Accepted Extra Olive',
+      'step_5_extra_olive_declined': 'Declined Extra Olive',
+      'step_6_review': 'Reviewed Cart',
+      'step_7_checkout_started': 'Started Checkout',
+      'step_8_purchase_complete': 'Completed Purchase'
+    };
+
+    // Build funnel data
+    const statsMap = {};
+    for (const stat of rawStats) {
+      statsMap[stat.step] = stat;
+    }
+
+    const funnelSteps = [];
+    let previousCount = null;
+
+    for (const step of stepOrder) {
+      const stat = statsMap[step] || { uniqueSessions: 0, totalEvents: 0 };
+      const count = stat.uniqueSessions;
+
+      let dropoffRate = 0;
+      let dropoffCount = 0;
+      if (previousCount !== null && previousCount > 0) {
+        dropoffCount = previousCount - count;
+        dropoffRate = Math.round((dropoffCount / previousCount) * 100);
+      }
+
+      const conversionFromStart = funnelSteps.length > 0 && funnelSteps[0].count > 0
+        ? Math.round((count / funnelSteps[0].count) * 100)
+        : 100;
+
+      funnelSteps.push({
+        step,
+        label: stepLabels[step],
+        count,
+        totalEvents: stat.totalEvents,
+        dropoffRate,
+        dropoffCount,
+        conversionFromStart
+      });
+
+      previousCount = count;
+    }
+
+    // Extra Olive specific metrics
+    const extraOliveShown = statsMap['step_5_extra_olive_shown']?.uniqueSessions || 0;
+    const extraOliveAccepted = statsMap['step_5_extra_olive_accepted']?.uniqueSessions || 0;
+    const extraOliveDeclined = statsMap['step_5_extra_olive_declined']?.uniqueSessions || 0;
+    const extraOliveConversion = extraOliveShown > 0
+      ? Math.round((extraOliveAccepted / extraOliveShown) * 100)
+      : 0;
+
+    // Calculate key metrics
+    const landingCount = statsMap['step_0_landing']?.uniqueSessions || 0;
+    const purchaseCount = statsMap['step_8_purchase_complete']?.uniqueSessions || 0;
+    const overallConversion = landingCount > 0
+      ? Math.round((purchaseCount / landingCount) * 100 * 10) / 10
+      : 0;
+
+    // Find biggest dropoff point
+    let biggestDropoff = { step: null, rate: 0, count: 0 };
+    for (const step of funnelSteps) {
+      if (step.dropoffRate > biggestDropoff.rate && step.step !== 'step_0_landing') {
+        biggestDropoff = {
+          step: step.step,
+          label: step.label,
+          rate: step.dropoffRate,
+          count: step.dropoffCount
+        };
+      }
+    }
+
+    // Get abandonment by jar type
+    const jarTypeBreakdown = await BybFunnelEvent.aggregate([
+      {
+        $match: {
+          timestamp: { $gte: startDate },
+          'metadata.jarType': { $exists: true }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            jarType: '$metadata.jarType',
+            step: '$step'
+          },
+          sessions: { $addToSet: '$sessionId' }
+        }
+      },
+      {
+        $project: {
+          jarType: '$_id.jarType',
+          step: '$_id.step',
+          count: { $size: '$sessions' }
+        }
+      },
+      { $sort: { jarType: 1, step: 1 } }
+    ]);
+
+    // Organize by jar type
+    const byJarType = {};
+    for (const item of jarTypeBreakdown) {
+      if (!byJarType[item.jarType]) {
+        byJarType[item.jarType] = {};
+      }
+      byJarType[item.jarType][item.step] = item.count;
+    }
+
+    // Generate insights
+    const insights = [];
+
+    if (biggestDropoff.rate > 40) {
+      insights.push({
+        type: 'warning',
+        priority: 'high',
+        title: `High Abandonment at "${biggestDropoff.label}"`,
+        metric: `${biggestDropoff.rate}%`,
+        description: `${biggestDropoff.count} sessions abandoned at this step`,
+        action: this.getDropoffAction(biggestDropoff.step)
+      });
+    }
+
+    if (extraOliveConversion < 30 && extraOliveShown > 10) {
+      insights.push({
+        type: 'opportunity',
+        priority: 'medium',
+        title: 'Extra Olive Upsell Underperforming',
+        metric: `${extraOliveConversion}%`,
+        description: `Only ${extraOliveConversion}% accept Extra Olive when shown`,
+        action: 'Test different messaging or visual presentation for Extra Olive upsell'
+      });
+    }
+
+    if (overallConversion < 5 && landingCount > 100) {
+      insights.push({
+        type: 'critical',
+        priority: 'high',
+        title: 'Low Overall Conversion',
+        metric: `${overallConversion}%`,
+        description: 'Less than 5% of visitors complete a purchase',
+        action: 'Review the entire funnel for friction points'
+      });
+    }
+
+    return {
+      summary: {
+        totalSessions: landingCount,
+        completedPurchases: purchaseCount,
+        overallConversion,
+        biggestDropoff
+      },
+      funnelSteps,
+      extraOliveMetrics: {
+        shown: extraOliveShown,
+        accepted: extraOliveAccepted,
+        declined: extraOliveDeclined,
+        conversionRate: extraOliveConversion,
+        potentialRevenue: (extraOliveShown - extraOliveAccepted) * 4.99
+      },
+      byJarType,
+      insights,
+      period: { days, startDate: startDate.toISOString(), endDate: new Date().toISOString() }
+    };
+  }
+
+  /**
+   * Get action recommendation for dropoff point
+   */
+  getDropoffAction(step) {
+    const actions = {
+      'step_1_type_selected': 'Simplify jar type selection - consider showing benefits of each option',
+      'step_2_size_selected': 'Highlight free shipping on larger boxes (8+ jars)',
+      'step_3_adding_products': 'Products may be overwhelming - add "Staff Picks" or quick-fill options',
+      'step_4_products_complete': 'Make it easier to complete selection - show progress clearly',
+      'step_5_extra_olive_shown': 'Extra Olive upsell may be confusing - simplify the offer',
+      'step_6_review': 'Review page may have issues - check for pricing concerns or unclear info',
+      'step_7_checkout_started': 'Checkout friction - check for payment issues or shipping concerns'
+    };
+    return actions[step] || 'Review this step for usability issues';
+  }
+
+  /**
+   * Get daily funnel trends
+   */
+  async getFunnelTrends(days = 14) {
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days);
+    startDate.setHours(0, 0, 0, 0);
+
+    const dailyStats = await BybFunnelEvent.aggregate([
+      {
+        $match: {
+          timestamp: { $gte: startDate }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            date: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } },
+            step: '$step'
+          },
+          sessions: { $addToSet: '$sessionId' }
+        }
+      },
+      {
+        $project: {
+          date: '$_id.date',
+          step: '$_id.step',
+          count: { $size: '$sessions' }
+        }
+      },
+      { $sort: { date: 1, step: 1 } }
+    ]);
+
+    // Organize by date
+    const byDate = {};
+    for (const item of dailyStats) {
+      if (!byDate[item.date]) {
+        byDate[item.date] = {};
+      }
+      byDate[item.date][item.step] = item.count;
+    }
+
+    // Calculate daily conversion rates
+    const trends = Object.entries(byDate).map(([date, steps]) => {
+      const landing = steps['step_0_landing'] || 0;
+      const purchase = steps['step_8_purchase_complete'] || 0;
+      const conversion = landing > 0 ? Math.round((purchase / landing) * 100 * 10) / 10 : 0;
+
+      return {
+        date,
+        landing,
+        purchase,
+        conversion,
+        steps
+      };
+    });
+
+    return {
+      trends,
+      period: { days }
+    };
   }
 
   /**

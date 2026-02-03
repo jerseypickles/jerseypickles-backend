@@ -43,10 +43,11 @@ const buildYourBoxController = {
         ...dashboard
       });
     } catch (error) {
-      console.error('BYB Opportunity Dashboard Error:', error);
+      console.error('BYB Opportunity Dashboard Error:', error.message, error.stack);
       res.status(500).json({
         success: false,
-        error: 'Error getting opportunity dashboard'
+        error: 'Error getting opportunity dashboard',
+        details: process.env.NODE_ENV !== 'production' ? error.message : undefined
       });
     }
   },
@@ -259,6 +260,86 @@ const buildYourBoxController = {
       res.status(500).json({
         success: false,
         error: 'Error generating AI insights'
+      });
+    }
+  },
+
+  // ============================================
+  // FUNNEL TRACKING ENDPOINTS
+  // ============================================
+
+  /**
+   * POST /api/byb/funnel/event
+   * Record a funnel tracking event (called from Shopify)
+   */
+  async recordFunnelEvent(req, res) {
+    try {
+      const eventData = req.body;
+
+      if (!eventData.sessionId || !eventData.step) {
+        return res.status(400).json({
+          success: false,
+          error: 'sessionId and step are required'
+        });
+      }
+
+      console.log(`📊 BYB Funnel Event: ${eventData.step} from session ${eventData.sessionId}`);
+
+      const result = await buildYourBoxService.recordFunnelEvent(eventData);
+
+      res.json(result);
+    } catch (error) {
+      console.error('BYB Funnel Event Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error recording funnel event'
+      });
+    }
+  },
+
+  /**
+   * GET /api/byb/funnel/analytics
+   * Get funnel analytics for dashboard
+   */
+  async getFunnelAnalytics(req, res) {
+    try {
+      const { days = 30 } = req.query;
+      console.log(`📊 Getting BYB Funnel Analytics for ${days} days...`);
+
+      const analytics = await buildYourBoxService.getFunnelAnalytics(parseInt(days));
+
+      res.json({
+        success: true,
+        ...analytics
+      });
+    } catch (error) {
+      console.error('BYB Funnel Analytics Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error getting funnel analytics'
+      });
+    }
+  },
+
+  /**
+   * GET /api/byb/funnel/trends
+   * Get daily funnel trends
+   */
+  async getFunnelTrends(req, res) {
+    try {
+      const { days = 14 } = req.query;
+
+      const trends = await buildYourBoxService.getFunnelTrends(parseInt(days));
+
+      res.json({
+        success: true,
+        ...trends
+      });
+    } catch (error) {
+      console.error('BYB Funnel Trends Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error getting funnel trends'
       });
     }
   }
