@@ -43,10 +43,11 @@ const buildYourBoxController = {
         ...dashboard
       });
     } catch (error) {
-      console.error('BYB Opportunity Dashboard Error:', error);
+      console.error('BYB Opportunity Dashboard Error:', error.message, error.stack);
       res.status(500).json({
         success: false,
-        error: 'Error getting opportunity dashboard'
+        error: 'Error getting opportunity dashboard',
+        details: process.env.NODE_ENV !== 'production' ? error.message : undefined
       });
     }
   },

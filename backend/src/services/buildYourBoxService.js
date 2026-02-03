@@ -702,6 +702,7 @@ class BuildYourBoxService {
   async getOpportunityDashboard(days = 30) {
     console.log(`📊 Building BYB Opportunity Dashboard for ${days} days...`);
 
+    // Run all queries with error handling for each
     const [
       stats,
       combos,
@@ -709,17 +710,32 @@ class BuildYourBoxService {
       ticketAnalysis,
       weekOverWeek
     ] = await Promise.all([
-      this.getDemandStats(days),
-      this.getFrequentCombos(days),
-      this.getTrendingProducts(Math.min(days, 14)), // Max 14 days for trending
-      this.getTicketAnalysis(days),
-      this.getWeekOverWeek()
+      this.getDemandStats(days).catch(err => {
+        console.error('❌ Error in getDemandStats:', err.message);
+        return { summary: {}, topProducts: [], sizeDistribution: [], boxSizeDistribution: [], geoDistribution: [], trends: [], upsellMetrics: { extraOlive: {} } };
+      }),
+      this.getFrequentCombos(days).catch(err => {
+        console.error('❌ Error in getFrequentCombos:', err.message);
+        return [];
+      }),
+      this.getTrendingProducts(Math.min(days, 14)).catch(err => {
+        console.error('❌ Error in getTrendingProducts:', err.message);
+        return { trending: [], rising: [], falling: [], newProducts: [] };
+      }),
+      this.getTicketAnalysis(days).catch(err => {
+        console.error('❌ Error in getTicketAnalysis:', err.message);
+        return { overall: {}, byBoxConfig: [], opportunities: [] };
+      }),
+      this.getWeekOverWeek().catch(err => {
+        console.error('❌ Error in getWeekOverWeek:', err.message);
+        return { thisWeek: {}, lastWeek: {}, changes: {} };
+      })
     ]);
 
-    // Calculate total opportunity value
+    // Calculate total opportunity value (with safe access)
     const opportunities = {
       extraOlive: stats.upsellMetrics?.extraOlive?.missedRevenue || 0,
-      boxUpgrades: ticketAnalysis.opportunities.reduce((sum, o) => sum + o.potentialRevenue, 0)
+      boxUpgrades: (ticketAnalysis.opportunities || []).reduce((sum, o) => sum + (o.potentialRevenue || 0), 0)
     };
     opportunities.total = opportunities.extraOlive + opportunities.boxUpgrades;
 
@@ -739,12 +755,12 @@ class BuildYourBoxService {
     }
 
     // Insight 2: Box size upgrade opportunity
-    const smallBoxes = ticketAnalysis.byBoxConfig.filter(
+    const smallBoxes = (ticketAnalysis.byBoxConfig || []).filter(
       c => c.jarType === 'QUART' && c.jarCount <= 6
     );
     if (smallBoxes.length > 0) {
-      const smallBoxCount = smallBoxes.reduce((sum, c) => sum + c.orderCount, 0);
-      const totalOrders = ticketAnalysis.overall.totalOrders;
+      const smallBoxCount = smallBoxes.reduce((sum, c) => sum + (c.orderCount || 0), 0);
+      const totalOrders = ticketAnalysis.overall?.totalOrders || 1;
       const smallBoxPercent = Math.round((smallBoxCount / totalOrders) * 100);
 
       if (smallBoxPercent > 40) {
@@ -760,7 +776,7 @@ class BuildYourBoxService {
     }
 
     // Insight 3: Trending products
-    if (trending.rising.length > 0) {
+    if (trending.rising?.length > 0) {
       const topRising = trending.rising[0];
       insights.push({
         type: 'trend',
@@ -773,7 +789,7 @@ class BuildYourBoxService {
     }
 
     // Insight 4: Falling products (if any significant drops)
-    if (trending.falling.length > 0) {
+    if (trending.falling?.length > 0) {
       const topFalling = trending.falling[0];
       if (topFalling.changePercent < -30) {
         insights.push({
