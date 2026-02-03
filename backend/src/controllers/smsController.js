@@ -584,10 +584,25 @@ const smsController = {
         ]
       });
 
+      // 🆕 Get second SMS stats for alerts
+      const [secondSmsSent, secondSmsDelivered, secondSmsConverted] = await Promise.all([
+        SmsSubscriber.countDocuments({ secondSmsSent: true }),
+        SmsSubscriber.countDocuments({ secondSmsSent: true, secondSmsStatus: 'delivered' }),
+        SmsSubscriber.countDocuments({ secondSmsSent: true, converted: true, convertedFromSecondSms: true })
+      ]);
+
       res.json({
         success: true,
         ...status,
-        pendingSecondSms
+        pendingSecondSms,
+        // 🆕 Stats for frontend alerts
+        stats: {
+          secondSmsSent,
+          secondSmsDelivered,
+          secondSmsConverted,
+          deliveryRate: secondSmsSent > 0 ? ((secondSmsDelivered / secondSmsSent) * 100).toFixed(1) : 0,
+          conversionRate: secondSmsDelivered > 0 ? ((secondSmsConverted / secondSmsDelivered) * 100).toFixed(1) : 0
+        }
       });
 
     } catch (error) {
