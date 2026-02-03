@@ -1,5 +1,6 @@
 // backend/src/services/buildYourBoxService.js
 // Service para analizar demanda de productos en Build Your Box
+// Enhanced with Opportunity Dashboard metrics
 
 const Order = require('../models/Order');
 
@@ -17,16 +18,39 @@ class BuildYourBoxService {
       if (upper.includes('HALF') || upper.includes('GALLON')) return 'HALF_GALLON';
       return upper;
     };
+
+    // Box size configurations (from Shopify BYB code)
+    this.boxConfigs = {
+      QUART: {
+        sizes: [4, 6, 8, 12],
+        prices: { 4: 50, 6: 72, 8: 92, 12: 132 },
+        extraOlivePrice: 4.99,
+        freeShippingAt: [8, 12]
+      },
+      HALF_GALLON: {
+        sizes: [2, 4, 6],
+        prices: { 2: 45, 4: 85, 6: 120 },
+        extraOlivePrice: 0, // Not available for half gallon
+        freeShippingAt: [6]
+      }
+    };
   }
 
   /**
    * Parsear notas de Build Your Box
    * Formato: *** Build Your Boxes ***  Box #1 (Jar: QUART) • Product (qty) • Product (qty)
+   * Also detects Extra Olive upsell
    */
   parseBoxNote(note) {
     if (!note || !note.includes('Build Your Box')) return null;
 
     const boxes = [];
+    let hasExtraOlive = false;
+
+    // Detect Extra Olive upsell
+    if (note.toLowerCase().includes('extra olive') || note.toLowerCase().includes('+$4.99')) {
+      hasExtraOlive = true;
+    }
 
     // Regex para encontrar cada box
     // Ejemplo: Box #1 (Jar: QUART (32oz)) • Hot Pickled Green Tomatoes (1) • Sour Pickled (2)
@@ -55,20 +79,25 @@ class BuildYourBoxService {
         }
       }
 
+      // Calculate total jars in this box
+      const totalJars = products.reduce((sum, p) => sum + p.quantity, 0);
+
       if (products.length > 0) {
         boxes.push({
           boxNumber,
           jarSize,
-          products
+          products,
+          totalJars,
+          hasExtraOlive: hasExtraOlive && jarSize === 'QUART' // Extra olive only for Quart
         });
       }
     }
 
-    return boxes.length > 0 ? boxes : null;
+    return boxes.length > 0 ? { boxes, hasExtraOlive } : null;
   }
 
   /**
-   * Obtener estadísticas de demanda
+   * Obtener estadísticas de demanda (enhanced with revenue metrics)
    * @param {number} days - Días hacia atrás (0 = desde hoy en adelante, null = todos)
    */
   async getDemandStats(days = 30) {
@@ -87,7 +116,7 @@ class BuildYourBoxService {
 
     // Buscar órdenes con notas de Build Your Box
     const orders = await Order.find(query)
-      .select('shopifyData.note orderDate totalPrice orderNumber')
+      .select('shopifyData.note orderDate totalPrice orderNumber shippingAddress')
       .sort({ orderDate: -1 })
       .lean();
 
@@ -98,29 +127,72 @@ class BuildYourBoxService {
     const sizeStats = {};
     let totalBoxes = 0;
     let totalProducts = 0;
+    let totalRevenue = 0;
+    let extraOliveCount = 0;
+    let extraOliveEligible = 0; // Quart boxes (can get extra olive)
     const dailyData = {};
+    const boxSizeByJarType = {}; // Track box sizes (4, 6, 8, 12 jars)
+    const stateStats = {}; // Geographic data
 
     for (const order of orders) {
       const note = order.shopifyData?.note;
       if (!note) continue;
 
-      const boxes = this.parseBoxNote(note);
-      if (!boxes) continue;
+      const parsed = this.parseBoxNote(note);
+      if (!parsed) continue;
+
+      const { boxes, hasExtraOlive } = parsed;
+
+      // Track revenue
+      const orderTotal = parseFloat(order.totalPrice) || 0;
+      totalRevenue += orderTotal;
+
+      // Track Extra Olive
+      if (hasExtraOlive) {
+        extraOliveCount++;
+      }
+
+      // Geographic tracking
+      const state = order.shippingAddress?.province || order.shippingAddress?.provinceCode || 'Unknown';
+      if (!stateStats[state]) {
+        stateStats[state] = { orders: 0, revenue: 0, boxes: 0 };
+      }
+      stateStats[state].orders++;
+      stateStats[state].revenue += orderTotal;
 
       // Fecha para tendencias
       const dateKey = new Date(order.orderDate).toISOString().split('T')[0];
       if (!dailyData[dateKey]) {
-        dailyData[dateKey] = { boxes: 0, products: 0, orders: 0 };
+        dailyData[dateKey] = { boxes: 0, products: 0, orders: 0, revenue: 0 };
       }
       dailyData[dateKey].orders++;
+      dailyData[dateKey].revenue += orderTotal;
 
       for (const box of boxes) {
         totalBoxes++;
         dailyData[dateKey].boxes++;
+        stateStats[state].boxes++;
+
+        // Track if eligible for extra olive (Quart jars)
+        if (box.jarSize === 'QUART') {
+          extraOliveEligible++;
+        }
+
+        // Track box sizes (how many jars per box)
+        const boxSizeKey = `${box.jarSize}_${box.totalJars}`;
+        if (!boxSizeByJarType[boxSizeKey]) {
+          boxSizeByJarType[boxSizeKey] = {
+            jarType: box.jarSize,
+            jarCount: box.totalJars,
+            count: 0,
+            estimatedPrice: this.getBoxPrice(box.jarSize, box.totalJars)
+          };
+        }
+        boxSizeByJarType[boxSizeKey].count++;
 
         // Stats por tamaño
         if (!sizeStats[box.jarSize]) {
-          sizeStats[box.jarSize] = { count: 0, products: 0 };
+          sizeStats[box.jarSize] = { count: 0, products: 0, revenue: 0 };
         }
         sizeStats[box.jarSize].count++;
 
@@ -163,24 +235,72 @@ class BuildYourBoxService {
       }))
       .sort((a, b) => b.count - a.count);
 
+    // Box size distribution (4, 6, 8, 12 jars)
+    const boxSizeDistribution = Object.values(boxSizeByJarType)
+      .sort((a, b) => b.count - a.count);
+
     // Tendencias diarias (últimos 14 días)
     const trends = Object.entries(dailyData)
       .map(([date, data]) => ({ date, ...data }))
       .sort((a, b) => new Date(a.date) - new Date(b.date))
       .slice(-14);
 
+    // Geographic distribution (top states)
+    const geoDistribution = Object.entries(stateStats)
+      .map(([state, data]) => ({
+        state,
+        ...data,
+        avgTicket: data.orders > 0 ? Math.round(data.revenue / data.orders * 100) / 100 : 0
+      }))
+      .sort((a, b) => b.orders - a.orders)
+      .slice(0, 15);
+
+    // Calculate average ticket
+    const avgTicket = orders.length > 0 ? totalRevenue / orders.length : 0;
+
+    // Extra Olive metrics
+    const extraOliveRate = extraOliveEligible > 0
+      ? Math.round((extraOliveCount / extraOliveEligible) * 100 * 10) / 10
+      : 0;
+    const extraOliveRevenue = extraOliveCount * 4.99;
+    const extraOliveMissedRevenue = (extraOliveEligible - extraOliveCount) * 4.99;
+
     return {
       summary: {
         totalOrders: orders.length,
         totalBoxes,
         totalProducts,
+        totalRevenue: Math.round(totalRevenue * 100) / 100,
+        avgTicket: Math.round(avgTicket * 100) / 100,
         avgProductsPerBox: totalBoxes > 0 ? Math.round((totalProducts / totalBoxes) * 10) / 10 : 0,
+        avgBoxesPerOrder: orders.length > 0 ? Math.round((totalBoxes / orders.length) * 10) / 10 : 0,
         period: { days }
+      },
+      upsellMetrics: {
+        extraOlive: {
+          accepted: extraOliveCount,
+          eligible: extraOliveEligible,
+          rate: extraOliveRate,
+          revenue: Math.round(extraOliveRevenue * 100) / 100,
+          missedRevenue: Math.round(extraOliveMissedRevenue * 100) / 100,
+          opportunity: `$${Math.round(extraOliveMissedRevenue)} potential if all Quart boxes accepted Extra Olive`
+        }
       },
       topProducts: topProducts.slice(0, 20),
       sizeDistribution,
+      boxSizeDistribution,
+      geoDistribution,
       trends
     };
+  }
+
+  /**
+   * Get estimated box price based on jar type and count
+   */
+  getBoxPrice(jarType, jarCount) {
+    const config = this.boxConfigs[jarType];
+    if (!config) return null;
+    return config.prices[jarCount] || null;
   }
 
   /**
@@ -228,9 +348,10 @@ class BuildYourBoxService {
     const pairCounts = {};
 
     for (const order of orders) {
-      const boxes = this.parseBoxNote(order.shopifyData?.note);
-      if (!boxes) continue;
+      const parsed = this.parseBoxNote(order.shopifyData?.note);
+      if (!parsed) continue;
 
+      const { boxes } = parsed;
       for (const box of boxes) {
         const productNames = box.products.map(p => p.name).sort();
 
@@ -258,17 +379,485 @@ class BuildYourBoxService {
   }
 
   /**
+   * Get trending products with week-over-week comparison
+   */
+  async getTrendingProducts(days = 14) {
+    // Get current period data
+    const currentPeriodEnd = new Date();
+    const currentPeriodStart = new Date();
+    currentPeriodStart.setDate(currentPeriodStart.getDate() - days);
+
+    // Get previous period data (same length, immediately before)
+    const previousPeriodStart = new Date(currentPeriodStart);
+    previousPeriodStart.setDate(previousPeriodStart.getDate() - days);
+    const previousPeriodEnd = new Date(currentPeriodStart);
+    previousPeriodEnd.setMilliseconds(previousPeriodEnd.getMilliseconds() - 1);
+
+    const [currentOrders, previousOrders] = await Promise.all([
+      Order.find({
+        'shopifyData.note': { $regex: /Build Your Box/i },
+        orderDate: { $gte: currentPeriodStart, $lte: currentPeriodEnd }
+      }).select('shopifyData.note').lean(),
+      Order.find({
+        'shopifyData.note': { $regex: /Build Your Box/i },
+        orderDate: { $gte: previousPeriodStart, $lte: previousPeriodEnd }
+      }).select('shopifyData.note').lean()
+    ]);
+
+    // Count products for each period
+    const countProducts = (orders) => {
+      const counts = {};
+      for (const order of orders) {
+        const parsed = this.parseBoxNote(order.shopifyData?.note);
+        if (!parsed) continue;
+
+        for (const box of parsed.boxes) {
+          for (const product of box.products) {
+            counts[product.name] = (counts[product.name] || 0) + product.quantity;
+          }
+        }
+      }
+      return counts;
+    };
+
+    const currentCounts = countProducts(currentOrders);
+    const previousCounts = countProducts(previousOrders);
+
+    // Calculate trends
+    const allProducts = new Set([
+      ...Object.keys(currentCounts),
+      ...Object.keys(previousCounts)
+    ]);
+
+    const trending = [];
+    for (const product of allProducts) {
+      const current = currentCounts[product] || 0;
+      const previous = previousCounts[product] || 0;
+
+      let changePercent = 0;
+      let trend = 'stable';
+
+      if (previous === 0 && current > 0) {
+        changePercent = 100;
+        trend = 'new';
+      } else if (previous > 0) {
+        changePercent = Math.round(((current - previous) / previous) * 100);
+        if (changePercent > 20) trend = 'rising';
+        else if (changePercent < -20) trend = 'falling';
+      }
+
+      trending.push({
+        name: product,
+        currentPeriod: current,
+        previousPeriod: previous,
+        change: current - previous,
+        changePercent,
+        trend
+      });
+    }
+
+    // Sort by absolute change to find most significant movements
+    trending.sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
+
+    return {
+      trending: trending.slice(0, 20),
+      rising: trending.filter(p => p.trend === 'rising').slice(0, 5),
+      falling: trending.filter(p => p.trend === 'falling').slice(0, 5),
+      newProducts: trending.filter(p => p.trend === 'new'),
+      period: {
+        current: { start: currentPeriodStart.toISOString(), end: currentPeriodEnd.toISOString() },
+        previous: { start: previousPeriodStart.toISOString(), end: previousPeriodEnd.toISOString() },
+        days
+      }
+    };
+  }
+
+  /**
+   * Get ticket analysis by box size
+   */
+  async getTicketAnalysis(days = 30) {
+    const query = {
+      'shopifyData.note': { $regex: /Build Your Box/i }
+    };
+
+    if (days > 0) {
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+      query.orderDate = { $gte: startDate };
+    }
+
+    const orders = await Order.find(query)
+      .select('shopifyData.note totalPrice')
+      .lean();
+
+    // Analyze by box configuration
+    const ticketByConfig = {};
+    const allTickets = [];
+
+    for (const order of orders) {
+      const parsed = this.parseBoxNote(order.shopifyData?.note);
+      if (!parsed) continue;
+
+      const orderTotal = parseFloat(order.totalPrice) || 0;
+      allTickets.push(orderTotal);
+
+      // Group by primary box type (largest box in order)
+      let primaryBox = null;
+      for (const box of parsed.boxes) {
+        if (!primaryBox || box.totalJars > primaryBox.totalJars) {
+          primaryBox = box;
+        }
+      }
+
+      if (primaryBox) {
+        const configKey = `${primaryBox.jarSize}_${primaryBox.totalJars}`;
+        if (!ticketByConfig[configKey]) {
+          ticketByConfig[configKey] = {
+            jarType: primaryBox.jarSize,
+            jarCount: primaryBox.totalJars,
+            orders: [],
+            basePrice: this.getBoxPrice(primaryBox.jarSize, primaryBox.totalJars)
+          };
+        }
+        ticketByConfig[configKey].orders.push(orderTotal);
+      }
+    }
+
+    // Calculate statistics for each config
+    const ticketStats = Object.values(ticketByConfig).map(config => {
+      const tickets = config.orders;
+      const count = tickets.length;
+      const sum = tickets.reduce((a, b) => a + b, 0);
+      const avg = count > 0 ? sum / count : 0;
+      const sorted = [...tickets].sort((a, b) => a - b);
+      const median = count > 0 ? sorted[Math.floor(count / 2)] : 0;
+      const min = count > 0 ? sorted[0] : 0;
+      const max = count > 0 ? sorted[count - 1] : 0;
+
+      return {
+        jarType: config.jarType,
+        jarCount: config.jarCount,
+        label: `${config.jarType} x${config.jarCount}`,
+        basePrice: config.basePrice,
+        orderCount: count,
+        avgTicket: Math.round(avg * 100) / 100,
+        medianTicket: Math.round(median * 100) / 100,
+        minTicket: Math.round(min * 100) / 100,
+        maxTicket: Math.round(max * 100) / 100,
+        totalRevenue: Math.round(sum * 100) / 100,
+        // Opportunity: difference between base price and actual average
+        avgOverBase: config.basePrice ? Math.round((avg - config.basePrice) * 100) / 100 : null
+      };
+    });
+
+    // Sort by order count
+    ticketStats.sort((a, b) => b.orderCount - a.orderCount);
+
+    // Overall stats
+    const totalOrders = allTickets.length;
+    const totalSum = allTickets.reduce((a, b) => a + b, 0);
+    const overallAvg = totalOrders > 0 ? totalSum / totalOrders : 0;
+    const sortedAll = [...allTickets].sort((a, b) => a - b);
+    const overallMedian = totalOrders > 0 ? sortedAll[Math.floor(totalOrders / 2)] : 0;
+
+    // Find opportunity gaps
+    const opportunities = [];
+    for (const stat of ticketStats) {
+      // Check if smaller box sizes could upgrade
+      if (stat.jarType === 'QUART' && stat.jarCount < 12) {
+        const nextSize = stat.jarCount === 4 ? 6 : (stat.jarCount === 6 ? 8 : 12);
+        const currentPrice = this.boxConfigs.QUART.prices[stat.jarCount];
+        const nextPrice = this.boxConfigs.QUART.prices[nextSize];
+        const priceDiff = nextPrice - currentPrice;
+        const potentialRevenue = stat.orderCount * priceDiff;
+
+        opportunities.push({
+          from: `QUART x${stat.jarCount}`,
+          to: `QUART x${nextSize}`,
+          ordersEligible: stat.orderCount,
+          priceIncrease: priceDiff,
+          potentialRevenue: Math.round(potentialRevenue * 100) / 100,
+          freeShipping: this.boxConfigs.QUART.freeShippingAt.includes(nextSize),
+          message: `Upgrade ${stat.orderCount} orders from ${stat.jarCount} to ${nextSize} jars (+$${priceDiff})`
+        });
+      }
+    }
+
+    return {
+      overall: {
+        totalOrders,
+        totalRevenue: Math.round(totalSum * 100) / 100,
+        avgTicket: Math.round(overallAvg * 100) / 100,
+        medianTicket: Math.round(overallMedian * 100) / 100
+      },
+      byBoxConfig: ticketStats,
+      opportunities: opportunities.sort((a, b) => b.potentialRevenue - a.potentialRevenue),
+      period: { days }
+    };
+  }
+
+  /**
+   * Get week-over-week comparison
+   */
+  async getWeekOverWeek() {
+    const now = new Date();
+    const thisWeekStart = new Date(now);
+    thisWeekStart.setDate(now.getDate() - now.getDay()); // Start of this week (Sunday)
+    thisWeekStart.setHours(0, 0, 0, 0);
+
+    const lastWeekStart = new Date(thisWeekStart);
+    lastWeekStart.setDate(lastWeekStart.getDate() - 7);
+
+    const lastWeekEnd = new Date(thisWeekStart);
+    lastWeekEnd.setMilliseconds(lastWeekEnd.getMilliseconds() - 1);
+
+    const [thisWeekOrders, lastWeekOrders] = await Promise.all([
+      Order.find({
+        'shopifyData.note': { $regex: /Build Your Box/i },
+        orderDate: { $gte: thisWeekStart }
+      }).select('shopifyData.note totalPrice orderDate').lean(),
+      Order.find({
+        'shopifyData.note': { $regex: /Build Your Box/i },
+        orderDate: { $gte: lastWeekStart, $lte: lastWeekEnd }
+      }).select('shopifyData.note totalPrice orderDate').lean()
+    ]);
+
+    const calcStats = (orders) => {
+      let boxes = 0;
+      let products = 0;
+      let extraOlive = 0;
+      let revenue = 0;
+
+      for (const order of orders) {
+        const parsed = this.parseBoxNote(order.shopifyData?.note);
+        if (!parsed) continue;
+
+        revenue += parseFloat(order.totalPrice) || 0;
+        if (parsed.hasExtraOlive) extraOlive++;
+
+        for (const box of parsed.boxes) {
+          boxes++;
+          products += box.products.reduce((sum, p) => sum + p.quantity, 0);
+        }
+      }
+
+      return {
+        orders: orders.length,
+        boxes,
+        products,
+        extraOlive,
+        revenue: Math.round(revenue * 100) / 100,
+        avgTicket: orders.length > 0 ? Math.round((revenue / orders.length) * 100) / 100 : 0
+      };
+    };
+
+    const thisWeek = calcStats(thisWeekOrders);
+    const lastWeek = calcStats(lastWeekOrders);
+
+    const calcChange = (current, previous) => {
+      if (previous === 0) return current > 0 ? 100 : 0;
+      return Math.round(((current - previous) / previous) * 100);
+    };
+
+    return {
+      thisWeek,
+      lastWeek,
+      changes: {
+        orders: calcChange(thisWeek.orders, lastWeek.orders),
+        boxes: calcChange(thisWeek.boxes, lastWeek.boxes),
+        products: calcChange(thisWeek.products, lastWeek.products),
+        revenue: calcChange(thisWeek.revenue, lastWeek.revenue),
+        avgTicket: calcChange(thisWeek.avgTicket, lastWeek.avgTicket),
+        extraOlive: calcChange(thisWeek.extraOlive, lastWeek.extraOlive)
+      },
+      period: {
+        thisWeek: { start: thisWeekStart.toISOString(), end: now.toISOString() },
+        lastWeek: { start: lastWeekStart.toISOString(), end: lastWeekEnd.toISOString() }
+      }
+    };
+  }
+
+  /**
    * Obtener overview completo para dashboard
    */
   async getOverview(days = 30) {
-    const [stats, combos] = await Promise.all([
+    const [stats, combos, weekOverWeek] = await Promise.all([
       this.getDemandStats(days),
-      this.getFrequentCombos(days)
+      this.getFrequentCombos(days),
+      this.getWeekOverWeek()
     ]);
 
     return {
       ...stats,
-      frequentCombos: combos
+      frequentCombos: combos,
+      weekOverWeek
+    };
+  }
+
+  /**
+   * Get comprehensive Opportunity Dashboard data
+   * This is the main endpoint for the enhanced BYB dashboard
+   */
+  async getOpportunityDashboard(days = 30) {
+    console.log(`📊 Building BYB Opportunity Dashboard for ${days} days...`);
+
+    const [
+      stats,
+      combos,
+      trending,
+      ticketAnalysis,
+      weekOverWeek
+    ] = await Promise.all([
+      this.getDemandStats(days),
+      this.getFrequentCombos(days),
+      this.getTrendingProducts(Math.min(days, 14)), // Max 14 days for trending
+      this.getTicketAnalysis(days),
+      this.getWeekOverWeek()
+    ]);
+
+    // Calculate total opportunity value
+    const opportunities = {
+      extraOlive: stats.upsellMetrics?.extraOlive?.missedRevenue || 0,
+      boxUpgrades: ticketAnalysis.opportunities.reduce((sum, o) => sum + o.potentialRevenue, 0)
+    };
+    opportunities.total = opportunities.extraOlive + opportunities.boxUpgrades;
+
+    // Generate actionable insights
+    const insights = [];
+
+    // Insight 1: Extra Olive opportunity
+    if (stats.upsellMetrics?.extraOlive?.rate < 50) {
+      insights.push({
+        type: 'upsell',
+        priority: 'high',
+        title: 'Extra Olive Upsell Opportunity',
+        metric: `${stats.upsellMetrics.extraOlive.rate}%`,
+        description: `Only ${stats.upsellMetrics.extraOlive.rate}% of eligible Quart boxes include Extra Olive. Potential revenue: $${stats.upsellMetrics.extraOlive.missedRevenue}`,
+        action: 'Make Extra Olive more visible or offer bundle discount'
+      });
+    }
+
+    // Insight 2: Box size upgrade opportunity
+    const smallBoxes = ticketAnalysis.byBoxConfig.filter(
+      c => c.jarType === 'QUART' && c.jarCount <= 6
+    );
+    if (smallBoxes.length > 0) {
+      const smallBoxCount = smallBoxes.reduce((sum, c) => sum + c.orderCount, 0);
+      const totalOrders = ticketAnalysis.overall.totalOrders;
+      const smallBoxPercent = Math.round((smallBoxCount / totalOrders) * 100);
+
+      if (smallBoxPercent > 40) {
+        insights.push({
+          type: 'upgrade',
+          priority: 'high',
+          title: 'Box Size Upgrade Opportunity',
+          metric: `${smallBoxPercent}%`,
+          description: `${smallBoxPercent}% of orders are 4-6 jar boxes. Promote 8 & 12 jar boxes (free shipping!)`,
+          action: 'Highlight free shipping on 8+ jar boxes during checkout'
+        });
+      }
+    }
+
+    // Insight 3: Trending products
+    if (trending.rising.length > 0) {
+      const topRising = trending.rising[0];
+      insights.push({
+        type: 'trend',
+        priority: 'medium',
+        title: 'Product Gaining Popularity',
+        metric: `+${topRising.changePercent}%`,
+        description: `"${topRising.name}" is up ${topRising.changePercent}% week-over-week (${topRising.previousPeriod} → ${topRising.currentPeriod} units)`,
+        action: 'Consider featuring this product prominently'
+      });
+    }
+
+    // Insight 4: Falling products (if any significant drops)
+    if (trending.falling.length > 0) {
+      const topFalling = trending.falling[0];
+      if (topFalling.changePercent < -30) {
+        insights.push({
+          type: 'warning',
+          priority: 'medium',
+          title: 'Product Declining',
+          metric: `${topFalling.changePercent}%`,
+          description: `"${topFalling.name}" is down ${Math.abs(topFalling.changePercent)}% week-over-week`,
+          action: 'Review product placement or consider promotion'
+        });
+      }
+    }
+
+    // Insight 5: Geographic opportunity
+    if (stats.geoDistribution.length > 0) {
+      const topState = stats.geoDistribution[0];
+      const topStatePercent = Math.round((topState.orders / stats.summary.totalOrders) * 100);
+      if (topStatePercent > 30) {
+        insights.push({
+          type: 'geo',
+          priority: 'low',
+          title: 'Geographic Concentration',
+          metric: `${topStatePercent}%`,
+          description: `${topStatePercent}% of orders come from ${topState.state}. Consider targeted marketing in other states.`,
+          action: 'Launch geo-targeted SMS/email campaign'
+        });
+      }
+    }
+
+    // Week over week summary
+    const wowSummary = {
+      trend: weekOverWeek.changes.revenue > 0 ? 'up' : (weekOverWeek.changes.revenue < 0 ? 'down' : 'stable'),
+      revenueChange: weekOverWeek.changes.revenue,
+      ordersChange: weekOverWeek.changes.orders,
+      message: weekOverWeek.changes.revenue > 0
+        ? `Revenue up ${weekOverWeek.changes.revenue}% vs last week`
+        : (weekOverWeek.changes.revenue < 0
+          ? `Revenue down ${Math.abs(weekOverWeek.changes.revenue)}% vs last week`
+          : 'Revenue stable vs last week')
+    };
+
+    return {
+      summary: stats.summary,
+      weekOverWeek: {
+        ...weekOverWeek,
+        summary: wowSummary
+      },
+      upsellMetrics: stats.upsellMetrics,
+      ticketAnalysis: {
+        overall: ticketAnalysis.overall,
+        byBoxConfig: ticketAnalysis.byBoxConfig,
+        upgradeOpportunities: ticketAnalysis.opportunities
+      },
+      trending: {
+        rising: trending.rising,
+        falling: trending.falling,
+        newProducts: trending.newProducts
+      },
+      topProducts: stats.topProducts.slice(0, 10),
+      frequentCombos: combos,
+      geoDistribution: stats.geoDistribution,
+      sizeDistribution: stats.sizeDistribution,
+      boxSizeDistribution: stats.boxSizeDistribution,
+      opportunities: {
+        ...opportunities,
+        items: [
+          {
+            type: 'Extra Olive Upsell',
+            value: opportunities.extraOlive,
+            action: 'Improve visibility of Extra Olive option'
+          },
+          {
+            type: 'Box Size Upgrades',
+            value: opportunities.boxUpgrades,
+            action: 'Promote 8 & 12 jar boxes with free shipping'
+          }
+        ]
+      },
+      insights: insights.sort((a, b) => {
+        const priorityOrder = { high: 0, medium: 1, low: 2 };
+        return priorityOrder[a.priority] - priorityOrder[b.priority];
+      }),
+      trends: stats.trends,
+      period: { days },
+      generatedAt: new Date().toISOString()
     };
   }
 

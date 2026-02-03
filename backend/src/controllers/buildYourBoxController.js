@@ -1,5 +1,6 @@
 // backend/src/controllers/buildYourBoxController.js
 // Controller para Build Your Box Analytics (Demanda)
+// Enhanced with Opportunity Dashboard endpoints
 
 const buildYourBoxService = require('../services/buildYourBoxService');
 
@@ -22,6 +23,95 @@ const buildYourBoxController = {
       res.status(500).json({
         success: false,
         error: 'Error getting Build Your Box overview'
+      });
+    }
+  },
+
+  /**
+   * GET /api/byb/opportunity-dashboard
+   * Comprehensive Opportunity Dashboard with all metrics
+   */
+  async getOpportunityDashboard(req, res) {
+    try {
+      const { days = 30 } = req.query;
+      console.log(`📊 API: Getting BYB Opportunity Dashboard for ${days} days`);
+
+      const dashboard = await buildYourBoxService.getOpportunityDashboard(parseInt(days));
+
+      res.json({
+        success: true,
+        ...dashboard
+      });
+    } catch (error) {
+      console.error('BYB Opportunity Dashboard Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error getting opportunity dashboard'
+      });
+    }
+  },
+
+  /**
+   * GET /api/byb/trending
+   * Trending products with week-over-week comparison
+   */
+  async getTrendingProducts(req, res) {
+    try {
+      const { days = 14 } = req.query;
+      const trending = await buildYourBoxService.getTrendingProducts(parseInt(days));
+
+      res.json({
+        success: true,
+        ...trending
+      });
+    } catch (error) {
+      console.error('BYB Trending Products Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error getting trending products'
+      });
+    }
+  },
+
+  /**
+   * GET /api/byb/ticket-analysis
+   * Ticket analysis by box configuration
+   */
+  async getTicketAnalysis(req, res) {
+    try {
+      const { days = 30 } = req.query;
+      const analysis = await buildYourBoxService.getTicketAnalysis(parseInt(days));
+
+      res.json({
+        success: true,
+        ...analysis
+      });
+    } catch (error) {
+      console.error('BYB Ticket Analysis Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error getting ticket analysis'
+      });
+    }
+  },
+
+  /**
+   * GET /api/byb/week-over-week
+   * Week-over-week comparison
+   */
+  async getWeekOverWeek(req, res) {
+    try {
+      const comparison = await buildYourBoxService.getWeekOverWeek();
+
+      res.json({
+        success: true,
+        ...comparison
+      });
+    } catch (error) {
+      console.error('BYB Week Over Week Error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Error getting week over week comparison'
       });
     }
   },
