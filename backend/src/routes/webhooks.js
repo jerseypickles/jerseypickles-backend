@@ -62,41 +62,43 @@ router.post('/refunds/create', validateShopifyWebhook, webhooksController.refund
 router.post('/telnyx', async (req, res) => {
   // Responder inmediatamente (Telnyx requiere respuesta rápida)
   res.status(200).json({ received: true });
-  
+
   if (!smsController) {
     console.log('⚠️  SMS Controller not available for Telnyx webhook');
     return;
   }
-  
+
   // Procesar en background
   setImmediate(async () => {
     try {
       const telnyxService = require('../services/telnyxService');
       const webhookData = telnyxService.processWebhook(req.body);
-      
+
       if (!webhookData.valid) {
         console.log('⚠️  Invalid Telnyx webhook:', webhookData.error);
         return;
       }
-      
+
       if (webhookData.ignored) {
         console.log(`📨 Telnyx webhook ignored: ${webhookData.eventType}`);
         return;
       }
-      
+
       console.log(`📱 Telnyx webhook: ${webhookData.eventType} - ${webhookData.messageId} - ${webhookData.status}`);
-      
+
       // Manejar mensaje entrante (STOP para opt-out)
+      // Usa el handler consolidado en smsController
       if (webhookData.isInbound) {
-        await handleInboundSms(webhookData);
+        await smsController.handleInboundSms(webhookData);
         return;
       }
-      
+
       // Actualizar estado del SMS saliente
+      // Usa el handler consolidado en smsController
       if (webhookData.messageId) {
-        await updateSmsStatus(webhookData);
+        await smsController.updateSmsStatus(webhookData);
       }
-      
+
     } catch (error) {
       console.error('❌ Telnyx Webhook Error:', error);
     }
@@ -482,333 +484,7 @@ router.post('/resend', async (req, res) => {
   }
 });
 
-// ==================== TELNYX SMS HELPER FUNCTIONS ====================
-
-/**
- * Formatea teléfono para búsqueda (E.164)
- */
-function formatPhoneForSearch(phone) {
-  if (!phone) return null;
-  
-  let cleaned = phone.toString().replace(/[^\d+]/g, '');
-  
-  if (cleaned.startsWith('+1') && cleaned.length === 12) {
-    return cleaned;
-  }
-  
-  if (cleaned.startsWith('+')) {
-    return cleaned.length >= 11 ? cleaned : null;
-  }
-  
-  if (cleaned.startsWith('1') && cleaned.length === 11) {
-    return '+' + cleaned;
-  }
-  
-  if (cleaned.length === 10) {
-    return '+1' + cleaned;
-  }
-  
-  return null;
-}
-
-/**
- * Actualiza el estado de un SMS en la DB
- */
-async function updateSmsStatus(webhookData) {
-  try {
-    // 1. Update SmsTransactional (order confirmation, shipping, delivery)
-    try {
-      const SmsTransactional = require('../models/SmsTransactional');
-      const transactionalSms = await SmsTransactional.findOne({
-        telnyxMessageId: webhookData.messageId
-      });
-
-      if (transactionalSms) {
-        transactionalSms.status = webhookData.status;
-        transactionalSms.statusUpdatedAt = new Date();
-
-        if (webhookData.status === 'delivered') {
-          transactionalSms.deliveredAt = new Date();
-        }
-
-        if (webhookData.errors?.length > 0) {
-          transactionalSms.error = webhookData.errors[0]?.detail || 'Unknown error';
-        }
-
-        await transactionalSms.save();
-        console.log(`   ✅ Updated Transactional SMS status: ${transactionalSms.orderNumber} -> ${webhookData.status}`);
-        return;
-      }
-    } catch (e) {
-      // SmsTransactional model might not exist
-    }
-
-    // 2. Update SmsSubscriber (welcome SMS)
-    if (!SmsSubscriber) return;
-
-    let subscriber = await SmsSubscriber.findOne({
-      welcomeSmsMessageId: webhookData.messageId
-    });
-
-    if (subscriber) {
-      subscriber.welcomeSmsStatus = webhookData.status;
-
-      if (webhookData.status === 'delivered') {
-        subscriber.welcomeSmsSentAt = subscriber.welcomeSmsSentAt || new Date();
-        subscriber.totalSmsDelivered = (subscriber.totalSmsDelivered || 0) + 1;
-      }
-
-      if (webhookData.errors?.length > 0) {
-        subscriber.welcomeSmsError = webhookData.errors[0]?.detail || 'Unknown error';
-      }
-
-      await subscriber.save();
-      console.log(`   ✅ Updated SMS status: ${subscriber.phone} -> ${webhookData.status}`);
-      return;
-    }
-
-  } catch (error) {
-    console.error('❌ Error updating SMS status:', error);
-  }
-}
-
-/**
- * Maneja SMS entrantes (opt-out, etc.)
- * ✅ ENHANCED: Captura analytics detalladas para unsubscribes
- */
-async function handleInboundSms(webhookData) {
-  if (!SmsSubscriber) return;
-
-  try {
-    const fromPhone = formatPhoneForSearch(webhookData.fromPhone);
-
-    if (!fromPhone) return;
-
-    const subscriber = await SmsSubscriber.findOne({ phone: fromPhone });
-
-    // 🆕 Log inbound message to conversation history
-    if (SmsConversation) {
-      try {
-        await SmsConversation.logInbound({
-          from: fromPhone,
-          to: webhookData.toPhone,
-          message: webhookData.text || '',
-          messageId: webhookData.messageId,
-          subscriberId: subscriber?._id
-        });
-        console.log(`💬 Logged inbound SMS from ${fromPhone}`);
-      } catch (logErr) {
-        console.error('Error logging inbound SMS:', logErr.message);
-      }
-    }
-
-    if (!subscriber) {
-      console.log(`📨 Inbound SMS from unknown number: ${fromPhone}`);
-      return;
-    }
-
-    // Manejar opt-out keywords
-    const text = (webhookData.text || '').toLowerCase().trim();
-    const optOutKeywords = ['stop', 'unsubscribe', 'cancel', 'quit', 'end', 'para', 'parar', 'baja'];
-    const optInKeywords = ['start', 'yes', 'unstop', 'subscribe'];
-
-    // 🆕 Detectar feedback adicional en el mensaje
-    // Ej: "STOP too many texts" o "STOP precios altos"
-    const feedbackKeywords = {
-      'too many': 'too_many_texts',
-      'demasiados': 'too_many_texts',
-      'muchos mensajes': 'too_many_texts',
-      'not interested': 'not_interested',
-      'no interesado': 'not_interested',
-      'no me interesa': 'not_interested',
-      'didnt sign': 'didnt_signup',
-      'no me registre': 'didnt_signup',
-      'never signed': 'didnt_signup',
-      'precio': 'prices_high',
-      'price': 'prices_high',
-      'caro': 'prices_high',
-      'expensive': 'prices_high',
-      'shipping': 'shipping_issues',
-      'envio': 'shipping_issues',
-      'delivery': 'shipping_issues',
-      'found elsewhere': 'found_elsewhere',
-      'otro lugar': 'found_elsewhere',
-      'amazon': 'found_elsewhere'
-    };
-
-    // Verificar si es opt-out
-    const isOptOut = optOutKeywords.some(kw => text.startsWith(kw) || text === kw);
-
-    // Verificar si es respuesta de feedback (1, 2, 3, 4)
-    const feedbackResponses = {
-      '1': 'too_many_texts',
-      '2': 'not_interested',
-      '3': 'prices_high',
-      '4': 'other'
-    };
-    const isFeedbackResponse = feedbackResponses[text] && subscriber.pendingUnsubscribe;
-
-    if (isFeedbackResponse) {
-      // ==================== FEEDBACK RESPONSE - COMPLETE UNSUBSCRIBE ====================
-      const detectedReason = feedbackResponses[text];
-
-      // Clear pending state
-      subscriber.pendingUnsubscribe = false;
-      subscriber.pendingUnsubscribeAt = null;
-      subscriber.pendingUnsubscribeExpires = null;
-
-      // Record unsubscribe with feedback
-      await subscriber.recordUnsubscribe({
-        source: 'reply_stop',
-        reason: detectedReason,
-        keyword: 'STOP',
-        feedback: `Feedback option: ${text} (${detectedReason})`
-      });
-
-      console.log(`🚫 Unsubscribed via SMS with feedback: ${fromPhone}`);
-      console.log(`   Feedback option: ${text} → ${detectedReason}`);
-
-      // Send confirmation
-      try {
-        const telnyxService = require('../services/telnyxService');
-        await telnyxService.sendStopConfirmation(fromPhone);
-      } catch (e) {
-        console.log('Could not send STOP confirmation:', e.message);
-      }
-
-    } else if (isOptOut) {
-      // Detectar keyword exacto usado
-      const keywordUsed = optOutKeywords.find(kw => text.startsWith(kw) || text === kw) || 'stop';
-
-      // ==================== CHECK IF PENDING UNSUBSCRIBE (SECOND STOP) ====================
-      if (subscriber.pendingUnsubscribe) {
-        // Second STOP - confirm unsubscribe immediately
-        console.log(`🚫 Second STOP received - confirming unsubscribe: ${fromPhone}`);
-
-        // Clear pending state
-        subscriber.pendingUnsubscribe = false;
-        subscriber.pendingUnsubscribeAt = null;
-        subscriber.pendingUnsubscribeExpires = null;
-
-        // Record unsubscribe
-        await subscriber.recordUnsubscribe({
-          source: 'reply_stop',
-          reason: 'stop_keyword',
-          keyword: keywordUsed.toUpperCase(),
-          feedback: 'Confirmed via second STOP (skipped feedback)'
-        });
-
-        console.log(`   Keyword: ${keywordUsed.toUpperCase()}`);
-        console.log(`   SMS count before unsub: ${subscriber.smsCountBeforeUnsub}`);
-
-        // Send confirmation
-        try {
-          const telnyxService = require('../services/telnyxService');
-          await telnyxService.sendStopConfirmation(fromPhone);
-        } catch (e) {
-          console.log('Could not send STOP confirmation:', e.message);
-        }
-
-      } else {
-        // ==================== FIRST STOP - REQUEST FEEDBACK ====================
-        console.log(`⏳ First STOP received - requesting feedback: ${fromPhone}`);
-
-        // Set pending unsubscribe state (expires in 10 minutes)
-        subscriber.pendingUnsubscribe = true;
-        subscriber.pendingUnsubscribeAt = new Date();
-        subscriber.pendingUnsubscribeExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-        await subscriber.save();
-
-        console.log(`   Pending unsubscribe set, expires: ${subscriber.pendingUnsubscribeExpires}`);
-
-        // Send feedback request
-        try {
-          const telnyxService = require('../services/telnyxService');
-          await telnyxService.sendUnsubscribeFeedbackRequest(fromPhone);
-          console.log(`   📤 Feedback request sent`);
-        } catch (e) {
-          console.log('Could not send feedback request:', e.message);
-          // If we can't send the feedback request, unsubscribe immediately
-          await subscriber.recordUnsubscribe({
-            source: 'reply_stop',
-            reason: 'stop_keyword',
-            keyword: keywordUsed.toUpperCase(),
-            feedback: null
-          });
-          try {
-            const telnyxService = require('../services/telnyxService');
-            await telnyxService.sendStopConfirmation(fromPhone);
-          } catch (e2) {
-            console.log('Could not send STOP confirmation:', e2.message);
-          }
-        }
-      }
-
-    } else if (optInKeywords.some(kw => text === kw || text.startsWith(kw))) {
-      // Re-subscribe or cancel pending unsubscribe
-
-      // If pending unsubscribe, cancel it
-      if (subscriber.pendingUnsubscribe) {
-        subscriber.pendingUnsubscribe = false;
-        subscriber.pendingUnsubscribeAt = null;
-        subscriber.pendingUnsubscribeExpires = null;
-        await subscriber.save();
-        console.log(`✅ Pending unsubscribe cancelled via START: ${fromPhone}`);
-
-        // Send confirmation that they're staying subscribed
-        try {
-          const telnyxService = require('../services/telnyxService');
-          const text = `🥒 Jersey Pickles: Great! You'll continue receiving our exclusive deals and updates. Reply STOP anytime to opt out.`;
-          await telnyxService.sendSms(fromPhone, text, { type: 'system' });
-        } catch (e) {
-          console.log('Could not send cancel confirmation:', e.message);
-        }
-
-      } else if (subscriber.status === 'unsubscribed') {
-        // Re-subscribe from unsubscribed state
-        subscriber.status = 'active';
-        subscriber.subscribedAt = new Date(); // Nueva fecha de suscripción
-        // Limpiar datos de unsubscribe anteriores
-        subscriber.unsubscribedAt = null;
-        subscriber.unsubscribeReason = null;
-        subscriber.unsubscribeSource = null;
-        subscriber.unsubscribeAfterSms = null;
-        subscriber.timeToUnsubscribe = null;
-        subscriber.smsCountBeforeUnsub = null;
-        subscriber.unsubscribeFeedback = null;
-        subscriber.unsubscribeKeyword = null;
-        await subscriber.save();
-
-        console.log(`✅ Re-subscribed via SMS START: ${fromPhone}`);
-
-        // Enviar confirmación
-        try {
-          const telnyxService = require('../services/telnyxService');
-          await telnyxService.sendStartConfirmation(fromPhone);
-        } catch (e) {
-          console.log('Could not send START confirmation:', e.message);
-        }
-      }
-
-    } else if (text === 'help' || text === 'info' || text === 'ayuda') {
-      // Enviar mensaje de ayuda
-      try {
-        const telnyxService = require('../services/telnyxService');
-        await telnyxService.sendHelpResponse(fromPhone);
-      } catch (e) {
-        console.log('Could not send HELP response:', e.message);
-      }
-
-    } else {
-      console.log(`📨 Inbound SMS from ${fromPhone}: ${webhookData.text}`);
-    }
-
-  } catch (error) {
-    console.error('❌ Error handling inbound SMS:', error);
-  }
-}
-
-// ==================== BOUNCE & COMPLAINT HANDLERS ====================
+// ==================== EMAIL BOUNCE & COMPLAINT HANDLERS ====================
 
 /**
  * Maneja bounces automáticamente
