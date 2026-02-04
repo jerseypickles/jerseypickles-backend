@@ -295,16 +295,45 @@ const getNextSendingTime = () => {
 /**
  * Process a single subscriber for second chance SMS
  * Now with A/B testing: random 25-30% discount
+ * 🔒 Uses atomic lock to prevent duplicate SMS (race condition fix)
  */
 const processSubscriberForSecondSms = async (subscriber) => {
   try {
     console.log(`📱 Processing second SMS for: ${subscriber.phone}`);
 
-    // Double-check eligibility
+    // Double-check eligibility first (quick check before atomic lock)
     if (subscriber.converted || subscriber.secondSmsSent || subscriber.status !== 'active') {
-      console.log(`   ⏭️ Skipping: not eligible`);
+      console.log(`   ⏭️ Skipping: not eligible (pre-check)`);
       return { success: false, reason: 'not_eligible' };
     }
+
+    // 🔒 ATOMIC LOCK: Use findOneAndUpdate to prevent race conditions
+    // This ensures only ONE process can mark a subscriber for processing
+    const lockResult = await SmsSubscriber.findOneAndUpdate(
+      {
+        _id: subscriber._id,
+        secondSmsSent: { $ne: true },  // Only if not already sent
+        converted: { $ne: true },       // Only if not converted
+        status: 'active'
+      },
+      {
+        $set: {
+          secondSmsSent: true,          // Lock immediately!
+          secondSmsAt: new Date()
+        }
+      },
+      { new: true }
+    );
+
+    // If lockResult is null, another process already grabbed this subscriber
+    if (!lockResult) {
+      console.log(`   ⏭️ Skipping: already being processed by another job`);
+      return { success: false, reason: 'already_processing' };
+    }
+
+    // Use the locked subscriber from here on
+    subscriber = lockResult;
+    console.log(`   🔒 Locked subscriber for processing`);
 
     // Generate unique code
     const secondCode = await generateUniqueSecondCode();
@@ -322,7 +351,10 @@ const processSubscriberForSecondSms = async (subscriber) => {
     if (!shopifyResult.success) {
       console.error(`   ❌ Failed to create Shopify discount: ${shopifyResult.error}`);
 
-      // Update subscriber with error
+      // 🔓 UNLOCK: Reset secondSmsSent so it can be retried later
+      subscriber.secondSmsSent = false;
+      subscriber.secondSmsAt = null;
+      subscriber.secondSmsStatus = 'failed';
       subscriber.secondSmsError = `Shopify: ${shopifyResult.error}`;
       await subscriber.save();
 
@@ -346,9 +378,8 @@ const processSubscriberForSecondSms = async (subscriber) => {
       }
     });
 
-    // Update subscriber with all the new data
-    subscriber.secondSmsSent = true;
-    subscriber.secondSmsAt = new Date();
+    // Update subscriber with SMS result data
+    // Note: secondSmsSent and secondSmsAt were already set by the atomic lock
     subscriber.secondSmsStatus = smsResult.success ? 'sent' : 'failed';
     subscriber.secondSmsMessageId = smsResult.messageId || null;
     subscriber.secondDiscountCode = secondCode;
@@ -377,8 +408,19 @@ const processSubscriberForSecondSms = async (subscriber) => {
   } catch (error) {
     console.error(`   ❌ Error processing ${subscriber.phone}:`, error);
 
-    subscriber.secondSmsError = error.message;
-    await subscriber.save();
+    // 🔓 UNLOCK on error: Reset so it can be retried
+    try {
+      await SmsSubscriber.findByIdAndUpdate(subscriber._id, {
+        $set: {
+          secondSmsSent: false,
+          secondSmsAt: null,
+          secondSmsStatus: 'failed',
+          secondSmsError: error.message
+        }
+      });
+    } catch (unlockError) {
+      console.error(`   ⚠️ Failed to unlock subscriber:`, unlockError.message);
+    }
 
     return { success: false, reason: 'error', error: error.message };
   }
