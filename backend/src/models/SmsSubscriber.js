@@ -683,7 +683,7 @@ smsSubscriberSchema.statics.getUnsubscribeAnalytics = async function(dateRange =
                 $sum: { $cond: [{ $eq: ['$status', 'unsubscribed'] }, 1, 0] }
               },
               activeSubscribers: {
-                $sum: { $cond: [{ $eq: ['$status', 'subscribed'] }, 1, 0] }
+                $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] }
               }
             }
           }

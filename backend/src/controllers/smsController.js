@@ -1169,8 +1169,28 @@ async function handleInboundSms(webhookData) {
       subscriber.status = 'unsubscribed';
       subscriber.unsubscribedAt = new Date();
       subscriber.unsubscribeReason = 'stop_keyword';
+      subscriber.unsubscribeKeyword = text.toUpperCase(); // Track which keyword they used
+      subscriber.unsubscribeSource = 'reply_stop'; // They replied via SMS
+
+      // Track which SMS triggered the unsubscribe
+      if (subscriber.secondSmsSent) {
+        subscriber.unsubscribeAfterSms = 'second_chance';
+      } else if (subscriber.welcomeSmsSent) {
+        subscriber.unsubscribeAfterSms = 'welcome';
+      } else {
+        subscriber.unsubscribeAfterSms = 'none';
+      }
+
+      // Track SMS count before unsubscribe
+      subscriber.smsCountBeforeUnsub = subscriber.totalSmsReceived || (subscriber.secondSmsSent ? 2 : 1);
+
+      // Track time to unsubscribe (in minutes)
+      if (subscriber.createdAt) {
+        subscriber.timeToUnsubscribe = Math.round((Date.now() - new Date(subscriber.createdAt).getTime()) / (1000 * 60));
+      }
+
       await subscriber.save();
-      console.log(`🚫 Unsubscribed via SMS STOP: ${fromPhone}`);
+      console.log(`🚫 Unsubscribed via SMS STOP: ${fromPhone} (after ${subscriber.unsubscribeAfterSms} SMS)`);
 
       try {
         await telnyxService.sendStopConfirmation(fromPhone, subscriber._id);
