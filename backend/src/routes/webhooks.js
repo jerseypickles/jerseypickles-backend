@@ -12,10 +12,12 @@ const { webhookLimiter } = require('../middleware/rateLimiter');
 // ==================== SMS IMPORTS ====================
 let smsController = null;
 let SmsSubscriber = null;
+let SmsConversation = null;
 
 try {
   smsController = require('../controllers/smsController');
   SmsSubscriber = require('../models/SmsSubscriber');
+  SmsConversation = require('../models/SmsConversation');
   console.log('📱 SMS Controller loaded for webhooks');
 } catch (err) {
   console.log('⚠️  SMS Controller not available:', err.message);
@@ -583,6 +585,22 @@ async function handleInboundSms(webhookData) {
     if (!fromPhone) return;
 
     const subscriber = await SmsSubscriber.findOne({ phone: fromPhone });
+
+    // 🆕 Log inbound message to conversation history
+    if (SmsConversation) {
+      try {
+        await SmsConversation.logInbound({
+          from: fromPhone,
+          to: webhookData.toPhone,
+          message: webhookData.text || '',
+          messageId: webhookData.messageId,
+          subscriberId: subscriber?._id
+        });
+        console.log(`💬 Logged inbound SMS from ${fromPhone}`);
+      } catch (logErr) {
+        console.error('Error logging inbound SMS:', logErr.message);
+      }
+    }
 
     if (!subscriber) {
       console.log(`📨 Inbound SMS from unknown number: ${fromPhone}`);

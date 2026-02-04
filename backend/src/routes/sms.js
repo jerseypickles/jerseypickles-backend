@@ -130,4 +130,15 @@ router.post('/triggers/delayed-queue/sync', optionalProtect, smsController.syncD
 // Run delayed shipment job manually
 router.post('/triggers/delayed-queue/run', optionalProtect, smsController.runDelayedJob);
 
+// ==================== CONVERSATIONS (MESSAGE HISTORY) ====================
+
+// Get all conversations (inbound + outbound)
+router.get('/conversations', optionalProtect, smsController.getConversations);
+
+// Get conversation stats
+router.get('/conversations/stats', optionalProtect, smsController.getConversationStats);
+
+// Get conversation thread for a specific phone
+router.get('/conversations/thread/:phone', optionalProtect, smsController.getConversationThread);
+
 module.exports = router;

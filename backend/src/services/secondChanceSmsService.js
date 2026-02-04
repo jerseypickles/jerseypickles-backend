@@ -1,38 +1,53 @@
 // backend/src/services/secondChanceSmsService.js
-// 📱 Second Chance SMS Service - 20% OFF with 2-hour expiration
+// 📱 Second Chance SMS Service - 25-30% OFF A/B Testing with real urgency
 const SmsSubscriber = require('../models/SmsSubscriber');
 const telnyxService = require('./telnyxService');
 const crypto = require('crypto');
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
-  discountPercent: 20,
+  // A/B Testing: Random discount between 25-30%
+  discountMin: 25,
+  discountMax: 30,
   codePrefix: 'JP2',
-  expirationHours: 24, // Changed from 2 to 24 hours - more time to convert
-  minHoursSinceFirst: 24, // Changed from 6 to 24 hours - let them "forget" first
-  maxHoursSinceFirst: 48, // Changed from 8 to 48 hours
+  expirationHours: 4, // Real urgency - 4 hours to convert
+  minHoursSinceFirst: 6, // Send while they still remember (6 hours)
+  maxHoursSinceFirst: 24, // Max window
   quietHoursStart: 21, // 9 PM
   quietHoursEnd: 9,    // 9 AM
-  // Urgency-focused message templates (rotates randomly)
+
+  // High-converting message templates with real urgency
+  // IMPORTANT: Always identify as "Jersey Pickles" so they remember who we are!
+  // Each template is a function that takes (code, discountPercent)
   messageTemplates: [
-    (code) => `Hey! Your 20% OFF code ${code} expires in 24hrs ⏰ Over 500 pickle lovers ordered this month - don't miss out! jerseypickles.com 🥒`,
+    (code, pct) => `🥒 Jersey Pickles: FLASH SALE! ${pct}% OFF for 4 hours only! Use code ${code} at jerseypickles.com - don't miss out!`,
 
-    (code) => `Last chance! 🔥 We saved you 20% OFF with code ${code} - but it expires tomorrow. Our spicy pickles are almost sold out! jerseypickles.com`,
+    (code, pct) => `Jersey Pickles here! 🥒 Still want those pickles? Here's ${pct}% OFF just for you! Code: ${code} - Expires in 4hrs: jerseypickles.com`,
 
-    (code) => `Quick reminder: Your exclusive 20% OFF (${code}) expires soon! 🥒 Free shipping on orders $50+ at jerseypickles.com - don't miss this deal!`
-  ],
-  // Fallback simple template
-  messageTemplate: (code, expiresIn) =>
-    `Last chance! Use ${code} for 20% OFF at jerseypickles.com - expires in 24hrs! 🥒 Reply STOP to opt-out`
+    (code, pct) => `🔥 Jersey Pickles: We REALLY want you to try us! ${pct}% OFF with code ${code} - only 4 hours left! Shop: jerseypickles.com`,
+
+    (code, pct) => `Jersey Pickles 🥒 Last chance! Your exclusive ${pct}% OFF code ${code} expires soon. Free shipping $50+! jerseypickles.com`
+  ]
 };
 
 /**
- * Get a personal message template (rotates to feel more natural)
+ * Get random discount between 25-30% for A/B testing
+ * @returns {number} Random discount percentage
  */
-const getPersonalMessage = (code) => {
+const getRandomDiscount = () => {
+  return Math.floor(Math.random() * (CONFIG.discountMax - CONFIG.discountMin + 1)) + CONFIG.discountMin;
+};
+
+/**
+ * Get a high-converting message with the discount percentage
+ * @param {string} code - Discount code
+ * @param {number} discountPercent - The discount percentage for this subscriber
+ * @returns {string} The SMS message
+ */
+const getPersonalMessage = (code, discountPercent) => {
   const templates = CONFIG.messageTemplates;
   const randomIndex = Math.floor(Math.random() * templates.length);
-  return templates[randomIndex](code) + ' Reply STOP to opt-out';
+  return templates[randomIndex](code, discountPercent) + ' Reply STOP to opt-out';
 };
 
 // ==================== SHOPIFY CLIENT ====================
@@ -93,15 +108,18 @@ const generateUniqueSecondCode = async () => {
 // ==================== SHOPIFY DISCOUNT ====================
 
 /**
- * Create discount code in Shopify with 2-hour expiration
+ * Create discount code in Shopify with expiration
+ * @param {string} code - The discount code
+ * @param {Date} expiresAt - Expiration date
+ * @param {number} discountPercent - The discount percentage (25-30%)
  */
-const createShopifyDiscountCode = async (code, expiresAt) => {
+const createShopifyDiscountCode = async (code, expiresAt, discountPercent) => {
   const shopify = getShopifyClient();
-  
+
   // Format dates for Shopify
   const startsAt = new Date().toISOString();
   const endsAt = expiresAt.toISOString();
-  
+
   // Create Price Rule first
   const priceRulePayload = {
     price_rule: {
@@ -110,7 +128,7 @@ const createShopifyDiscountCode = async (code, expiresAt) => {
       target_selection: 'all',
       allocation_method: 'across',
       value_type: 'percentage',
-      value: `-${CONFIG.discountPercent}`,
+      value: `-${discountPercent}`,
       customer_selection: 'all',
       usage_limit: 1,
       starts_at: startsAt,
@@ -276,77 +294,83 @@ const getNextSendingTime = () => {
 
 /**
  * Process a single subscriber for second chance SMS
+ * Now with A/B testing: random 25-30% discount
  */
 const processSubscriberForSecondSms = async (subscriber) => {
   try {
     console.log(`📱 Processing second SMS for: ${subscriber.phone}`);
-    
+
     // Double-check eligibility
     if (subscriber.converted || subscriber.secondSmsSent || subscriber.status !== 'active') {
       console.log(`   ⏭️ Skipping: not eligible`);
       return { success: false, reason: 'not_eligible' };
     }
-    
+
     // Generate unique code
     const secondCode = await generateUniqueSecondCode();
-    
-    // Calculate expiration (2 hours from now)
+
+    // 🆕 A/B Testing: Random discount between 25-30%
+    const discountPercent = getRandomDiscount();
+    console.log(`   🎯 A/B Test: Assigned ${discountPercent}% discount`);
+
+    // Calculate expiration (4 hours from now - real urgency!)
     const expiresAt = new Date(Date.now() + CONFIG.expirationHours * 60 * 60 * 1000);
-    
-    // Create Shopify discount with expiration
-    const shopifyResult = await createShopifyDiscountCode(secondCode, expiresAt);
-    
+
+    // Create Shopify discount with the random percentage
+    const shopifyResult = await createShopifyDiscountCode(secondCode, expiresAt, discountPercent);
+
     if (!shopifyResult.success) {
       console.error(`   ❌ Failed to create Shopify discount: ${shopifyResult.error}`);
-      
+
       // Update subscriber with error
       subscriber.secondSmsError = `Shopify: ${shopifyResult.error}`;
       await subscriber.save();
-      
+
       return { success: false, reason: 'shopify_error', error: shopifyResult.error };
     }
-    
-    // Build personal, family-style message
-    const message = getPersonalMessage(secondCode);
 
-    console.log(`   📝 Message style: Personal/Family (${message.length} chars)`);
+    // Build high-converting message with the discount percentage
+    const message = getPersonalMessage(secondCode, discountPercent);
+
+    console.log(`   📝 Message (${message.length} chars): ${discountPercent}% OFF, expires in ${CONFIG.expirationHours}h`);
 
     // Send SMS via Telnyx
     const smsResult = await telnyxService.sendSms(subscriber.phone, message);
-    
-    // Update subscriber
+
+    // Update subscriber with all the new data
     subscriber.secondSmsSent = true;
     subscriber.secondSmsAt = new Date();
     subscriber.secondSmsStatus = smsResult.success ? 'sent' : 'failed';
     subscriber.secondSmsMessageId = smsResult.messageId || null;
     subscriber.secondDiscountCode = secondCode;
-    subscriber.secondDiscountPercent = CONFIG.discountPercent;
+    subscriber.secondDiscountPercent = discountPercent; // 🆕 Now variable 25-30%
     subscriber.secondShopifyDiscountCodeId = shopifyResult.discountCodeId;
     subscriber.secondDiscountExpiresAt = expiresAt;
     subscriber.totalSmsReceived = (subscriber.totalSmsReceived || 0) + 1;
-    
+
     if (!smsResult.success) {
       subscriber.secondSmsError = smsResult.error;
     }
-    
+
     await subscriber.save();
-    
-    console.log(`   ✅ Second SMS sent: ${secondCode} (expires: ${expiresAt.toISOString()})`);
-    
+
+    console.log(`   ✅ Second SMS sent: ${secondCode} @ ${discountPercent}% OFF (expires: ${expiresAt.toISOString()})`);
+
     return {
       success: true,
       phone: subscriber.phone,
       code: secondCode,
+      discountPercent: discountPercent, // 🆕 Include for metrics
       expiresAt: expiresAt,
       messageId: smsResult.messageId
     };
-    
+
   } catch (error) {
     console.error(`   ❌ Error processing ${subscriber.phone}:`, error);
-    
+
     subscriber.secondSmsError = error.message;
     await subscriber.save();
-    
+
     return { success: false, reason: 'error', error: error.message };
   }
 };
@@ -410,13 +434,14 @@ const processSecondChanceBatch = async (limit = 20) => {
 
 /**
  * Schedule second SMS for subscribers (respecting quiet hours)
- * Changed from 6 hours to 24 hours - better conversion timing
+ * Now uses 6 hours - strike while they still remember!
  */
 const scheduleSecondSmsForEligible = async () => {
-  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const minHoursAgo = new Date(Date.now() - CONFIG.minHoursSinceFirst * 60 * 60 * 1000);
+  const maxHoursAgo = new Date(Date.now() - CONFIG.maxHoursSinceFirst * 60 * 60 * 1000);
 
   // Find subscribers who need scheduling
-  // Incluye los que nunca fueron agendados (secondSmsScheduledFor no existe o es null)
+  // Must be between 6-24 hours since first SMS
   const subscribers = await SmsSubscriber.find({
     status: 'active',
     converted: false,
@@ -430,15 +455,15 @@ const scheduleSecondSmsForEligible = async () => {
           { secondSmsScheduledFor: { $exists: false } }
         ]
       },
-      // Han pasado al menos 24 horas desde el primer SMS
+      // Between 6-24 hours since first SMS (sweet spot for recovery)
       {
         $or: [
-          { welcomeSmsAt: { $lte: twentyFourHoursAgo } },
-          { welcomeSmsSentAt: { $lte: twentyFourHoursAgo } }
+          { welcomeSmsAt: { $lte: minHoursAgo, $gte: maxHoursAgo } },
+          { welcomeSmsSentAt: { $lte: minHoursAgo, $gte: maxHoursAgo } }
         ]
       }
     ]
-  }).limit(500); // Increased limit to handle all pending
+  }).limit(500);
 
   let scheduled = 0;
 
@@ -447,7 +472,7 @@ const scheduleSecondSmsForEligible = async () => {
     scheduled++;
   }
 
-  console.log(`📅 Scheduled ${scheduled} subscribers for second SMS`);
+  console.log(`📅 Scheduled ${scheduled} subscribers for second SMS (${CONFIG.minHoursSinceFirst}-${CONFIG.maxHoursSinceFirst}h window)`);
 
   return { scheduled };
 };
@@ -492,7 +517,7 @@ const processScheduledSecondSms = async (limit = 20) => {
 };
 
 /**
- * Get second chance SMS statistics
+ * Get second chance SMS statistics with A/B testing breakdown
  */
 const getSecondChanceStats = async () => {
   const breakdown = await SmsSubscriber.getConversionBreakdown();
@@ -510,12 +535,52 @@ const getSecondChanceStats = async () => {
     ? ((breakdown.conversions.second / breakdown.secondSms.sent) * 100).toFixed(1)
     : '0';
 
+  // 🆕 A/B Testing: Get conversion breakdown by discount percentage
+  const abTestResults = await SmsSubscriber.aggregate([
+    {
+      $match: {
+        secondSmsSent: true,
+        secondDiscountPercent: { $exists: true, $ne: null }
+      }
+    },
+    {
+      $group: {
+        _id: '$secondDiscountPercent',
+        sent: { $sum: 1 },
+        delivered: { $sum: { $cond: [{ $eq: ['$secondSmsStatus', 'delivered'] }, 1, 0] } },
+        converted: { $sum: { $cond: [{ $and: ['$converted', { $eq: ['$convertedWith', 'second'] }] }, 1, 0] } },
+        revenue: { $sum: { $cond: [{ $eq: ['$convertedWith', 'second'] }, { $ifNull: ['$conversionData.orderTotal', 0] }, 0] } }
+      }
+    },
+    { $sort: { _id: 1 } }
+  ]);
+
+  // Format A/B test results
+  const abTesting = {};
+  for (const result of abTestResults) {
+    const pct = result._id;
+    abTesting[`${pct}%`] = {
+      sent: result.sent,
+      delivered: result.delivered,
+      converted: result.converted,
+      conversionRate: result.delivered > 0 ? ((result.converted / result.delivered) * 100).toFixed(1) + '%' : '0%',
+      revenue: result.revenue.toFixed(2),
+      avgOrderValue: result.converted > 0 ? (result.revenue / result.converted).toFixed(2) : '0.00'
+    };
+  }
+
   return {
     ...breakdown,
     rates: {
       firstConversion: firstConversionRate,
       secondConversion: secondConversionRate,
       recovery: recoveryRate
+    },
+    // 🆕 A/B Testing breakdown
+    abTesting: {
+      discountRange: `${CONFIG.discountMin}-${CONFIG.discountMax}%`,
+      expirationHours: CONFIG.expirationHours,
+      byPercentage: abTesting
     }
   };
 };
@@ -527,8 +592,8 @@ const getSecondChanceStats = async () => {
 const getQueueDetails = async (options = {}) => {
   const { limit = 50 } = options;
   const now = new Date();
-  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const fortyEightHoursAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  const sixHoursAgo = new Date(Date.now() - CONFIG.minHoursSinceFirst * 60 * 60 * 1000);
+  const twentyFourHoursAgo = new Date(Date.now() - CONFIG.maxHoursSinceFirst * 60 * 60 * 1000);
 
   // ==================== QUEUE BREAKDOWN ====================
 
@@ -556,7 +621,7 @@ const getQueueDetails = async (options = {}) => {
   .select('phone phoneFormatted welcomeSmsAt welcomeSmsSentAt secondSmsScheduledFor createdAt discountCode')
   .lean();
 
-  // 3. Eligible but not yet scheduled (24-48h window, no scheduled time)
+  // 3. Eligible but not yet scheduled (6-24h window, no scheduled time)
   const eligibleNotScheduled = await SmsSubscriber.find({
     status: 'active',
     converted: false,
@@ -564,8 +629,8 @@ const getQueueDetails = async (options = {}) => {
     welcomeSmsStatus: 'delivered',
     secondSmsScheduledFor: null,
     $or: [
-      { welcomeSmsAt: { $gte: fortyEightHoursAgo, $lte: twentyFourHoursAgo } },
-      { welcomeSmsSentAt: { $gte: fortyEightHoursAgo, $lte: twentyFourHoursAgo } }
+      { welcomeSmsAt: { $gte: twentyFourHoursAgo, $lte: sixHoursAgo } },
+      { welcomeSmsSentAt: { $gte: twentyFourHoursAgo, $lte: sixHoursAgo } }
     ]
   })
   .sort({ welcomeSmsAt: 1, welcomeSmsSentAt: 1 })
@@ -573,15 +638,15 @@ const getQueueDetails = async (options = {}) => {
   .select('phone phoneFormatted welcomeSmsAt welcomeSmsSentAt secondSmsScheduledFor createdAt discountCode')
   .lean();
 
-  // 4. Waiting (< 24 hours since first SMS)
+  // 4. Waiting (< 6 hours since first SMS)
   const waitingForEligibility = await SmsSubscriber.find({
     status: 'active',
     converted: false,
     secondSmsSent: { $ne: true },
     welcomeSmsStatus: 'delivered',
     $or: [
-      { welcomeSmsAt: { $gt: twentyFourHoursAgo } },
-      { welcomeSmsSentAt: { $gt: twentyFourHoursAgo } }
+      { welcomeSmsAt: { $gt: sixHoursAgo } },
+      { welcomeSmsSentAt: { $gt: sixHoursAgo } }
     ]
   })
   .sort({ welcomeSmsAt: 1, welcomeSmsSentAt: 1 })
@@ -694,12 +759,12 @@ const getQueueDetails = async (options = {}) => {
         return item;
       }),
 
-      // Still waiting for 24h window
+      // Still waiting for 6h window
       waitingForWindow: waitingForEligibility.map(sub => {
         const item = formatQueueItem(sub, false);
         const firstSmsTime = sub.welcomeSmsAt || sub.welcomeSmsSentAt;
         if (firstSmsTime) {
-          const eligibleAt = new Date(new Date(firstSmsTime).getTime() + 24 * 60 * 60 * 1000);
+          const eligibleAt = new Date(new Date(firstSmsTime).getTime() + CONFIG.minHoursSinceFirst * 60 * 60 * 1000);
           item.eligibleAt = eligibleAt;
           item.eligibleIn = formatTimeUntil(eligibleAt - now);
         }

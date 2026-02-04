@@ -1,6 +1,7 @@
 // backend/src/controllers/smsController.js
 // 📱 SMS Controller - Con Second Chance SMS Support y Geolocalización
 const SmsSubscriber = require('../models/SmsSubscriber');
+const SmsConversation = require('../models/SmsConversation');
 const telnyxService = require('../services/telnyxService');
 const smsConversionService = require('../services/smsConversionService');
 
@@ -1576,6 +1577,109 @@ smsController.runDelayedJob = async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Error running job'
+    });
+  }
+};
+
+// ==================== 💬 CONVERSATIONS (MESSAGE HISTORY) ====================
+
+/**
+ * GET /api/sms/conversations
+ * Get all SMS conversations (inbound + outbound)
+ */
+smsController.getConversations = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 50,
+      direction = null,
+      messageType = null,
+      phone = null
+    } = req.query;
+
+    const result = await SmsConversation.getRecent({
+      page: parseInt(page),
+      limit: parseInt(limit),
+      direction,
+      messageType,
+      phone
+    });
+
+    res.json({
+      success: true,
+      ...result
+    });
+
+  } catch (error) {
+    console.error('❌ Get Conversations Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error getting conversations'
+    });
+  }
+};
+
+/**
+ * GET /api/sms/conversations/stats
+ * Get conversation stats (inbound vs outbound)
+ */
+smsController.getConversationStats = async (req, res) => {
+  try {
+    const { days = 30 } = req.query;
+    const stats = await SmsConversation.getStats(parseInt(days));
+
+    res.json({
+      success: true,
+      stats
+    });
+
+  } catch (error) {
+    console.error('❌ Get Conversation Stats Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error getting stats'
+    });
+  }
+};
+
+/**
+ * GET /api/sms/conversations/thread/:phone
+ * Get conversation thread for a specific phone number
+ */
+smsController.getConversationThread = async (req, res) => {
+  try {
+    const { phone } = req.params;
+    const { limit = 50 } = req.query;
+
+    // Format phone number
+    const formattedPhone = telnyxService.formatPhoneNumber(phone);
+    if (!formattedPhone) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid phone number'
+      });
+    }
+
+    const messages = await SmsConversation.getThread(formattedPhone, parseInt(limit));
+
+    // Get subscriber info
+    const subscriber = await SmsSubscriber.findOne({ phone: formattedPhone })
+      .select('phone phoneFormatted firstName lastName status discountCode secondDiscountCode converted convertedWith')
+      .lean();
+
+    res.json({
+      success: true,
+      phone: formattedPhone,
+      subscriber,
+      messages,
+      count: messages.length
+    });
+
+  } catch (error) {
+    console.error('❌ Get Conversation Thread Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error getting thread'
     });
   }
 };

@@ -82,18 +82,18 @@ const runSecondChanceJob = async () => {
     console.log('\n📈 Step 3: Getting stats...');
     const stats = await secondChanceSmsService.getSecondChanceStats();
     
-    console.log(`\n╔════════════════════════════════════════════════╗`);
-    console.log(`║              CONVERSION BREAKDOWN              ║`);
-    console.log(`╠════════════════════════════════════════════════╣`);
-    console.log(`║  First SMS (15%):  ${stats.conversions.first.toString().padStart(4)} converted (${stats.rates.firstConversion}%)  ║`);
-    console.log(`║  Second SMS (20%): ${stats.conversions.second.toString().padStart(4)} recovered (${stats.rates.secondConversion}%)  ║`);
-    console.log(`║  No conversion:    ${stats.conversions.none.toString().padStart(4)}                      ║`);
-    console.log(`║  Pending 2nd SMS:  ${stats.secondSms.pending.toString().padStart(4)}                      ║`);
-    console.log(`╠════════════════════════════════════════════════╣`);
-    console.log(`║  Revenue (1st):    $${stats.revenue.first.toFixed(2).padStart(8)}              ║`);
-    console.log(`║  Revenue (2nd):    $${stats.revenue.second.toFixed(2).padStart(8)}              ║`);
-    console.log(`║  Total Revenue:    $${stats.revenue.total.toFixed(2).padStart(8)}              ║`);
-    console.log(`╚════════════════════════════════════════════════╝`);
+    console.log(`\n╔════════════════════════════════════════════════════╗`);
+    console.log(`║              CONVERSION BREAKDOWN                  ║`);
+    console.log(`╠════════════════════════════════════════════════════╣`);
+    console.log(`║  First SMS (15%):     ${stats.conversions.first.toString().padStart(4)} converted (${stats.rates.firstConversion}%)  ║`);
+    console.log(`║  Second SMS (25-30%): ${stats.conversions.second.toString().padStart(4)} recovered (${stats.rates.secondConversion}%)  ║`);
+    console.log(`║  No conversion:       ${stats.conversions.none.toString().padStart(4)}                      ║`);
+    console.log(`║  Pending 2nd SMS:     ${stats.secondSms.pending.toString().padStart(4)}                      ║`);
+    console.log(`╠════════════════════════════════════════════════════╣`);
+    console.log(`║  Revenue (1st):       $${stats.revenue.first.toFixed(2).padStart(8)}              ║`);
+    console.log(`║  Revenue (2nd):       $${stats.revenue.second.toFixed(2).padStart(8)}              ║`);
+    console.log(`║  Total Revenue:       $${stats.revenue.total.toFixed(2).padStart(8)}              ║`);
+    console.log(`╚════════════════════════════════════════════════════╝`);
     
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
     console.log(`\n✅ Job completed in ${duration}s`);
@@ -118,8 +118,8 @@ const init = (schedule = '*/5 * * * *') => {
   console.log(`📱 Initializing Second Chance SMS Job...`);
   console.log(`   Schedule: ${schedule} (every 5 minutes)`);
   console.log(`   Sending hours: 9:00 AM - 9:00 PM (Eastern)`);
-  console.log(`   Delay: 6+ hours after first SMS`);
-  console.log(`   Discount: 20% OFF, expires in 2 hours`);
+  console.log(`   Delay: 6-24 hours after first SMS (strike while hot!)`);
+  console.log(`   Discount: 25-30% OFF (A/B testing), expires in 4 hours`);
   console.log(`   Max per run: ${MAX_PER_RUN}, Batch size: ${BATCH_SIZE}`);
 
   job = cron.schedule(schedule, runSecondChanceJob, {
