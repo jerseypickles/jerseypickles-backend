@@ -334,8 +334,17 @@ const processSubscriberForSecondSms = async (subscriber) => {
 
     console.log(`   📝 Message (${message.length} chars): ${discountPercent}% OFF, expires in ${CONFIG.expirationHours}h`);
 
-    // Send SMS via Telnyx
-    const smsResult = await telnyxService.sendSms(subscriber.phone, message);
+    // Send SMS via Telnyx with logging options
+    const smsResult = await telnyxService.sendSms(subscriber.phone, message, {
+      messageType: 'second_chance',
+      subscriberId: subscriber._id,
+      discountCode: secondCode,
+      discountPercent: discountPercent,
+      metadata: {
+        expiresAt: expiresAt,
+        hoursSinceFirstSms: CONFIG.minHoursSinceFirst
+      }
+    });
 
     // Update subscriber with all the new data
     subscriber.secondSmsSent = true;

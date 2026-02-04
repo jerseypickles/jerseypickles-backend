@@ -271,9 +271,17 @@ const sendOrderConfirmation = async (order) => {
 
     await smsLog.save();
 
-    // Send SMS
+    // Send SMS with logging options
     console.log(`   📤 Sending SMS to ${formattedPhone}...`);
-    const result = await telnyxService.sendSms(formattedPhone, message);
+    const result = await telnyxService.sendSms(formattedPhone, message, {
+      messageType: 'transactional',
+      subscriberId: subscriber?._id,
+      metadata: {
+        triggerType,
+        orderNumber,
+        orderId
+      }
+    });
 
     // Update log
     smsLog.telnyxMessageId = result.messageId;
@@ -389,9 +397,19 @@ const sendShippingNotification = async (order, fulfillment) => {
 
     await smsLog.save();
 
-    // Send SMS
+    // Send SMS with logging options
     console.log(`   📤 Sending shipping SMS to ${formattedPhone}...`);
-    const result = await telnyxService.sendSms(formattedPhone, message);
+    const result = await telnyxService.sendSms(formattedPhone, message, {
+      messageType: 'transactional',
+      subscriberId: subscriber?._id,
+      metadata: {
+        triggerType,
+        orderNumber,
+        orderId,
+        trackingNumber,
+        trackingCompany
+      }
+    });
 
     // Update log
     smsLog.telnyxMessageId = result.messageId;
@@ -491,9 +509,17 @@ const sendDeliveryConfirmation = async (order, fulfillment) => {
 
     await smsLog.save();
 
-    // Send SMS
+    // Send SMS with logging options
     console.log(`   📤 Sending delivery SMS to ${formattedPhone}...`);
-    const result = await telnyxService.sendSms(formattedPhone, message);
+    const result = await telnyxService.sendSms(formattedPhone, message, {
+      messageType: 'transactional',
+      subscriberId: subscriber?._id,
+      metadata: {
+        triggerType,
+        orderNumber,
+        orderId
+      }
+    });
 
     // Update log
     smsLog.telnyxMessageId = result.messageId;
@@ -596,9 +622,18 @@ const sendOrderCancelled = async (order, cancelReason = null) => {
 
     await smsLog.save();
 
-    // Send SMS
+    // Send SMS with logging options
     console.log(`   📤 Sending cancellation SMS to ${formattedPhone}...`);
-    const result = await telnyxService.sendSms(formattedPhone, message);
+    const result = await telnyxService.sendSms(formattedPhone, message, {
+      messageType: 'transactional',
+      subscriberId: subscriber?._id,
+      metadata: {
+        triggerType,
+        orderNumber,
+        orderId,
+        cancelReason: reason
+      }
+    });
 
     // Update log
     smsLog.telnyxMessageId = result.messageId;
@@ -700,9 +735,19 @@ const sendDelayedShipmentNotification = async (order) => {
 
     await smsLog.save();
 
-    // Send SMS
+    // Send SMS with logging options
     console.log(`   📤 Sending delayed shipment SMS to ${formattedPhone}...`);
-    const result = await telnyxService.sendSms(formattedPhone, message);
+    const result = await telnyxService.sendSms(formattedPhone, message, {
+      messageType: 'transactional',
+      subscriberId: subscriber?._id,
+      metadata: {
+        triggerType,
+        orderNumber,
+        orderId,
+        orderCreatedAt: order.created_at,
+        hoursDelayed: Math.round((Date.now() - new Date(order.created_at).getTime()) / (1000 * 60 * 60))
+      }
+    });
 
     // Update log
     smsLog.telnyxMessageId = result.messageId;

@@ -112,7 +112,8 @@ const smsController = {
           const smsResult = await telnyxService.sendWelcomeSms(
             formattedPhone,
             subscriber.discountCode,
-            subscriber.discountPercent
+            subscriber.discountPercent,
+            subscriber._id // Pass subscriber ID for logging
           );
           
           return res.json({
@@ -203,7 +204,8 @@ const smsController = {
       const smsResult = await telnyxService.sendWelcomeSms(
         formattedPhone,
         subscriber.discountCode,
-        subscriber.discountPercent
+        subscriber.discountPercent,
+        subscriber._id // Pass subscriber ID for logging
       );
 
       if (smsResult.success) {
@@ -912,7 +914,8 @@ const smsController = {
       const smsResult = await telnyxService.sendWelcomeSms(
         subscriber.phone,
         subscriber.discountCode,
-        subscriber.discountPercent
+        subscriber.discountPercent,
+        subscriber._id // Pass subscriber ID for logging
       );
 
       if (smsResult.success) {
@@ -1168,11 +1171,9 @@ async function handleInboundSms(webhookData) {
       subscriber.unsubscribeReason = 'stop_keyword';
       await subscriber.save();
       console.log(`🚫 Unsubscribed via SMS STOP: ${fromPhone}`);
-      
+
       try {
-        await telnyxService.sendSms(fromPhone, 
-          'Jersey Pickles: You have been unsubscribed. Reply START to resubscribe.'
-        );
+        await telnyxService.sendStopConfirmation(fromPhone, subscriber._id);
       } catch (e) {
         console.log('⚠️  Could not send opt-out confirmation');
       }
@@ -1182,11 +1183,9 @@ async function handleInboundSms(webhookData) {
       subscriber.unsubscribeReason = null;
       await subscriber.save();
       console.log(`✅ Re-subscribed via SMS START: ${fromPhone}`);
-      
+
       try {
-        await telnyxService.sendSms(fromPhone, 
-          `Jersey Pickles: Welcome back! Your discount code is ${subscriber.discountCode} for 15% off.`
-        );
+        await telnyxService.sendStartConfirmation(fromPhone, subscriber._id);
       } catch (e) {
         console.log('⚠️  Could not send re-subscribe confirmation');
       }

@@ -1,6 +1,19 @@
 // backend/src/services/telnyxService.js
 const axios = require('axios');
 
+// Lazy load SmsConversation to avoid circular dependencies
+let SmsConversation = null;
+const getSmsConversation = () => {
+  if (!SmsConversation) {
+    try {
+      SmsConversation = require('../models/SmsConversation');
+    } catch (e) {
+      console.log('⚠️ SmsConversation model not available for logging');
+    }
+  }
+  return SmsConversation;
+};
+
 class TelnyxService {
   constructor() {
     this.apiKey = process.env.TELNYX_API_KEY;
@@ -25,13 +38,14 @@ class TelnyxService {
    * Send an SMS
    * @param {string} to - Destination number in E.164 format (+1XXXXXXXXXX)
    * @param {string} text - Message content
-   * @param {object} options - Additional options
+   * @param {object} options - Additional options (messageType, subscriberId, discountCode, discountPercent, campaignId, metadata)
    * @returns {object} - Telnyx response
    */
   async sendSms(to, text, options = {}) {
+    const formattedTo = this.formatPhoneNumber(to);
+
     try {
       // Validate number
-      const formattedTo = this.formatPhoneNumber(to);
       if (!formattedTo) {
         throw new Error('Invalid phone number format');
       }
@@ -52,14 +66,14 @@ class TelnyxService {
       }
 
       console.log(`📱 Sending SMS to ${formattedTo}`);
-      
+
       const response = await this.axios.post('/messages', payload);
-      
+
       const data = response.data?.data;
-      
+
       console.log(`✅ SMS queued - ID: ${data?.id}, Status: ${data?.to?.[0]?.status}`);
-      
-      return {
+
+      const result = {
         success: true,
         messageId: data?.id,
         status: data?.to?.[0]?.status || 'queued',
@@ -69,72 +83,149 @@ class TelnyxService {
         parts: data?.parts || 1,
         encoding: data?.encoding
       };
-      
+
+      // 📝 Log outbound message to SmsConversation
+      await this.logOutboundMessage(formattedTo, text, result, options);
+
+      return result;
+
     } catch (error) {
       console.error('❌ Telnyx SMS Error:', error.response?.data || error.message);
-      
-      return {
+
+      const result = {
         success: false,
         error: error.response?.data?.errors?.[0]?.detail || error.message,
         errorCode: error.response?.data?.errors?.[0]?.code
       };
+
+      // 📝 Log failed outbound message too
+      await this.logOutboundMessage(formattedTo || to, text, result, options);
+
+      return result;
+    }
+  }
+
+  /**
+   * Log outbound SMS to SmsConversation for visibility
+   * @private
+   */
+  async logOutboundMessage(to, text, result, options = {}) {
+    try {
+      const Conversation = getSmsConversation();
+      if (!Conversation) return;
+
+      await Conversation.logOutbound({
+        from: this.fromNumber,
+        to: to,
+        message: text,
+        messageId: result.messageId,
+        status: result.success ? (result.status || 'sent') : 'failed',
+        messageType: options.messageType || options.type || 'other',
+        subscriberId: options.subscriberId,
+        campaignId: options.campaignId,
+        discountCode: options.discountCode,
+        discountPercent: options.discountPercent,
+        cost: result.cost,
+        metadata: {
+          ...options.metadata,
+          carrier: result.carrier,
+          lineType: result.lineType,
+          parts: result.parts,
+          error: result.error,
+          errorCode: result.errorCode
+        }
+      });
+
+      console.log(`   📝 Logged outbound SMS to conversation history`);
+    } catch (logError) {
+      // Don't fail the SMS send if logging fails
+      console.error('⚠️ Failed to log outbound SMS:', logError.message);
     }
   }
 
   // ==================== SMS TEMPLATES ====================
-  
+
   /**
    * Send welcome SMS with discount code
+   * @param {string} to - Phone number
+   * @param {string} discountCode - The discount code
+   * @param {number} discountPercent - Discount percentage (default 15)
+   * @param {string} subscriberId - Optional subscriber ID for logging
    */
-  async sendWelcomeSms(to, discountCode, discountPercent = 15) {
+  async sendWelcomeSms(to, discountCode, discountPercent = 15, subscriberId = null) {
     const text = `🥒 Jersey Pickles: Thanks for joining our VIP Text Club! Your exclusive code: ${discountCode} for ${discountPercent}% OFF your order. Shop now: jerseypickles.com - Reply STOP to opt out`;
-    
-    return this.sendSms(to, text, { type: 'welcome' });
+
+    return this.sendSms(to, text, {
+      messageType: 'welcome',
+      subscriberId,
+      discountCode,
+      discountPercent
+    });
   }
 
   /**
    * Send abandoned cart SMS
    */
-  async sendAbandonedCartSms(to, cartValue, discountCode) {
+  async sendAbandonedCartSms(to, cartValue, discountCode, subscriberId = null) {
     const text = `🥒 Jersey Pickles: Your $${cartValue.toFixed(2)} cart is waiting! Use code ${discountCode} to complete your order with a special discount. Shop: jerseypickles.com/cart - Reply STOP to opt out`;
-    
-    return this.sendSms(to, text, { type: 'abandoned_cart' });
+
+    return this.sendSms(to, text, {
+      messageType: 'campaign',
+      subscriberId,
+      discountCode,
+      metadata: { cartValue }
+    });
   }
 
   /**
    * Send promotional SMS
    */
-  async sendPromoSms(to, message) {
+  async sendPromoSms(to, message, subscriberId = null) {
     const text = `🥒 Jersey Pickles: ${message} - Reply STOP to opt out`;
-    
-    return this.sendSms(to, text, { type: 'promo' });
+
+    return this.sendSms(to, text, {
+      messageType: 'campaign',
+      subscriberId
+    });
   }
 
   /**
    * Send order confirmation SMS
    */
-  async sendOrderConfirmationSms(to, orderNumber, orderTotal) {
+  async sendOrderConfirmationSms(to, orderNumber, orderTotal, subscriberId = null) {
     const text = `🥒 Jersey Pickles: Thanks for your order #${orderNumber}! Total: $${orderTotal.toFixed(2)}. We'll notify you when it ships. Questions? Reply to this text! - Reply STOP to opt out`;
-    
-    return this.sendSms(to, text, { type: 'order_update' });
+
+    return this.sendSms(to, text, {
+      messageType: 'transactional',
+      subscriberId,
+      metadata: { orderNumber, orderTotal }
+    });
   }
 
   /**
    * Send shipping notification SMS
    */
-  async sendShippingNotificationSms(to, orderNumber, trackingUrl) {
+  async sendShippingNotificationSms(to, orderNumber, trackingUrl, subscriberId = null) {
     const text = `🥒 Jersey Pickles: Great news! Order #${orderNumber} has shipped! Track it here: ${trackingUrl} - Reply STOP to opt out`;
-    
-    return this.sendSms(to, text, { type: 'order_update' });
+
+    return this.sendSms(to, text, {
+      messageType: 'transactional',
+      subscriberId,
+      metadata: { orderNumber, trackingUrl }
+    });
   }
 
   /**
    * Send back in stock SMS
    */
-  async sendBackInStockSms(to, productName) {
+  async sendBackInStockSms(to, productName, subscriberId = null) {
     const text = `🥒 Jersey Pickles: ${productName} is back in stock! Get yours before it sells out again: jerseypickles.com - Reply STOP to opt out`;
-    
-    return this.sendSms(to, text, { type: 'promo' });
+
+    return this.sendSms(to, text, {
+      messageType: 'campaign',
+      subscriberId,
+      metadata: { productName }
+    });
   }
 
   // ==================== NUMBER VERIFICATION ====================
@@ -370,39 +461,48 @@ class TelnyxService {
   }
 
   // ==================== AUTO RESPONSES ====================
-  
+
   /**
    * Send STOP confirmation (required by 10DLC)
    */
-  async sendStopConfirmation(to) {
+  async sendStopConfirmation(to, subscriberId = null) {
     const text = `Jersey Pickles: You have been unsubscribed and will no longer receive messages from us. Reply START to resubscribe.`;
-    
-    return this.sendSms(to, text, { type: 'system' });
+
+    return this.sendSms(to, text, {
+      messageType: 'opt_out',
+      subscriberId
+    });
   }
 
   /**
    * Send HELP response (required by 10DLC)
    */
-  async sendHelpResponse(to) {
+  async sendHelpResponse(to, subscriberId = null) {
     const text = `Jersey Pickles: For help, contact support@jerseypickles.com or call (551) 400-9394. Msg&data rates may apply. Reply STOP to opt out.`;
-    
-    return this.sendSms(to, text, { type: 'system' });
+
+    return this.sendSms(to, text, {
+      messageType: 'help',
+      subscriberId
+    });
   }
 
   /**
    * Send START confirmation (resubscribe)
    */
-  async sendStartConfirmation(to) {
+  async sendStartConfirmation(to, subscriberId = null) {
     const text = `🥒 Jersey Pickles: Welcome back! You're now subscribed to our VIP Text Club. Reply STOP to opt out anytime.`;
 
-    return this.sendSms(to, text, { type: 'system' });
+    return this.sendSms(to, text, {
+      messageType: 'opt_in',
+      subscriberId
+    });
   }
 
   /**
    * Send feedback request before unsubscribing (two-step STOP)
    * First STOP triggers this, second STOP confirms unsubscribe
    */
-  async sendUnsubscribeFeedbackRequest(to) {
+  async sendUnsubscribeFeedbackRequest(to, subscriberId = null) {
     const text = `Jersey Pickles: Before you go, we'd love your feedback! What could we improve?\n\n` +
       `Reply:\n` +
       `1 - Too many texts\n` +
@@ -411,7 +511,11 @@ class TelnyxService {
       `4 - Other\n\n` +
       `Or reply STOP again to unsubscribe immediately.`;
 
-    return this.sendSms(to, text, { type: 'system' });
+    return this.sendSms(to, text, {
+      messageType: 'other',
+      subscriberId,
+      metadata: { type: 'unsubscribe_feedback_request' }
+    });
   }
 
   // ==================== HEALTH CHECK ====================
