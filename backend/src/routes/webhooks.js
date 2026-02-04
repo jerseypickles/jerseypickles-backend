@@ -766,7 +766,7 @@ async function handleInboundSms(webhookData) {
 
       } else if (subscriber.status === 'unsubscribed') {
         // Re-subscribe from unsubscribed state
-        subscriber.status = 'subscribed';
+        subscriber.status = 'active';
         subscriber.subscribedAt = new Date(); // Nueva fecha de suscripción
         // Limpiar datos de unsubscribe anteriores
         subscriber.unsubscribedAt = null;

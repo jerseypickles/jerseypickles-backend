@@ -987,7 +987,7 @@ smsSubscriberSchema.methods.recordUnsubscribe = async function(data = {}) {
 
   // Count SMS received before unsubscribe
   let smsCount = 0;
-  if (this.firstSmsStatus === 'delivered') smsCount++;
+  if (this.welcomeSmsStatus === 'delivered') smsCount++;
   if (this.secondSmsStatus === 'delivered') smsCount++;
   this.smsCountBeforeUnsub = smsCount;
 
@@ -996,7 +996,7 @@ smsSubscriberSchema.methods.recordUnsubscribe = async function(data = {}) {
     this.unsubscribeAfterSms = data.afterSms;
   } else if (this.secondSmsSent && this.secondSmsStatus === 'delivered') {
     this.unsubscribeAfterSms = 'second_chance';
-  } else if (this.firstSmsStatus === 'delivered') {
+  } else if (this.welcomeSmsStatus === 'delivered') {
     this.unsubscribeAfterSms = 'welcome';
   } else {
     this.unsubscribeAfterSms = 'none';
