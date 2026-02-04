@@ -1256,8 +1256,8 @@ async function updateSmsStatus(webhookData) {
 }
 
 /**
- * Maneja SMS entrantes (STOP, START, HELP, feedback)
- * Sistema two-step STOP con feedback opcional
+ * Maneja SMS entrantes (STOP, START, HELP)
+ * STOP = unsubscribe inmediato (Telnyx bloquea mensajes después de STOP)
  */
 async function handleInboundSms(webhookData) {
   try {
@@ -1286,127 +1286,37 @@ async function handleInboundSms(webhookData) {
     }
 
     const text = (webhookData.text || '').toLowerCase().trim();
-    const optOutKeywords = ['stop', 'unsubscribe', 'cancel', 'quit', 'end', 'para', 'parar', 'baja'];
+    const optOutKeywords = ['stop', 'unsubscribe', 'cancel', 'quit', 'end'];
     const optInKeywords = ['start', 'yes', 'unstop', 'subscribe'];
 
-    // Respuestas de feedback (1, 2, 3, 4)
-    const feedbackResponses = {
-      '1': 'too_many_texts',
-      '2': 'not_interested',
-      '3': 'prices_high',
-      '4': 'other'
-    };
-
     // Verificar si es opt-out
-    const isOptOut = optOutKeywords.some(kw => text.startsWith(kw) || text === kw);
-    const isFeedbackResponse = feedbackResponses[text] && subscriber.pendingUnsubscribe;
+    const isOptOut = optOutKeywords.some(kw => text === kw || text.startsWith(kw + ' '));
 
-    if (isFeedbackResponse) {
-      // ==================== FEEDBACK RESPONSE - COMPLETE UNSUBSCRIBE ====================
-      const detectedReason = feedbackResponses[text];
+    if (isOptOut) {
+      // ==================== STOP - UNSUBSCRIBE INMEDIATO ====================
+      const keywordUsed = optOutKeywords.find(kw => text === kw || text.startsWith(kw + ' ')) || 'stop';
 
-      // Clear pending state
-      subscriber.pendingUnsubscribe = false;
-      subscriber.pendingUnsubscribeAt = null;
-      subscriber.pendingUnsubscribeExpires = null;
+      console.log(`🚫 STOP received - unsubscribing: ${fromPhone}`);
 
-      // Record unsubscribe with feedback
+      // Record unsubscribe with analytics
       await subscriber.recordUnsubscribe({
         source: 'reply_stop',
-        reason: detectedReason,
-        keyword: 'STOP',
-        feedback: `Feedback option: ${text} (${detectedReason})`
+        reason: 'stop_keyword',
+        keyword: keywordUsed.toUpperCase()
       });
 
-      console.log(`🚫 Unsubscribed via SMS with feedback: ${fromPhone}`);
-      console.log(`   Feedback option: ${text} → ${detectedReason}`);
+      console.log(`   Keyword: ${keywordUsed.toUpperCase()}`);
+      console.log(`   After SMS: ${subscriber.unsubscribeAfterSms}`);
+      console.log(`   SMS count: ${subscriber.smsCountBeforeUnsub}`);
+      console.log(`   Time subscribed: ${subscriber.timeToUnsubscribe} minutes`);
 
-      // Send confirmation
-      try {
-        await telnyxService.sendStopConfirmation(fromPhone, subscriber._id);
-      } catch (e) {
-        console.log('Could not send STOP confirmation:', e.message);
-      }
+      // Nota: Telnyx maneja automáticamente la confirmación de STOP
+      // No podemos enviar mensajes después de que el usuario envía STOP
 
-    } else if (isOptOut) {
-      const keywordUsed = optOutKeywords.find(kw => text.startsWith(kw) || text === kw) || 'stop';
+    } else if (optInKeywords.some(kw => text === kw || text.startsWith(kw + ' '))) {
+      // ==================== START - RE-SUBSCRIBE ====================
 
-      // ==================== CHECK IF PENDING UNSUBSCRIBE (SECOND STOP) ====================
-      if (subscriber.pendingUnsubscribe) {
-        // Second STOP - confirm unsubscribe immediately
-        console.log(`🚫 Second STOP received - confirming unsubscribe: ${fromPhone}`);
-
-        subscriber.pendingUnsubscribe = false;
-        subscriber.pendingUnsubscribeAt = null;
-        subscriber.pendingUnsubscribeExpires = null;
-
-        await subscriber.recordUnsubscribe({
-          source: 'reply_stop',
-          reason: 'stop_keyword',
-          keyword: keywordUsed.toUpperCase(),
-          feedback: 'Confirmed via second STOP (skipped feedback)'
-        });
-
-        console.log(`   Keyword: ${keywordUsed.toUpperCase()}`);
-        console.log(`   SMS count before unsub: ${subscriber.smsCountBeforeUnsub}`);
-
-        try {
-          await telnyxService.sendStopConfirmation(fromPhone, subscriber._id);
-        } catch (e) {
-          console.log('Could not send STOP confirmation:', e.message);
-        }
-
-      } else {
-        // ==================== FIRST STOP - REQUEST FEEDBACK ====================
-        console.log(`⏳ First STOP received - requesting feedback: ${fromPhone}`);
-
-        subscriber.pendingUnsubscribe = true;
-        subscriber.pendingUnsubscribeAt = new Date();
-        subscriber.pendingUnsubscribeExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-        await subscriber.save();
-
-        console.log(`   Pending unsubscribe set, expires: ${subscriber.pendingUnsubscribeExpires}`);
-
-        try {
-          await telnyxService.sendUnsubscribeFeedbackRequest(fromPhone, subscriber._id);
-          console.log(`   📤 Feedback request sent`);
-        } catch (e) {
-          console.log('Could not send feedback request:', e.message);
-          // If we can't send the feedback request, unsubscribe immediately
-          await subscriber.recordUnsubscribe({
-            source: 'reply_stop',
-            reason: 'stop_keyword',
-            keyword: keywordUsed.toUpperCase(),
-            feedback: null
-          });
-          try {
-            await telnyxService.sendStopConfirmation(fromPhone, subscriber._id);
-          } catch (e2) {
-            console.log('Could not send STOP confirmation:', e2.message);
-          }
-        }
-      }
-
-    } else if (optInKeywords.some(kw => text === kw || text.startsWith(kw))) {
-      // ==================== OPT-IN (START) ====================
-
-      // If pending unsubscribe, cancel it
-      if (subscriber.pendingUnsubscribe) {
-        subscriber.pendingUnsubscribe = false;
-        subscriber.pendingUnsubscribeAt = null;
-        subscriber.pendingUnsubscribeExpires = null;
-        await subscriber.save();
-        console.log(`✅ Pending unsubscribe cancelled via START: ${fromPhone}`);
-
-        try {
-          const confirmText = `🥒 Jersey Pickles: Great! You'll continue receiving our exclusive deals and updates. Reply STOP anytime to opt out.`;
-          await telnyxService.sendSms(fromPhone, confirmText, { messageType: 'system', subscriberId: subscriber._id });
-        } catch (e) {
-          console.log('Could not send cancel confirmation:', e.message);
-        }
-
-      } else if (subscriber.status === 'unsubscribed') {
-        // Re-subscribe from unsubscribed state
+      if (subscriber.status === 'unsubscribed') {
         subscriber.status = 'active';
         subscriber.subscribedAt = new Date();
         // Clear unsubscribe data
@@ -1427,6 +1337,8 @@ async function handleInboundSms(webhookData) {
         } catch (e) {
           console.log('Could not send START confirmation:', e.message);
         }
+      } else {
+        console.log(`📨 START from already active subscriber: ${fromPhone}`);
       }
 
     } else if (text === 'help' || text === 'info' || text === 'ayuda') {
