@@ -81,6 +81,56 @@ const smsCampaignController = {
     }
   },
   
+  // ==================== AUDIENCE COUNT (without campaign) ====================
+
+  /**
+   * GET /api/sms/campaigns/audience-count?audienceType=all_delivered&targetCountry=US
+   * Get eligible subscriber count for given filters (used by campaign editor before saving)
+   */
+  async audienceCount(req, res) {
+    try {
+      const { audienceType = 'all_delivered', targetCountry = 'all' } = req.query;
+
+      const baseQuery = {
+        status: 'active',
+        welcomeSmsSent: true,
+        welcomeSmsStatus: 'delivered'
+      };
+
+      // Country filter
+      if (targetCountry && targetCountry !== 'all') {
+        baseQuery['location.countryCode'] = targetCountry;
+      }
+
+      // Audience type filter
+      switch (audienceType) {
+        case 'not_converted':
+          baseQuery.converted = false;
+          break;
+        case 'converted':
+          baseQuery.converted = true;
+          break;
+        case 'recent_7d':
+          baseQuery.createdAt = { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) };
+          break;
+        case 'recent_30d':
+          baseQuery.createdAt = { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) };
+          break;
+        case 'inactive_30d':
+          baseQuery.lastEngagedAt = { $lt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) };
+          break;
+        // 'all_delivered' uses baseQuery as-is
+      }
+
+      const count = await SmsSubscriber.countDocuments(baseQuery);
+
+      res.json({ success: true, count, audienceType, targetCountry });
+    } catch (error) {
+      console.error('❌ Audience Count Error:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
   // ==================== GET CAMPAIGNS ====================
   
   /**

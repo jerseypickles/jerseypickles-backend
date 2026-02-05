@@ -26,6 +26,9 @@ const optionalProtect = (req, res, next) => {
 // Get overall stats (must be before /:id routes)
 router.get('/stats/overview', optionalProtect, smsCampaignController.getOverview);
 
+// Get audience count by filters (must be before /:id routes)
+router.get('/audience-count', optionalProtect, smsCampaignController.audienceCount);
+
 // List campaigns
 router.get('/', optionalProtect, smsCampaignController.list);
 
