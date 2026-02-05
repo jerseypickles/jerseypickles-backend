@@ -1248,6 +1248,42 @@ async function updateSmsStatus(webhookData) {
 
       await subscriber.save();
       console.log(`   ✅ Updated second SMS status: ${subscriber.phone} -> ${webhookData.status}`);
+      return;
+    }
+
+    // 4. Update SmsMessage (campaign messages)
+    try {
+      const SmsMessage = require('../models/SmsMessage');
+      const SmsCampaign = require('../models/SmsCampaign');
+
+      const campaignMessage = await SmsMessage.findOne({
+        messageId: webhookData.messageId
+      });
+
+      if (campaignMessage) {
+        // Update message status
+        await campaignMessage.updateFromWebhook(webhookData);
+
+        // Update campaign stats based on status
+        if (webhookData.status === 'delivered') {
+          await SmsCampaign.findByIdAndUpdate(campaignMessage.campaign, {
+            $inc: { 'stats.delivered': 1 }
+          });
+          console.log(`   ✅ Campaign SMS delivered: ${campaignMessage.phone}`);
+        } else if (webhookData.status === 'failed' || webhookData.status === 'undelivered') {
+          // Don't double-count fails - only increment if not already failed
+          if (campaignMessage.status !== 'failed') {
+            await SmsCampaign.findByIdAndUpdate(campaignMessage.campaign, {
+              $inc: { 'stats.failed': 1 }
+            });
+          }
+          console.log(`   ❌ Campaign SMS failed: ${campaignMessage.phone}`);
+        }
+        return;
+      }
+    } catch (e) {
+      // SmsMessage model might not exist or other error
+      console.log(`   ⚠️ Campaign message check skipped: ${e.message}`);
     }
 
   } catch (error) {
