@@ -34,10 +34,24 @@ const smsCampaignConversionService = {
         
         // ========== 1. Check for Campaign Discount Code ==========
         // Campaign codes might be different format (not JP-XXXXX)
-        const campaign = await SmsCampaign.findOne({
+        // Search by explicit discountCode field OR by code appearing in message text
+        let campaign = await SmsCampaign.findOne({
           discountCode: code,
-          status: 'sent'
+          status: { $in: ['sent', 'sending'] }  // Include 'sending' campaigns
         });
+
+        // Fallback: search for the code in the message text
+        // This handles cases where discountCode field wasn't set but code is in message
+        if (!campaign) {
+          campaign = await SmsCampaign.findOne({
+            message: { $regex: code, $options: 'i' },  // Case-insensitive search
+            status: { $in: ['sent', 'sending'] }
+          });
+
+          if (campaign) {
+            console.log(`📱 Found campaign by message text match: ${campaign.name}`);
+          }
+        }
         
         if (campaign) {
           // Find the message sent to this customer

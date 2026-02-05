@@ -67,6 +67,12 @@ router.get('/:id/stats', optionalProtect, smsCampaignController.getStats);
 // Get campaign click stats
 router.get('/:id/clicks', optionalProtect, smsCampaignController.getClickStats);
 
+// Set/update discount code for conversion tracking
+router.put('/:id/discount-code', optionalProtect, smsCampaignController.setDiscountCode);
+
+// Reprocess conversions from existing orders
+router.post('/:id/reprocess-conversions', optionalProtect, smsCampaignController.reprocessConversions);
+
 // ==================== TRACKING (PUBLIC) ====================
 
 // Track click (no auth - accessed from SMS links)

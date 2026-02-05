@@ -12,6 +12,15 @@ const crypto = require('crypto');
 // SMS Conversion Service
 const smsConversionService = require('../services/smsConversionService');
 
+// SMS Campaign Conversion Service (for campaign discount codes like BOWL20)
+let smsCampaignConversionService = null;
+try {
+  smsCampaignConversionService = require('../services/smsCampaignConversionService');
+  console.log('✅ SMS Campaign Conversion Service loaded');
+} catch (err) {
+  console.log('⚠️ SMS Campaign Conversion Service not available:', err.message);
+}
+
 // SMS Transactional Service (Order Confirmation, Shipping, Delivery)
 let smsTransactionalService = null;
 try {
@@ -421,8 +430,37 @@ class WebhooksController {
               success: true
             });
           } else {
-            console.log(`   ℹ️  No SMS codes found: ${conversionResult.reason || 'N/A'}`);
+            console.log(`   ℹ️  No SMS subscriber codes found: ${conversionResult.reason || 'N/A'}`);
           }
+
+          // ==================== SMS CAMPAIGN CONVERSION CHECK ====================
+          // Check for campaign-specific codes (e.g., BOWL20, HOLIDAY25, etc.)
+          if (smsCampaignConversionService) {
+            try {
+              const campaignResult = await smsCampaignConversionService.processOrderConversion(shopifyOrder);
+
+              if (campaignResult.campaignConversion) {
+                console.log(`   📢 CAMPAIGN CONVERSION DETECTED!`);
+                campaignResult.details.forEach(d => {
+                  if (d.type === 'campaign') {
+                    console.log(`   📱 Campaign: ${d.campaignName}`);
+                    console.log(`   🏷️  Code: ${d.discountCode}`);
+                    console.log(`   💵 Revenue: $${d.revenue}`);
+                  }
+                });
+
+                actions.push({
+                  type: 'sms_campaign_conversion',
+                  details: campaignResult.details,
+                  success: true
+                });
+              }
+            } catch (campaignError) {
+              console.log(`   ⚠️  Campaign conversion check skipped: ${campaignError.message}`);
+            }
+          }
+          // ==================== END CAMPAIGN CONVERSION CHECK ====================
+
           console.log(`   ------------------------------------\n`);
         }
       } catch (smsError) {

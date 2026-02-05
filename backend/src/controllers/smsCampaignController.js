@@ -698,29 +698,237 @@ const smsCampaignController = {
   async getOverview(req, res) {
     try {
       const { days = 30 } = req.query;
-      
+
       const summary = await SmsCampaign.getStatsSummary(parseInt(days));
-      
+
       // Get campaign counts by status
       const statusCounts = await SmsCampaign.aggregate([
         { $group: { _id: '$status', count: { $sum: 1 } } }
       ]);
-      
+
       const byStatus = {};
       statusCounts.forEach(s => { byStatus[s._id] = s.count; });
-      
+
       res.json({
         success: true,
         summary,
         byStatus,
         period: `${days} days`
       });
-      
+
     } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // ==================== SET DISCOUNT CODE ====================
+
+  /**
+   * PUT /api/sms/campaigns/:id/discount-code
+   * Set/update discount code for tracking conversions (works on any status)
+   * This extracts the discount code from message if not provided
+   */
+  async setDiscountCode(req, res) {
+    try {
+      const campaign = await SmsCampaign.findById(req.params.id);
+
+      if (!campaign) {
+        return res.status(404).json({
+          success: false,
+          error: 'Campaign not found'
+        });
+      }
+
+      let { discountCode, discountPercent } = req.body;
+
+      // If no discountCode provided, try to extract from message
+      if (!discountCode && campaign.message) {
+        // Common patterns: "Use CODE for", "code: CODE", "CODE for X% off"
+        const patterns = [
+          /(?:use|code:?|with)\s+([A-Z0-9_-]{3,20})\s+(?:for|to get)/i,
+          /([A-Z0-9_-]{3,20})\s+(?:for|to get)\s+\d+%/i,
+          /code[:\s]+([A-Z0-9_-]{3,20})/i
+        ];
+
+        for (const pattern of patterns) {
+          const match = campaign.message.match(pattern);
+          if (match) {
+            discountCode = match[1].toUpperCase();
+            console.log(`📱 Extracted discount code from message: ${discountCode}`);
+            break;
+          }
+        }
+      }
+
+      if (!discountCode) {
+        return res.status(400).json({
+          success: false,
+          error: 'Could not extract discount code from message. Please provide discountCode in request body.'
+        });
+      }
+
+      // Update campaign
+      campaign.discountCode = discountCode.toUpperCase();
+      if (discountPercent !== undefined) {
+        campaign.discountPercent = discountPercent;
+      }
+
+      await campaign.save();
+
+      console.log(`📱 Campaign ${campaign.name} discount code set to: ${campaign.discountCode}`);
+
+      res.json({
+        success: true,
+        message: `Discount code set to ${campaign.discountCode}`,
+        campaign: {
+          _id: campaign._id,
+          name: campaign.name,
+          discountCode: campaign.discountCode,
+          discountPercent: campaign.discountPercent,
+          status: campaign.status
+        }
+      });
+
+    } catch (error) {
+      console.error('❌ Set Discount Code Error:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // ==================== REPROCESS CONVERSIONS ====================
+
+  /**
+   * POST /api/sms/campaigns/:id/reprocess-conversions
+   * Re-scan Shopify orders to find conversions for this campaign's discount code
+   */
+  async reprocessConversions(req, res) {
+    try {
+      const campaign = await SmsCampaign.findById(req.params.id);
+
+      if (!campaign) {
+        return res.status(404).json({
+          success: false,
+          error: 'Campaign not found'
+        });
+      }
+
+      if (!campaign.discountCode) {
+        return res.status(400).json({
+          success: false,
+          error: 'Campaign has no discount code set. Use PUT /discount-code first.'
+        });
+      }
+
+      const { days = 7 } = req.query;
+      const Order = require('../models/Order');
+
+      // Find orders that used this discount code
+      const startDate = new Date(Date.now() - parseInt(days) * 24 * 60 * 60 * 1000);
+
+      const orders = await Order.find({
+        createdAt: { $gte: startDate },
+        'shopifyData.discount_codes.code': { $regex: new RegExp(`^${campaign.discountCode}$`, 'i') }
+      }).lean();
+
+      console.log(`📱 Found ${orders.length} orders with code ${campaign.discountCode} in last ${days} days`);
+
+      let conversionsTracked = 0;
+      let alreadyTracked = 0;
+      let totalRevenue = 0;
+
+      for (const order of orders) {
+        // Check if already converted in SmsMessage
+        const existingMessage = await SmsMessage.findOne({
+          campaign: campaign._id,
+          converted: true,
+          'conversionData.orderId': order.shopifyOrderId?.toString() || order.shopifyData?.id?.toString()
+        });
+
+        if (existingMessage) {
+          alreadyTracked++;
+          continue;
+        }
+
+        // Find the subscriber who received this campaign
+        const customerPhone = formatPhoneForConversion(
+          order.shopifyData?.phone ||
+          order.shopifyData?.customer?.phone ||
+          order.shopifyData?.shipping_address?.phone ||
+          order.shopifyData?.billing_address?.phone
+        );
+
+        if (!customerPhone) continue;
+
+        const message = await SmsMessage.findOne({
+          campaign: campaign._id,
+          phone: customerPhone,
+          converted: false
+        });
+
+        if (message) {
+          const orderTotal = parseFloat(order.total || order.shopifyData?.total_price || 0);
+          const discountAmount = order.shopifyData?.discount_codes?.find(
+            d => d.code?.toUpperCase() === campaign.discountCode
+          )?.amount || 0;
+
+          await message.recordConversion({
+            orderId: order.shopifyOrderId?.toString() || order.shopifyData?.id?.toString(),
+            orderNumber: order.orderNumber || order.shopifyData?.order_number,
+            orderTotal: orderTotal,
+            discountAmount: parseFloat(discountAmount)
+          });
+
+          conversionsTracked++;
+          totalRevenue += orderTotal;
+
+          console.log(`   ✅ Tracked conversion: Order #${order.orderNumber} - $${orderTotal}`);
+        }
+      }
+
+      // Update campaign stats
+      campaign.updateRates();
+      await campaign.save();
+
+      res.json({
+        success: true,
+        message: `Reprocessed conversions for ${campaign.name}`,
+        results: {
+          ordersFound: orders.length,
+          newConversions: conversionsTracked,
+          alreadyTracked: alreadyTracked,
+          totalRevenue: totalRevenue.toFixed(2),
+          daysScanned: parseInt(days)
+        },
+        campaignStats: campaign.stats
+      });
+
+    } catch (error) {
+      console.error('❌ Reprocess Conversions Error:', error);
       res.status(500).json({ success: false, error: error.message });
     }
   }
 };
+
+// Helper function for phone formatting
+function formatPhoneForConversion(phone) {
+  if (!phone) return null;
+
+  let cleaned = phone.toString().replace(/\D/g, '');
+
+  if (cleaned.startsWith('1') && cleaned.length === 11) {
+    return '+' + cleaned;
+  }
+
+  if (cleaned.length === 10) {
+    return '+1' + cleaned;
+  }
+
+  if (cleaned.startsWith('+')) {
+    return cleaned;
+  }
+
+  return null;
+}
 
 // ==================== BACKGROUND QUEUE PROCESSOR ====================
 
