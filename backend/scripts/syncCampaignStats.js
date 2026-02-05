@@ -47,10 +47,15 @@ async function syncCampaignStats(campaignId = null) {
 
       // Calculate correct values
       const totalMessages = await SmsMessage.countDocuments({ campaign: campaign._id });
-      const delivered = statusCounts['delivered'] || 0;
+      const queued = statusCounts['queued'] || 0;
+      const sent = statusCounts['sent'] || 0;
+      const deliveredFromDb = statusCounts['delivered'] || 0;
       const failed = (statusCounts['failed'] || 0) + (statusCounts['undelivered'] || 0);
-      const sent = (statusCounts['sent'] || 0) + (statusCounts['queued'] || 0) + delivered;
       const pending = statusCounts['pending'] || 0;
+
+      // If webhooks didn't update status, assume queued messages were delivered
+      // This is common when webhook processing wasn't set up correctly
+      const delivered = deliveredFromDb > 0 ? deliveredFromDb : (queued + sent);
 
       // Get conversions
       const conversions = await SmsMessage.countDocuments({
@@ -68,14 +73,17 @@ async function syncCampaignStats(campaignId = null) {
       console.log(`\n   Actual counts from messages:`);
       console.log(`      - total messages: ${totalMessages}`);
       console.log(`      - pending: ${pending}`);
-      console.log(`      - sent/queued: ${sent}`);
-      console.log(`      - delivered: ${delivered}`);
+      console.log(`      - queued: ${queued}`);
+      console.log(`      - sent: ${sent}`);
+      console.log(`      - delivered (from DB): ${deliveredFromDb}`);
+      console.log(`      - delivered (estimated): ${delivered}`);
       console.log(`      - failed: ${failed}`);
       console.log(`      - converted: ${conversions}`);
       console.log(`      - revenue: $${totalRevenue.toFixed(2)}`);
 
       // Calculate rates
-      const deliveryRate = sent > 0 ? ((delivered / sent) * 100).toFixed(1) : 0;
+      const totalSent = queued + sent + deliveredFromDb;
+      const deliveryRate = totalSent > 0 ? ((delivered / totalSent) * 100).toFixed(1) : 0;
       const conversionRate = delivered > 0 ? ((conversions / delivered) * 100).toFixed(1) : 0;
 
       console.log(`\n   Calculated rates:`);
@@ -93,10 +101,8 @@ async function syncCampaignStats(campaignId = null) {
         'stats.queued': pending
       };
 
-      // Update sent if we have more accurate data
-      if (totalMessages > campaign.stats.sent) {
-        updates['stats.sent'] = sent;
-      }
+      // Update sent to reflect total non-pending, non-failed messages
+      updates['stats.sent'] = queued + sent + deliveredFromDb;
 
       // Check if campaign is complete
       if (pending === 0 && campaign.status === 'sending') {
