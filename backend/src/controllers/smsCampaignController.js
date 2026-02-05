@@ -23,6 +23,7 @@ const smsCampaignController = {
         discountCode,
         discountPercent,
         audienceType,
+        targetCountry,
         customFilter,
         scheduledAt,
         tags
@@ -51,6 +52,7 @@ const smsCampaignController = {
         discountCode: discountCode?.toUpperCase(),
         discountPercent,
         audienceType: audienceType || 'all_delivered',
+        targetCountry: targetCountry || 'all',
         customFilter,
         scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
         status: scheduledAt ? 'scheduled' : 'draft',
@@ -191,7 +193,7 @@ const smsCampaignController = {
       
       const allowedUpdates = [
         'name', 'description', 'message', 'discountCode', 'discountPercent',
-        'audienceType', 'customFilter', 'scheduledAt', 'tags', 'excludedSubscribers'
+        'audienceType', 'targetCountry', 'customFilter', 'scheduledAt', 'tags', 'excludedSubscribers'
       ];
       
       allowedUpdates.forEach(field => {

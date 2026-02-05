@@ -88,6 +88,13 @@ const smsCampaignSchema = new mongoose.Schema({
     default: 'all_delivered'
   },
   
+  // Target country: 'all', 'US', 'CA'
+  targetCountry: {
+    type: String,
+    enum: ['all', 'US', 'CA'],
+    default: 'all'
+  },
+
   // Custom audience filter (MongoDB query)
   customFilter: {
     type: mongoose.Schema.Types.Mixed
@@ -197,38 +204,43 @@ smsCampaignSchema.methods.buildAudienceQuery = function() {
     welcomeSmsStatus: 'delivered',
     _id: { $nin: this.excludedSubscribers || [] }
   };
-  
+
+  // Apply country filter
+  if (this.targetCountry && this.targetCountry !== 'all') {
+    baseQuery['location.countryCode'] = this.targetCountry;
+  }
+
   switch (this.audienceType) {
     case 'all_delivered':
       return baseQuery;
-      
+
     case 'not_converted':
       return { ...baseQuery, converted: false };
-      
+
     case 'converted':
       return { ...baseQuery, converted: true };
-      
+
     case 'recent_7d':
       return {
         ...baseQuery,
         createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }
       };
-      
+
     case 'recent_30d':
       return {
         ...baseQuery,
         createdAt: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }
       };
-      
+
     case 'inactive_30d':
       return {
         ...baseQuery,
         lastEngagedAt: { $lt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }
       };
-      
+
     case 'custom':
       return { ...baseQuery, ...(this.customFilter || {}) };
-      
+
     default:
       return baseQuery;
   }
