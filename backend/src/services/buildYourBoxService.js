@@ -3,6 +3,7 @@
 // Enhanced with Opportunity Dashboard metrics and Funnel Tracking
 
 const BybFunnelEvent = require('../models/BybFunnelEvent');
+const BybReportSnapshot = require('../models/BybReportSnapshot');
 const shopifyService = require('./shopifyService');
 
 class BuildYourBoxService {
@@ -41,10 +42,108 @@ class BuildYourBoxService {
     this.ordersCache = new Map();
     this.inFlightOrders = new Map();
     this.ordersCacheTtlMs = 5 * 60 * 1000; // 5 min
+
+    // Config para reportes BYB pesados
+    this.defaultAnalyticsDays = 60;
+    this.maxAnalyticsDays = 60;
+    this.snapshotRefreshDays = 10;
+    this.snapshotInFlight = new Map();
   }
 
-  getDateRange(days = 90) {
-    const normalizedDays = Number.isFinite(days) ? days : 90;
+  normalizeAnalyticsDays(days, fallback = this.defaultAnalyticsDays) {
+    const parsed = parseInt(days, 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    if (parsed === 0) return 0;
+    if (parsed < 0) return fallback;
+    return Math.min(parsed, this.maxAnalyticsDays);
+  }
+
+  getSnapshotKey(reportType, periodDays) {
+    return `${reportType}:${periodDays}`;
+  }
+
+  getSnapshotValidity(generatedAt = new Date()) {
+    const validUntil = new Date(generatedAt);
+    validUntil.setDate(validUntil.getDate() + this.snapshotRefreshDays);
+    return validUntil;
+  }
+
+  async loadFreshSnapshot(reportType, periodDays) {
+    try {
+      return await BybReportSnapshot.findOne({
+        reportType,
+        periodDays,
+        validUntil: { $gt: new Date() }
+      }).sort({ generatedAt: -1 }).lean();
+    } catch (error) {
+      console.error('⚠️ BYB snapshot read error, using live calc:', error.message);
+      return null;
+    }
+  }
+
+  async saveSnapshot(reportType, periodDays, payload, metadata = {}) {
+    try {
+      const generatedAt = new Date();
+      const validUntil = this.getSnapshotValidity(generatedAt);
+      const snapshotKey = this.getSnapshotKey(reportType, periodDays);
+
+      const snapshot = await BybReportSnapshot.findOneAndUpdate(
+        { snapshotKey },
+        {
+          snapshotKey,
+          reportType,
+          periodDays,
+          generatedAt,
+          validUntil,
+          metadata,
+          payload
+        },
+        {
+          upsert: true,
+          new: true,
+          setDefaultsOnInsert: true
+        }
+      ).lean();
+
+      return snapshot;
+    } catch (error) {
+      console.error('⚠️ BYB snapshot save error, continuing without snapshot:', error.message);
+      return null;
+    }
+  }
+
+  async getOrBuildSnapshot(reportType, days, builder) {
+    const normalizedDays = this.normalizeAnalyticsDays(days);
+    const freshSnapshot = await this.loadFreshSnapshot(reportType, normalizedDays);
+    if (freshSnapshot?.payload) {
+      return freshSnapshot.payload;
+    }
+
+    const inFlightKey = this.getSnapshotKey(reportType, normalizedDays);
+    if (this.snapshotInFlight.has(inFlightKey)) {
+      return this.snapshotInFlight.get(inFlightKey);
+    }
+
+    const buildPromise = (async () => {
+      const payload = await builder(normalizedDays);
+      await this.saveSnapshot(reportType, normalizedDays, payload, {
+        source: 'shopify_orders',
+        generatedAt: new Date().toISOString()
+      });
+      return payload;
+    })();
+
+    this.snapshotInFlight.set(inFlightKey, buildPromise);
+
+    try {
+      return await buildPromise;
+    } finally {
+      this.snapshotInFlight.delete(inFlightKey);
+    }
+  }
+
+  getDateRange(days = this.defaultAnalyticsDays) {
+    const normalizedDays = this.normalizeAnalyticsDays(days, this.defaultAnalyticsDays);
     const endDate = new Date();
     let startDate = null;
 
@@ -342,8 +441,9 @@ class BuildYourBoxService {
     }
   }
 
-  async getBybOrders(days = 90) {
-    const { startDate } = this.getDateRange(days);
+  async getBybOrders(days = this.defaultAnalyticsDays) {
+    const normalizedDays = this.normalizeAnalyticsDays(days, this.defaultAnalyticsDays);
+    const { startDate } = this.getDateRange(normalizedDays);
     return this.fetchBybOrdersFromShopify(startDate, null);
   }
 
@@ -355,9 +455,15 @@ class BuildYourBoxService {
    * Obtener estadísticas de demanda (enhanced with revenue metrics)
    * @param {number} days - Días hacia atrás (0 = desde hoy en adelante, null = todos)
    */
-  async getDemandStats(days = 90) {
-    const orders = await this.getBybOrders(days);
-    console.log(`📦 BYB Shopify orders: ${orders.length} in period days=${days}`);
+  async getDemandStats(days = this.defaultAnalyticsDays, preloadedOrders = null) {
+    const normalizedDays = this.normalizeAnalyticsDays(days, this.defaultAnalyticsDays);
+    const { startDate } = this.getDateRange(normalizedDays);
+    const sourceOrders = Array.isArray(preloadedOrders) ? preloadedOrders : await this.getBybOrders(normalizedDays);
+    const orders = startDate
+      ? sourceOrders.filter((order) => order.orderDate >= startDate)
+      : sourceOrders;
+
+    console.log(`📦 BYB Shopify orders: ${orders.length} in period days=${normalizedDays}`);
 
     // Agregados
     const productStats = {};
@@ -505,7 +611,7 @@ class BuildYourBoxService {
         avgTicket: Math.round(avgTicket * 100) / 100,
         avgProductsPerBox: totalBoxes > 0 ? Math.round((totalProducts / totalBoxes) * 10) / 10 : 0,
         avgBoxesPerOrder: orders.length > 0 ? Math.round((totalBoxes / orders.length) * 10) / 10 : 0,
-        period: { days }
+        period: { days: normalizedDays }
       },
       upsellMetrics: {
         extraOlive: {
@@ -537,7 +643,7 @@ class BuildYourBoxService {
   /**
    * Obtener productos más populares
    */
-  async getTopProducts(days = 90, limit = 20) {
+  async getTopProducts(days = this.defaultAnalyticsDays, limit = 20) {
     const stats = await this.getDemandStats(days);
     return stats.topProducts.slice(0, limit);
   }
@@ -545,7 +651,7 @@ class BuildYourBoxService {
   /**
    * Obtener distribución de tamaños
    */
-  async getSizeDistribution(days = 90) {
+  async getSizeDistribution(days = this.defaultAnalyticsDays) {
     const stats = await this.getDemandStats(days);
     return stats.sizeDistribution;
   }
@@ -553,7 +659,7 @@ class BuildYourBoxService {
   /**
    * Obtener tendencias diarias
    */
-  async getDailyTrends(days = 90) {
+  async getDailyTrends(days = this.defaultAnalyticsDays) {
     const stats = await this.getDemandStats(days);
     return stats.trends;
   }
@@ -561,8 +667,13 @@ class BuildYourBoxService {
   /**
    * Obtener combos frecuentes (productos que se piden juntos)
    */
-  async getFrequentCombos(days = 90, minSupport = 3) {
-    const orders = await this.getBybOrders(days);
+  async getFrequentCombos(days = this.defaultAnalyticsDays, minSupport = 3, preloadedOrders = null) {
+    const normalizedDays = this.normalizeAnalyticsDays(days, this.defaultAnalyticsDays);
+    const { startDate } = this.getDateRange(normalizedDays);
+    const sourceOrders = Array.isArray(preloadedOrders) ? preloadedOrders : await this.getBybOrders(normalizedDays);
+    const orders = startDate
+      ? sourceOrders.filter((order) => order.orderDate >= startDate)
+      : sourceOrders;
 
     // Contar pares de productos
     const pairCounts = {};
@@ -598,8 +709,8 @@ class BuildYourBoxService {
   /**
    * Get trending products with week-over-week comparison
    */
-  async getTrendingProducts(days = 14) {
-    const normalizedDays = Number.isFinite(days) && days > 0 ? days : 14;
+  async getTrendingProducts(days = 14, preloadedOrders = null) {
+    const normalizedDays = Math.min(this.maxAnalyticsDays, Number.isFinite(days) && days > 0 ? days : 14);
     const currentPeriodEnd = new Date();
     const currentPeriodStart = new Date(currentPeriodEnd);
     currentPeriodStart.setDate(currentPeriodStart.getDate() - normalizedDays);
@@ -610,7 +721,13 @@ class BuildYourBoxService {
     const previousPeriodEnd = new Date(currentPeriodStart);
     previousPeriodEnd.setMilliseconds(previousPeriodEnd.getMilliseconds() - 1);
 
-    const allOrders = await this.getBybOrdersBetween(previousPeriodStart, currentPeriodEnd);
+    const sourceOrders = Array.isArray(preloadedOrders)
+      ? preloadedOrders
+      : await this.getBybOrders(Math.min(this.maxAnalyticsDays, (normalizedDays * 2) + 2));
+
+    const allOrders = sourceOrders.filter(
+      (order) => order.orderDate >= previousPeriodStart && order.orderDate <= currentPeriodEnd
+    );
     const currentOrders = allOrders.filter(
       (order) => order.orderDate >= currentPeriodStart && order.orderDate <= currentPeriodEnd
     );
@@ -686,8 +803,13 @@ class BuildYourBoxService {
   /**
    * Get ticket analysis by box size
    */
-  async getTicketAnalysis(days = 90) {
-    const orders = await this.getBybOrders(days);
+  async getTicketAnalysis(days = this.defaultAnalyticsDays, preloadedOrders = null) {
+    const normalizedDays = this.normalizeAnalyticsDays(days, this.defaultAnalyticsDays);
+    const { startDate } = this.getDateRange(normalizedDays);
+    const sourceOrders = Array.isArray(preloadedOrders) ? preloadedOrders : await this.getBybOrders(normalizedDays);
+    const orders = startDate
+      ? sourceOrders.filter((order) => order.orderDate >= startDate)
+      : sourceOrders;
 
     // Analyze by box configuration
     const ticketByConfig = {};
@@ -788,14 +910,14 @@ class BuildYourBoxService {
       },
       byBoxConfig: ticketStats,
       opportunities: opportunities.sort((a, b) => b.potentialRevenue - a.potentialRevenue),
-      period: { days }
+      period: { days: normalizedDays }
     };
   }
 
   /**
    * Get week-over-week comparison
    */
-  async getWeekOverWeek() {
+  async getWeekOverWeek(preloadedOrders = null) {
     const now = new Date();
     const thisWeekStart = new Date(now);
     thisWeekStart.setDate(now.getDate() - now.getDay()); // Start of this week (Sunday)
@@ -807,7 +929,13 @@ class BuildYourBoxService {
     const lastWeekEnd = new Date(thisWeekStart);
     lastWeekEnd.setMilliseconds(lastWeekEnd.getMilliseconds() - 1);
 
-    const allOrders = await this.getBybOrdersBetween(lastWeekStart, now);
+    const sourceOrders = Array.isArray(preloadedOrders)
+      ? preloadedOrders
+      : await this.getBybOrders(21);
+
+    const allOrders = sourceOrders.filter(
+      (order) => order.orderDate >= lastWeekStart && order.orderDate <= now
+    );
     const thisWeekOrders = allOrders.filter((order) => order.orderDate >= thisWeekStart);
     const lastWeekOrders = allOrders.filter(
       (order) => order.orderDate >= lastWeekStart && order.orderDate <= lastWeekEnd
@@ -868,11 +996,11 @@ class BuildYourBoxService {
   /**
    * Obtener overview completo para dashboard
    */
-  async getOverview(days = 90) {
+  async buildOverviewPayload(days, preloadedOrders = null) {
     const [stats, combos, weekOverWeek] = await Promise.all([
-      this.getDemandStats(days),
-      this.getFrequentCombos(days),
-      this.getWeekOverWeek()
+      this.getDemandStats(days, preloadedOrders),
+      this.getFrequentCombos(days, 3, preloadedOrders),
+      this.getWeekOverWeek(preloadedOrders)
     ]);
 
     return {
@@ -883,10 +1011,20 @@ class BuildYourBoxService {
   }
 
   /**
+   * Obtener overview completo para dashboard con snapshot de 10 dias
+   */
+  async getOverview(days = this.defaultAnalyticsDays) {
+    return this.getOrBuildSnapshot('overview', days, async (normalizedDays) => {
+      const orders = await this.getBybOrders(normalizedDays);
+      return this.buildOverviewPayload(normalizedDays, orders);
+    });
+  }
+
+  /**
    * Get comprehensive Opportunity Dashboard data
    * This is the main endpoint for the enhanced BYB dashboard
    */
-  async getOpportunityDashboard(days = 90) {
+  async buildOpportunityDashboardPayload(days, preloadedOrders = null) {
     console.log(`📊 Building BYB Opportunity Dashboard for ${days} days...`);
 
     // Run all queries with error handling for each
@@ -897,23 +1035,23 @@ class BuildYourBoxService {
       ticketAnalysis,
       weekOverWeek
     ] = await Promise.all([
-      this.getDemandStats(days).catch(err => {
+      this.getDemandStats(days, preloadedOrders).catch(err => {
         console.error('❌ Error in getDemandStats:', err.message);
         return { summary: {}, topProducts: [], sizeDistribution: [], boxSizeDistribution: [], geoDistribution: [], trends: [], upsellMetrics: { extraOlive: {} } };
       }),
-      this.getFrequentCombos(days).catch(err => {
+      this.getFrequentCombos(days, 3, preloadedOrders).catch(err => {
         console.error('❌ Error in getFrequentCombos:', err.message);
         return [];
       }),
-      this.getTrendingProducts(Math.min(days, 14)).catch(err => {
+      this.getTrendingProducts(Math.min(days, 14), preloadedOrders).catch(err => {
         console.error('❌ Error in getTrendingProducts:', err.message);
         return { trending: [], rising: [], falling: [], newProducts: [] };
       }),
-      this.getTicketAnalysis(days).catch(err => {
+      this.getTicketAnalysis(days, preloadedOrders).catch(err => {
         console.error('❌ Error in getTicketAnalysis:', err.message);
         return { overall: {}, byBoxConfig: [], opportunities: [] };
       }),
-      this.getWeekOverWeek().catch(err => {
+      this.getWeekOverWeek(preloadedOrders).catch(err => {
         console.error('❌ Error in getWeekOverWeek:', err.message);
         return { thisWeek: {}, lastWeek: {}, changes: {} };
       })
@@ -1060,16 +1198,26 @@ class BuildYourBoxService {
         return priorityOrder[a.priority] - priorityOrder[b.priority];
       }),
       trends: stats.trends,
-      period: { days },
+      period: { days: this.normalizeAnalyticsDays(days, this.defaultAnalyticsDays) },
       generatedAt: new Date().toISOString()
     };
+  }
+
+  /**
+   * Opportunity dashboard con snapshot de 10 dias
+   */
+  async getOpportunityDashboard(days = this.defaultAnalyticsDays) {
+    return this.getOrBuildSnapshot('opportunity-dashboard', days, async (normalizedDays) => {
+      const orders = await this.getBybOrders(normalizedDays);
+      return this.buildOpportunityDashboardPayload(normalizedDays, orders);
+    });
   }
 
   /**
    * Generar AI Insights para escalar Build Your Box
    * Usa Claude para analizar patrones y dar recomendaciones
    */
-  async generateAiInsights(days = 90) {
+  async generateAiInsights(days = this.defaultAnalyticsDays) {
     // Obtener datos para análisis
     const [stats, combos] = await Promise.all([
       this.getDemandStats(days),
@@ -1314,7 +1462,7 @@ Responde SOLO con JSON válido (sin markdown, sin backticks):
   /**
    * Get funnel analytics for a time period
    */
-  async getFunnelAnalytics(days = 90) {
+  async getFunnelAnalytics(days = this.defaultAnalyticsDays) {
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - days);
     startDate.setHours(0, 0, 0, 0);
