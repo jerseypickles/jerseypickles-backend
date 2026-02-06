@@ -2,8 +2,8 @@
 // Service para analizar demanda de productos en Build Your Box
 // Enhanced with Opportunity Dashboard metrics and Funnel Tracking
 
-const Order = require('../models/Order');
 const BybFunnelEvent = require('../models/BybFunnelEvent');
+const shopifyService = require('./shopifyService');
 
 class BuildYourBoxService {
   constructor() {
@@ -17,6 +17,7 @@ class BuildYourBoxService {
       if (upper.includes('16')) return '16OZ';
       if (upper.includes('QUART')) return 'QUART';
       if (upper.includes('HALF') || upper.includes('GALLON')) return 'HALF_GALLON';
+      if (upper.includes('JUICE')) return 'JUICE';
       return upper;
     };
 
@@ -35,93 +36,328 @@ class BuildYourBoxService {
         freeShippingAt: [6]
       }
     };
+
+    // Cache corta para evitar múltiples fetches idénticos a Shopify por request/página
+    this.ordersCache = new Map();
+    this.inFlightOrders = new Map();
+    this.ordersCacheTtlMs = 5 * 60 * 1000; // 5 min
   }
 
-  /**
-   * Parsear notas de Build Your Box
-   * Formato: *** Build Your Boxes ***  Box #1 (Jar: QUART) • Product (qty) • Product (qty)
-   * Also detects Extra Olive upsell
-   */
-  parseBoxNote(note) {
-    if (!note || !note.includes('Build Your Box')) return null;
+  getDateRange(days = 90) {
+    const normalizedDays = Number.isFinite(days) ? days : 90;
+    const endDate = new Date();
+    let startDate = null;
+
+    if (normalizedDays > 0) {
+      startDate = new Date(endDate);
+      startDate.setDate(startDate.getDate() - normalizedDays);
+      startDate.setHours(0, 0, 0, 0);
+    } else if (normalizedDays === 0) {
+      startDate = new Date(endDate);
+      startDate.setHours(0, 0, 0, 0);
+    }
+
+    return { startDate, endDate };
+  }
+
+  buildOrdersCacheKey(startDate, endDate) {
+    return `${startDate ? startDate.toISOString() : 'all'}::${endDate ? endDate.toISOString() : 'now'}`;
+  }
+
+  getLineItemPropertiesMap(lineItem = {}) {
+    const map = {};
+    const raw = lineItem.properties;
+
+    if (Array.isArray(raw)) {
+      for (const prop of raw) {
+        const key = String(prop?.name || prop?.key || '').trim();
+        if (!key) continue;
+        map[key] = String(prop?.value ?? '').trim();
+      }
+      return map;
+    }
+
+    if (raw && typeof raw === 'object') {
+      for (const [key, value] of Object.entries(raw)) {
+        map[String(key).trim()] = String(value ?? '').trim();
+      }
+    }
+
+    return map;
+  }
+
+  parseProductsString(rawValue) {
+    if (!rawValue || typeof rawValue !== 'string') return [];
+
+    const counts = {};
+
+    const addProduct = (name, qty) => {
+      if (!name || !Number.isFinite(qty) || qty <= 0) return;
+      const normalizedName = name.trim();
+      if (!normalizedName) return;
+      if (normalizedName.toLowerCase().includes('extra olive')) return;
+      counts[normalizedName] = (counts[normalizedName] || 0) + qty;
+    };
+
+    const quantityFirstRegex = /(?:^|[\n,•])\s*(\d+)\s*x\s*([^\n,•]+?)\s*(?=$|[\n,•])/gi;
+    let match;
+    while ((match = quantityFirstRegex.exec(rawValue)) !== null) {
+      addProduct(match[2], parseInt(match[1], 10));
+    }
+
+    const legacyRegex = /(?:^|[\n•])\s*([^(•\n]+?)\s*\((\d+)\)/g;
+    while ((match = legacyRegex.exec(rawValue)) !== null) {
+      addProduct(match[1], parseInt(match[2], 10));
+    }
+
+    return Object.entries(counts).map(([name, quantity]) => ({ name, quantity }));
+  }
+
+  parseLegacyBoxNote(note) {
+    if (!note || !/build your box/i.test(note)) return null;
 
     const boxes = [];
     let hasExtraOlive = false;
 
-    // Detect Extra Olive upsell
     if (note.toLowerCase().includes('extra olive') || note.toLowerCase().includes('+$4.99')) {
       hasExtraOlive = true;
     }
 
-    // Regex para encontrar cada box
-    // Ejemplo: Box #1 (Jar: QUART (32oz)) • Hot Pickled Green Tomatoes (1) • Sour Pickled (2)
     const boxRegex = /Box\s*#?(\d+)\s*\(Jar:\s*([^)]+)\)\s*((?:•\s*[^•]+)+)/gi;
-
     let match;
+
     while ((match = boxRegex.exec(note)) !== null) {
-      const boxNumber = parseInt(match[1]);
+      const boxNumber = parseInt(match[1], 10);
       const jarSize = this.normalizeSize(match[2]);
-      const productsStr = match[3];
+      const products = this.parseProductsString(match[3]);
+      const totalJars = products.reduce((sum, product) => sum + product.quantity, 0);
 
-      // Parsear productos
-      const products = [];
-      const productRegex = /•\s*([^(•]+)\s*\((\d+)\)/g;
-      let productMatch;
+      if (products.length === 0) continue;
 
-      while ((productMatch = productRegex.exec(productsStr)) !== null) {
-        const productName = productMatch[1].trim();
-        const quantity = parseInt(productMatch[2]);
+      boxes.push({
+        boxNumber,
+        jarSize,
+        products,
+        totalJars,
+        hasExtraOlive: hasExtraOlive && jarSize === 'QUART'
+      });
+    }
 
-        if (productName && quantity > 0) {
-          products.push({
-            name: productName,
-            quantity: quantity
-          });
-        }
+    return boxes.length > 0 ? { boxes, hasExtraOlive } : null;
+  }
+
+  parseModernBoxNote(note, defaults = {}) {
+    if (!note || !/build your box/i.test(note)) return null;
+
+    const hasExtraOlive = /extra olive|\+\$4\.99/i.test(note);
+    const headerMatch = note.match(/build your box\s*-\s*(\d+)\s*([^\n]*)/i);
+    const headerJarLabel = headerMatch?.[2] || '';
+    const headerJarCount = headerMatch ? parseInt(headerMatch[1], 10) : 0;
+    const products = this.parseProductsString(defaults.productsString || note);
+    const productsTotal = products.reduce((sum, product) => sum + product.quantity, 0);
+    const jarCount = parseInt(defaults.jarCount, 10) || headerJarCount || productsTotal;
+    const jarSize = this.normalizeSize(defaults.jarType || headerJarLabel);
+
+    if (products.length === 0 && !jarCount) return null;
+
+    return {
+      boxes: [{
+        boxNumber: 1,
+        jarSize,
+        products,
+        totalJars: jarCount,
+        hasExtraOlive: hasExtraOlive && jarSize === 'QUART'
+      }],
+      hasExtraOlive
+    };
+  }
+
+  /**
+   * Parsear notas BYB legacy y modernas.
+   */
+  parseBoxNote(note, defaults = {}) {
+    const legacy = this.parseLegacyBoxNote(note);
+    if (legacy) return legacy;
+    return this.parseModernBoxNote(note, defaults);
+  }
+
+  parseBybLineItem(lineItem) {
+    const properties = this.getLineItemPropertiesMap(lineItem);
+    const hasBybMetadata = Object.keys(properties).some((key) => key.toLowerCase().startsWith('_byb_'));
+
+    if (!hasBybMetadata && !/build your box/i.test(lineItem?.title || '')) {
+      return null;
+    }
+
+    const quantity = Math.max(parseInt(lineItem?.quantity, 10) || 1, 1);
+    const jarType = properties._byb_jar_type || properties._byb_type || '';
+    const jarCount = parseInt(properties._byb_jar_count, 10) || 0;
+    const productsString = properties._byb_products || '';
+    const note = properties._byb_note || '';
+    const explicitExtraOlive = /^(yes|true|1)$/i.test(properties._byb_extra_olive || '');
+
+    let parsed = null;
+    if (note) {
+      parsed = this.parseBoxNote(note, {
+        jarType,
+        jarCount,
+        productsString
+      });
+    }
+
+    if (!parsed) {
+      const products = this.parseProductsString(productsString || note);
+      if (products.length > 0 || jarCount > 0) {
+        const totalJars = jarCount || products.reduce((sum, product) => sum + product.quantity, 0);
+        const normalizedJarType = this.normalizeSize(jarType);
+        parsed = {
+          boxes: [{
+            boxNumber: 1,
+            jarSize: normalizedJarType,
+            products,
+            totalJars,
+            hasExtraOlive: explicitExtraOlive && normalizedJarType === 'QUART'
+          }],
+          hasExtraOlive: explicitExtraOlive
+        };
       }
+    }
 
-      // Calculate total jars in this box
-      const totalJars = products.reduce((sum, p) => sum + p.quantity, 0);
+    if (!parsed) return null;
 
-      if (products.length > 0) {
-        boxes.push({
-          boxNumber,
-          jarSize,
-          products,
-          totalJars,
-          hasExtraOlive: hasExtraOlive && jarSize === 'QUART' // Extra olive only for Quart
+    const baseBoxes = parsed.boxes.map((box, index) => ({
+      ...box,
+      boxNumber: index + 1
+    }));
+
+    const expandedBoxes = [];
+    for (let i = 0; i < quantity; i++) {
+      for (const box of baseBoxes) {
+        expandedBoxes.push({
+          ...box,
+          boxNumber: expandedBoxes.length + 1
         });
       }
     }
 
-    return boxes.length > 0 ? { boxes, hasExtraOlive } : null;
+    return {
+      boxes: expandedBoxes,
+      hasExtraOlive: parsed.hasExtraOlive || explicitExtraOlive
+    };
+  }
+
+  parseBybOrder(shopifyOrder) {
+    const bybBoxes = [];
+    let hasExtraOlive = false;
+
+    const lineItems = Array.isArray(shopifyOrder?.line_items) ? shopifyOrder.line_items : [];
+    for (const lineItem of lineItems) {
+      const parsedLineItem = this.parseBybLineItem(lineItem);
+      if (!parsedLineItem) continue;
+      bybBoxes.push(...parsedLineItem.boxes);
+      hasExtraOlive = hasExtraOlive || parsedLineItem.hasExtraOlive;
+    }
+
+    if (bybBoxes.length > 0) {
+      return { boxes: bybBoxes, hasExtraOlive };
+    }
+
+    const fallbackNotes = [];
+    if (shopifyOrder?.note) fallbackNotes.push(shopifyOrder.note);
+
+    if (Array.isArray(shopifyOrder?.note_attributes)) {
+      for (const attr of shopifyOrder.note_attributes) {
+        const key = String(attr?.name || '').toLowerCase();
+        const value = String(attr?.value || '');
+        if (!value) continue;
+        if (key.includes('_byb_') || /build your box/i.test(value)) {
+          fallbackNotes.push(value);
+        }
+      }
+    }
+
+    for (const note of fallbackNotes) {
+      const parsedNote = this.parseBoxNote(note);
+      if (parsedNote) return parsedNote;
+    }
+
+    return null;
+  }
+
+  async fetchBybOrdersFromShopify(startDate = null, endDate = null) {
+    const cacheKey = this.buildOrdersCacheKey(startDate, endDate);
+    const cached = this.ordersCache.get(cacheKey);
+    const now = Date.now();
+
+    if (cached && now - cached.timestamp < this.ordersCacheTtlMs) {
+      return cached.orders;
+    }
+
+    if (this.inFlightOrders.has(cacheKey)) {
+      return this.inFlightOrders.get(cacheKey);
+    }
+
+    const fetchPromise = (async () => {
+      const queryParams = {};
+      if (startDate) queryParams.created_at_min = startDate.toISOString();
+      if (endDate) queryParams.created_at_max = endDate.toISOString();
+
+      const orders = await shopifyService.getAllOrders(queryParams);
+      const bybOrders = [];
+
+      for (const order of orders || []) {
+        const parsedByb = this.parseBybOrder(order);
+        if (!parsedByb) continue;
+
+        const orderDate = new Date(order.created_at || order.processed_at || order.updated_at);
+        if (Number.isNaN(orderDate.getTime())) continue;
+        if (startDate && orderDate < startDate) continue;
+        if (endDate && orderDate > endDate) continue;
+
+        bybOrders.push({
+          shopifyId: String(order.id || ''),
+          orderNumber: order.name || String(order.order_number || ''),
+          orderDate,
+          totalPrice: parseFloat(order.total_price) || 0,
+          shippingAddress: order.shipping_address || {},
+          byb: parsedByb
+        });
+      }
+
+      bybOrders.sort((a, b) => b.orderDate - a.orderDate);
+      this.ordersCache.set(cacheKey, {
+        timestamp: Date.now(),
+        orders: bybOrders
+      });
+
+      return bybOrders;
+    })();
+
+    this.inFlightOrders.set(cacheKey, fetchPromise);
+
+    try {
+      return await fetchPromise;
+    } finally {
+      this.inFlightOrders.delete(cacheKey);
+    }
+  }
+
+  async getBybOrders(days = 90) {
+    const { startDate } = this.getDateRange(days);
+    return this.fetchBybOrdersFromShopify(startDate, null);
+  }
+
+  async getBybOrdersBetween(startDate, endDate = new Date()) {
+    return this.fetchBybOrdersFromShopify(startDate, endDate);
   }
 
   /**
    * Obtener estadísticas de demanda (enhanced with revenue metrics)
    * @param {number} days - Días hacia atrás (0 = desde hoy en adelante, null = todos)
    */
-  async getDemandStats(days = 30) {
-    const query = {
-      'shopifyData.note': { $regex: /Build Your Box/i }
-    };
-
-    if (days > 0) {
-      const startDate = new Date();
-      startDate.setDate(startDate.getDate() - days);
-      startDate.setHours(0, 0, 0, 0); // Inicio del día
-      query.orderDate = { $gte: startDate };
-    }
-
-    console.log(`📦 BYB Query: days=${days}, startDate=${query.orderDate?.$gte?.toISOString() || 'all'}`);
-
-    // Buscar órdenes con notas de Build Your Box
-    const orders = await Order.find(query)
-      .select('shopifyData.note orderDate totalPrice orderNumber shippingAddress')
-      .sort({ orderDate: -1 })
-      .lean();
-
-    console.log(`📦 BYB Found ${orders.length} orders with Build Your Box notes`);
+  async getDemandStats(days = 90) {
+    const orders = await this.getBybOrders(days);
+    console.log(`📦 BYB Shopify orders: ${orders.length} in period days=${days}`);
 
     // Agregados
     const productStats = {};
@@ -136,13 +372,7 @@ class BuildYourBoxService {
     const stateStats = {}; // Geographic data
 
     for (const order of orders) {
-      const note = order.shopifyData?.note;
-      if (!note) continue;
-
-      const parsed = this.parseBoxNote(note);
-      if (!parsed) continue;
-
-      const { boxes, hasExtraOlive } = parsed;
+      const { boxes, hasExtraOlive } = order.byb;
 
       // Track revenue
       const orderTotal = parseFloat(order.totalPrice) || 0;
@@ -307,7 +537,7 @@ class BuildYourBoxService {
   /**
    * Obtener productos más populares
    */
-  async getTopProducts(days = 30, limit = 20) {
+  async getTopProducts(days = 90, limit = 20) {
     const stats = await this.getDemandStats(days);
     return stats.topProducts.slice(0, limit);
   }
@@ -315,7 +545,7 @@ class BuildYourBoxService {
   /**
    * Obtener distribución de tamaños
    */
-  async getSizeDistribution(days = 30) {
+  async getSizeDistribution(days = 90) {
     const stats = await this.getDemandStats(days);
     return stats.sizeDistribution;
   }
@@ -323,7 +553,7 @@ class BuildYourBoxService {
   /**
    * Obtener tendencias diarias
    */
-  async getDailyTrends(days = 30) {
+  async getDailyTrends(days = 90) {
     const stats = await this.getDemandStats(days);
     return stats.trends;
   }
@@ -331,28 +561,14 @@ class BuildYourBoxService {
   /**
    * Obtener combos frecuentes (productos que se piden juntos)
    */
-  async getFrequentCombos(days = 30, minSupport = 3) {
-    const query = {};
-
-    if (days > 0) {
-      const startDate = new Date();
-      startDate.setDate(startDate.getDate() - days);
-      query.orderDate = { $gte: startDate };
-    }
-
-    const orders = await Order.find({
-      ...query,
-      'shopifyData.note': { $regex: /Build Your Box/i }
-    }).select('shopifyData.note').lean();
+  async getFrequentCombos(days = 90, minSupport = 3) {
+    const orders = await this.getBybOrders(days);
 
     // Contar pares de productos
     const pairCounts = {};
 
     for (const order of orders) {
-      const parsed = this.parseBoxNote(order.shopifyData?.note);
-      if (!parsed) continue;
-
-      const { boxes } = parsed;
+      const { boxes } = order.byb;
       for (const box of boxes) {
         const productNames = box.products.map(p => p.name).sort();
 
@@ -383,36 +599,30 @@ class BuildYourBoxService {
    * Get trending products with week-over-week comparison
    */
   async getTrendingProducts(days = 14) {
-    // Get current period data
+    const normalizedDays = Number.isFinite(days) && days > 0 ? days : 14;
     const currentPeriodEnd = new Date();
-    const currentPeriodStart = new Date();
-    currentPeriodStart.setDate(currentPeriodStart.getDate() - days);
+    const currentPeriodStart = new Date(currentPeriodEnd);
+    currentPeriodStart.setDate(currentPeriodStart.getDate() - normalizedDays);
+    currentPeriodStart.setHours(0, 0, 0, 0);
 
-    // Get previous period data (same length, immediately before)
     const previousPeriodStart = new Date(currentPeriodStart);
-    previousPeriodStart.setDate(previousPeriodStart.getDate() - days);
+    previousPeriodStart.setDate(previousPeriodStart.getDate() - normalizedDays);
     const previousPeriodEnd = new Date(currentPeriodStart);
     previousPeriodEnd.setMilliseconds(previousPeriodEnd.getMilliseconds() - 1);
 
-    const [currentOrders, previousOrders] = await Promise.all([
-      Order.find({
-        'shopifyData.note': { $regex: /Build Your Box/i },
-        orderDate: { $gte: currentPeriodStart, $lte: currentPeriodEnd }
-      }).select('shopifyData.note').lean(),
-      Order.find({
-        'shopifyData.note': { $regex: /Build Your Box/i },
-        orderDate: { $gte: previousPeriodStart, $lte: previousPeriodEnd }
-      }).select('shopifyData.note').lean()
-    ]);
+    const allOrders = await this.getBybOrdersBetween(previousPeriodStart, currentPeriodEnd);
+    const currentOrders = allOrders.filter(
+      (order) => order.orderDate >= currentPeriodStart && order.orderDate <= currentPeriodEnd
+    );
+    const previousOrders = allOrders.filter(
+      (order) => order.orderDate >= previousPeriodStart && order.orderDate <= previousPeriodEnd
+    );
 
     // Count products for each period
     const countProducts = (orders) => {
       const counts = {};
       for (const order of orders) {
-        const parsed = this.parseBoxNote(order.shopifyData?.note);
-        if (!parsed) continue;
-
-        for (const box of parsed.boxes) {
+        for (const box of order.byb.boxes) {
           for (const product of box.products) {
             counts[product.name] = (counts[product.name] || 0) + product.quantity;
           }
@@ -468,7 +678,7 @@ class BuildYourBoxService {
       period: {
         current: { start: currentPeriodStart.toISOString(), end: currentPeriodEnd.toISOString() },
         previous: { start: previousPeriodStart.toISOString(), end: previousPeriodEnd.toISOString() },
-        days
+        days: normalizedDays
       }
     };
   }
@@ -476,35 +686,20 @@ class BuildYourBoxService {
   /**
    * Get ticket analysis by box size
    */
-  async getTicketAnalysis(days = 30) {
-    const query = {
-      'shopifyData.note': { $regex: /Build Your Box/i }
-    };
-
-    if (days > 0) {
-      const startDate = new Date();
-      startDate.setDate(startDate.getDate() - days);
-      query.orderDate = { $gte: startDate };
-    }
-
-    const orders = await Order.find(query)
-      .select('shopifyData.note totalPrice')
-      .lean();
+  async getTicketAnalysis(days = 90) {
+    const orders = await this.getBybOrders(days);
 
     // Analyze by box configuration
     const ticketByConfig = {};
     const allTickets = [];
 
     for (const order of orders) {
-      const parsed = this.parseBoxNote(order.shopifyData?.note);
-      if (!parsed) continue;
-
       const orderTotal = parseFloat(order.totalPrice) || 0;
       allTickets.push(orderTotal);
 
       // Group by primary box type (largest box in order)
       let primaryBox = null;
-      for (const box of parsed.boxes) {
+      for (const box of order.byb.boxes) {
         if (!primaryBox || box.totalJars > primaryBox.totalJars) {
           primaryBox = box;
         }
@@ -612,16 +807,11 @@ class BuildYourBoxService {
     const lastWeekEnd = new Date(thisWeekStart);
     lastWeekEnd.setMilliseconds(lastWeekEnd.getMilliseconds() - 1);
 
-    const [thisWeekOrders, lastWeekOrders] = await Promise.all([
-      Order.find({
-        'shopifyData.note': { $regex: /Build Your Box/i },
-        orderDate: { $gte: thisWeekStart }
-      }).select('shopifyData.note totalPrice orderDate').lean(),
-      Order.find({
-        'shopifyData.note': { $regex: /Build Your Box/i },
-        orderDate: { $gte: lastWeekStart, $lte: lastWeekEnd }
-      }).select('shopifyData.note totalPrice orderDate').lean()
-    ]);
+    const allOrders = await this.getBybOrdersBetween(lastWeekStart, now);
+    const thisWeekOrders = allOrders.filter((order) => order.orderDate >= thisWeekStart);
+    const lastWeekOrders = allOrders.filter(
+      (order) => order.orderDate >= lastWeekStart && order.orderDate <= lastWeekEnd
+    );
 
     const calcStats = (orders) => {
       let boxes = 0;
@@ -630,13 +820,10 @@ class BuildYourBoxService {
       let revenue = 0;
 
       for (const order of orders) {
-        const parsed = this.parseBoxNote(order.shopifyData?.note);
-        if (!parsed) continue;
-
         revenue += parseFloat(order.totalPrice) || 0;
-        if (parsed.hasExtraOlive) extraOlive++;
+        if (order.byb.hasExtraOlive) extraOlive++;
 
-        for (const box of parsed.boxes) {
+        for (const box of order.byb.boxes) {
           boxes++;
           products += box.products.reduce((sum, p) => sum + p.quantity, 0);
         }
@@ -681,7 +868,7 @@ class BuildYourBoxService {
   /**
    * Obtener overview completo para dashboard
    */
-  async getOverview(days = 30) {
+  async getOverview(days = 90) {
     const [stats, combos, weekOverWeek] = await Promise.all([
       this.getDemandStats(days),
       this.getFrequentCombos(days),
@@ -699,7 +886,7 @@ class BuildYourBoxService {
    * Get comprehensive Opportunity Dashboard data
    * This is the main endpoint for the enhanced BYB dashboard
    */
-  async getOpportunityDashboard(days = 30) {
+  async getOpportunityDashboard(days = 90) {
     console.log(`📊 Building BYB Opportunity Dashboard for ${days} days...`);
 
     // Run all queries with error handling for each
@@ -882,7 +1069,7 @@ class BuildYourBoxService {
    * Generar AI Insights para escalar Build Your Box
    * Usa Claude para analizar patrones y dar recomendaciones
    */
-  async generateAiInsights(days = 30) {
+  async generateAiInsights(days = 90) {
     // Obtener datos para análisis
     const [stats, combos] = await Promise.all([
       this.getDemandStats(days),
@@ -1127,7 +1314,7 @@ Responde SOLO con JSON válido (sin markdown, sin backticks):
   /**
    * Get funnel analytics for a time period
    */
-  async getFunnelAnalytics(days = 30) {
+  async getFunnelAnalytics(days = 90) {
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - days);
     startDate.setHours(0, 0, 0, 0);

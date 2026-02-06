@@ -11,7 +11,7 @@ const buildYourBoxController = {
    */
   async getOverview(req, res) {
     try {
-      const { days = 30 } = req.query;
+      const { days = 90 } = req.query;
       const overview = await buildYourBoxService.getOverview(parseInt(days));
 
       res.json({
@@ -33,7 +33,7 @@ const buildYourBoxController = {
    */
   async getOpportunityDashboard(req, res) {
     try {
-      const { days = 30 } = req.query;
+      const { days = 90 } = req.query;
       console.log(`📊 API: Getting BYB Opportunity Dashboard for ${days} days`);
 
       const dashboard = await buildYourBoxService.getOpportunityDashboard(parseInt(days));
@@ -80,7 +80,7 @@ const buildYourBoxController = {
    */
   async getTicketAnalysis(req, res) {
     try {
-      const { days = 30 } = req.query;
+      const { days = 90 } = req.query;
       const analysis = await buildYourBoxService.getTicketAnalysis(parseInt(days));
 
       res.json({
@@ -123,7 +123,7 @@ const buildYourBoxController = {
    */
   async getTopProducts(req, res) {
     try {
-      const { days = 30, limit = 20 } = req.query;
+      const { days = 90, limit = 20 } = req.query;
       const products = await buildYourBoxService.getTopProducts(
         parseInt(days),
         parseInt(limit)
@@ -150,7 +150,7 @@ const buildYourBoxController = {
    */
   async getSizeDistribution(req, res) {
     try {
-      const { days = 30 } = req.query;
+      const { days = 90 } = req.query;
       const sizes = await buildYourBoxService.getSizeDistribution(parseInt(days));
 
       res.json({
@@ -173,7 +173,7 @@ const buildYourBoxController = {
    */
   async getTrends(req, res) {
     try {
-      const { days = 30 } = req.query;
+      const { days = 90 } = req.query;
       const trends = await buildYourBoxService.getDailyTrends(parseInt(days));
 
       res.json({
@@ -196,7 +196,7 @@ const buildYourBoxController = {
    */
   async getFrequentCombos(req, res) {
     try {
-      const { days = 30, minSupport = 3 } = req.query;
+      const { days = 90, minSupport = 3 } = req.query;
       const combos = await buildYourBoxService.getFrequentCombos(
         parseInt(days),
         parseInt(minSupport)
@@ -223,7 +223,7 @@ const buildYourBoxController = {
    */
   async getStats(req, res) {
     try {
-      const { days = 30 } = req.query;
+      const { days = 90 } = req.query;
       const stats = await buildYourBoxService.getDemandStats(parseInt(days));
 
       res.json({
@@ -246,7 +246,7 @@ const buildYourBoxController = {
    */
   async getAiInsights(req, res) {
     try {
-      const { days = 30 } = req.query;
+      const { days = 90 } = req.query;
       console.log(`🧠 Generating BYB AI insights for ${days} days...`);
 
       const insights = await buildYourBoxService.generateAiInsights(parseInt(days));
@@ -303,7 +303,7 @@ const buildYourBoxController = {
    */
   async getFunnelAnalytics(req, res) {
     try {
-      const { days = 30 } = req.query;
+      const { days = 90 } = req.query;
       console.log(`📊 Getting BYB Funnel Analytics for ${days} days...`);
 
       const analytics = await buildYourBoxService.getFunnelAnalytics(parseInt(days));
