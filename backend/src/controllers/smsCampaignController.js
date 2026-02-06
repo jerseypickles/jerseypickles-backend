@@ -5,6 +5,7 @@ const SmsMessage = require('../models/SmsMessage');
 const SmsSubscriber = require('../models/SmsSubscriber');
 const telnyxService = require('../services/telnyxService');
 const urlShortenerService = require('../services/urlShortenerService');
+const shopifyService = require('../services/shopifyService');
 
 const smsCampaignController = {
   
@@ -22,6 +23,7 @@ const smsCampaignController = {
         message,
         discountCode,
         discountPercent,
+        dynamicDiscount,
         audienceType,
         targetCountry,
         customFilter,
@@ -51,6 +53,7 @@ const smsCampaignController = {
         message,
         discountCode: discountCode?.toUpperCase(),
         discountPercent,
+        dynamicDiscount: dynamicDiscount || { enabled: false },
         audienceType: audienceType || 'all_delivered',
         targetCountry: targetCountry || 'all',
         customFilter,
@@ -242,7 +245,7 @@ const smsCampaignController = {
       }
       
       const allowedUpdates = [
-        'name', 'description', 'message', 'discountCode', 'discountPercent',
+        'name', 'description', 'message', 'discountCode', 'discountPercent', 'dynamicDiscount',
         'audienceType', 'targetCountry', 'customFilter', 'scheduledAt', 'tags', 'excludedSubscribers'
       ];
       
@@ -463,13 +466,49 @@ const smsCampaignController = {
         });
       }
       
+      // If dynamic discount enabled, create Shopify price rules for each percent in range
+      if (campaign.dynamicDiscount?.enabled) {
+        const { min, max } = campaign.dynamicDiscount;
+        console.log(`📱 Creating Shopify price rules for dynamic discount ${min}%-${max}%...`);
+
+        const priceRuleIds = new Map();
+        for (let pct = min; pct <= max; pct++) {
+          try {
+            const priceRule = await shopifyService.createPriceRule({
+              title: `SMS Campaign ${campaign.name} - ${pct}%`,
+              target_type: 'line_item',
+              target_selection: 'all',
+              allocation_method: 'across',
+              value_type: 'percentage',
+              value: `-${pct}`,
+              customer_selection: 'all',
+              usage_limit: null,  // Multiple uses (one code per subscriber)
+              once_per_customer: true,
+              starts_at: new Date().toISOString(),
+              ends_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+            });
+            priceRuleIds.set(String(pct), String(priceRule.id));
+            console.log(`   ✅ Price rule created for ${pct}% (ID: ${priceRule.id})`);
+            await sleep(500); // Rate limit Shopify API
+          } catch (err) {
+            console.error(`   ❌ Failed to create price rule for ${pct}%:`, err.message);
+            return res.status(500).json({
+              success: false,
+              error: `Failed to create Shopify discount for ${pct}%: ${err.message}`
+            });
+          }
+        }
+
+        campaign.dynamicDiscount.priceRuleIds = priceRuleIds;
+      }
+
       // Update campaign status
       campaign.status = 'sending';
       campaign.startedAt = new Date();
       campaign.stats.eligible = subscribers.length;
       campaign.stats.queued = subscribers.length;
       await campaign.save();
-      
+
       // Create SmsMessage records for each subscriber
       const messages = subscribers.map(sub => ({
         campaign: campaign._id,
@@ -480,9 +519,9 @@ const smsCampaignController = {
         discountCode: campaign.discountCode || sub.discountCode,
         status: 'pending'
       }));
-      
+
       await SmsMessage.insertMany(messages, { ordered: false });
-      
+
       console.log(`📱 SMS Campaign ${campaign.name} started - ${subscribers.length} messages queued`);
       
       // Start background processing
@@ -1028,17 +1067,48 @@ async function processCampaignQueue(campaignId) {
         }
 
         try {
-          // Process URLs in message - replace with short URLs for tracking
           let finalMessage = msg.message;
+          let assignedPercent = null;
+          let assignedCode = msg.discountCode;
+
+          // Dynamic discount: assign random % and create unique Shopify code
+          if (campaign.dynamicDiscount?.enabled && campaign.dynamicDiscount.priceRuleIds) {
+            const { min, max } = campaign.dynamicDiscount;
+            assignedPercent = Math.floor(Math.random() * (max - min + 1)) + min;
+
+            const priceRuleId = campaign.dynamicDiscount.priceRuleIds.get(String(assignedPercent));
+            if (priceRuleId) {
+              // Generate unique code: JPC-{percent}-{random4}
+              const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+              assignedCode = `JPC${assignedPercent}-${randomSuffix}`;
+
+              try {
+                await shopifyService.createDiscountCode(priceRuleId, assignedCode);
+              } catch (discountErr) {
+                console.log(`⚠️ Shopify code creation failed for ${assignedCode}, retrying...`);
+                // Retry with different suffix
+                const retrySuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+                assignedCode = `JPC${assignedPercent}-${retrySuffix}`;
+                await shopifyService.createDiscountCode(priceRuleId, assignedCode);
+              }
+            }
+
+            // Replace {discount} and {code} placeholders in the message
+            finalMessage = finalMessage
+              .replace(/\{discount\}/g, String(assignedPercent))
+              .replace(/\{code\}/g, assignedCode);
+          }
+
+          // Process URLs in message - replace with short URLs for tracking
           try {
             const { processedMessage } = await urlShortenerService.processMessageUrls(
-              msg.message,
+              finalMessage,
               {
                 sourceType: 'sms_campaign',
                 campaignId: campaignId,
                 subscriberId: msg.subscriber,
                 messageId: msg._id,
-                discountCode: msg.discountCode
+                discountCode: assignedCode
               }
             );
             finalMessage = processedMessage;
@@ -1049,16 +1119,23 @@ async function processCampaignQueue(campaignId) {
           // Send SMS with processed message
           const result = await telnyxService.sendSms(msg.phone, finalMessage);
 
-          // Update message record
-          await SmsMessage.findByIdAndUpdate(msg._id, {
+          // Update message record (include dynamic discount data)
+          const updateData = {
             status: result.success ? 'queued' : 'failed',
             messageId: result.messageId,
-            message: finalMessage, // Store the processed message
+            message: finalMessage,
             queuedAt: result.success ? new Date() : undefined,
             failedAt: result.success ? undefined : new Date(),
             errorMessage: result.error,
             carrier: result.carrier
-          });
+          };
+
+          if (assignedPercent !== null) {
+            updateData.discountCode = assignedCode;
+            updateData.discountPercent = assignedPercent;
+          }
+
+          await SmsMessage.findByIdAndUpdate(msg._id, updateData);
 
           // Update campaign stats
           if (result.success) {

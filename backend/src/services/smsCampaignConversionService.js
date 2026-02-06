@@ -32,19 +32,51 @@ const smsCampaignConversionService = {
         const code = discount.code?.toUpperCase();
         if (!code) continue;
         
-        // ========== 1. Check for Campaign Discount Code ==========
+        // ========== 1. Check for Dynamic Campaign Code (JPC prefix) ==========
+        if (code.startsWith('JPC')) {
+          // Dynamic discount code - find directly in SmsMessage
+          const dynamicMessage = await SmsMessage.findOne({
+            discountCode: code,
+            converted: false
+          });
+
+          if (dynamicMessage) {
+            const dynamicCampaign = await SmsCampaign.findById(dynamicMessage.campaign);
+
+            await dynamicMessage.recordConversion({
+              orderId: shopifyOrder.id?.toString(),
+              orderNumber: shopifyOrder.order_number?.toString() || shopifyOrder.name,
+              orderTotal: parseFloat(shopifyOrder.total_price || 0),
+              discountAmount: parseFloat(discount.amount || 0)
+            });
+
+            results.campaignConversion = true;
+            results.details.push({
+              type: 'campaign_dynamic',
+              campaignId: dynamicMessage.campaign,
+              campaignName: dynamicCampaign?.name || 'Unknown',
+              discountCode: code,
+              discountPercent: dynamicMessage.discountPercent,
+              revenue: parseFloat(shopifyOrder.total_price || 0)
+            });
+
+            console.log(`📱 SMS Dynamic Campaign conversion: ${dynamicCampaign?.name} - ${code} (${dynamicMessage.discountPercent}%) - Order #${shopifyOrder.order_number}`);
+            continue; // Skip other checks for this code
+          }
+        }
+
+        // ========== 2. Check for Campaign Discount Code (fixed) ==========
         // Campaign codes might be different format (not JP-XXXXX)
         // Search by explicit discountCode field OR by code appearing in message text
         let campaign = await SmsCampaign.findOne({
           discountCode: code,
-          status: { $in: ['sent', 'sending'] }  // Include 'sending' campaigns
+          status: { $in: ['sent', 'sending'] }
         });
 
         // Fallback: search for the code in the message text
-        // This handles cases where discountCode field wasn't set but code is in message
         if (!campaign) {
           campaign = await SmsCampaign.findOne({
-            message: { $regex: code, $options: 'i' },  // Case-insensitive search
+            message: { $regex: code, $options: 'i' },
             status: { $in: ['sent', 'sending'] }
           });
 
@@ -52,23 +84,23 @@ const smsCampaignConversionService = {
             console.log(`📱 Found campaign by message text match: ${campaign.name}`);
           }
         }
-        
+
         if (campaign) {
           // Find the message sent to this customer
           const customerPhone = formatPhone(
-            shopifyOrder.phone || 
+            shopifyOrder.phone ||
             shopifyOrder.customer?.phone ||
             shopifyOrder.billing_address?.phone ||
             shopifyOrder.shipping_address?.phone
           );
-          
+
           if (customerPhone) {
             const message = await SmsMessage.findOne({
               campaign: campaign._id,
               phone: customerPhone,
               converted: false
             });
-            
+
             if (message) {
               await message.recordConversion({
                 orderId: shopifyOrder.id?.toString(),
@@ -76,7 +108,7 @@ const smsCampaignConversionService = {
                 orderTotal: parseFloat(shopifyOrder.total_price || 0),
                 discountAmount: parseFloat(discount.amount || 0)
               });
-              
+
               results.campaignConversion = true;
               results.details.push({
                 type: 'campaign',
@@ -85,7 +117,7 @@ const smsCampaignConversionService = {
                 discountCode: code,
                 revenue: parseFloat(shopifyOrder.total_price || 0)
               });
-              
+
               console.log(`📱 SMS Campaign conversion: ${campaign.name} - Order #${shopifyOrder.order_number}`);
             }
           }

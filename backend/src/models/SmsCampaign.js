@@ -45,6 +45,15 @@ const smsCampaignSchema = new mongoose.Schema({
     min: 0,
     max: 100
   },
+
+  // Dynamic discount (A/B testing with random % per subscriber)
+  dynamicDiscount: {
+    enabled: { type: Boolean, default: false },
+    min: { type: Number, min: 1, max: 100 },
+    max: { type: Number, min: 1, max: 100 },
+    // Shopify price rule IDs created for each percent in range
+    priceRuleIds: { type: Map, of: String }  // e.g. { "25": "priceRuleId123", "26": "..." }
+  },
   
   // Optional: Tracking link
   trackingUrl: {

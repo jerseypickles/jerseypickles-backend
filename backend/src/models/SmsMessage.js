@@ -38,6 +38,9 @@ const smsMessageSchema = new mongoose.Schema({
   
   // Personalized discount code (if any)
   discountCode: String,
+
+  // Dynamic discount variant assigned to this message
+  discountPercent: Number,
   
   // ==================== TELNYX INFO ====================
   messageId: {
