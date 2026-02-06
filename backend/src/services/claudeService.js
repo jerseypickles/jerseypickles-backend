@@ -506,6 +506,292 @@ IMPORTANTE:
     };
   }
 
+  // ==================== IA BUSINESS - DAILY REPORT ====================
+
+  /**
+   * Generar reporte diario de negocio basado en snapshot
+   */
+  async generateDailyBusinessReport(snapshot) {
+    if (!this.isAvailable()) {
+      console.log('Claude API not available, using fallback business report');
+      return this.getBusinessReportFallback(snapshot);
+    }
+
+    const systemPrompt = this.buildBusinessSystemPrompt();
+    const userPrompt = this.buildBusinessUserPrompt(snapshot);
+
+    try {
+      console.log('Generating daily business report with Claude...');
+
+      const startTime = Date.now();
+
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Claude API timeout (90s)')), 90000);
+      });
+
+      const apiPromise = this.client.messages.create({
+        model: this.model,
+        max_tokens: 4000,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }]
+      });
+
+      const response = await Promise.race([apiPromise, timeoutPromise]);
+      const duration = Date.now() - startTime;
+
+      console.log(`Claude business report generated in ${duration}ms`);
+
+      const content = response.content[0]?.text;
+      if (!content) {
+        return this.getBusinessReportFallback(snapshot);
+      }
+
+      const analysis = this.parseResponse(content);
+      if (!analysis || analysis.parseError) {
+        return this.getBusinessReportFallback(snapshot);
+      }
+
+      return {
+        success: true,
+        ...analysis,
+        generatedAt: new Date().toISOString(),
+        model: this.model,
+        tokensUsed: {
+          input: response.usage?.input_tokens || 0,
+          output: response.usage?.output_tokens || 0
+        },
+        duration,
+        snapshotSources: snapshot.sources,
+        analysisType: 'business_daily'
+      };
+
+    } catch (error) {
+      console.error('Error generating business report:', error.message);
+      return this.getBusinessReportFallback(snapshot);
+    }
+  }
+
+  /**
+   * System prompt para IA Business
+   */
+  buildBusinessSystemPrompt() {
+    return `Eres el analista de negocio de Jersey Pickles, una tienda online de pickles artesanales y olives gourmet en New Jersey, USA.
+
+TU ROL: Analizar datos REALES del negocio y dar un reporte diario con recomendaciones accionables.
+
+CONTEXTO DEL NEGOCIO:
+- E-commerce D2C de productos gourmet (pickles, olives, gift sets)
+- Canal principal de marketing: SMS (welcome 15% OFF, second chance 20% OFF)
+- El negocio NUNCA se queda sin stock - suministro continuo
+- Producto estrella: Build-your-Box (cajas personalizadas)
+- Ticket promedio: $65-70 por orden
+- Clientes en todo USA, concentrados en Texas, Florida, Pennsylvania, California
+
+REGLAS IMPORTANTES:
+- NUNCA menciones stock, inventario agotado, o problemas de suministro
+- Enfocate en: crecimiento de revenue, optimizacion del funnel SMS, adquisicion de clientes, rendimiento de descuentos
+- Se ESPECIFICO con numeros reales del snapshot
+- Todo en ESPANOL
+- Responde SOLO con JSON valido (sin markdown, sin backticks)
+
+FORMATO JSON REQUERIDO:
+{
+  "dailySummary": "3-4 oraciones resumiendo el estado del negocio hoy, comparando con periodos anteriores",
+  "kpis": {
+    "revenueToday": "Analisis del revenue de hoy vs tendencia",
+    "ordersToday": "Analisis de pedidos",
+    "smsPerformance": "Estado del canal SMS",
+    "customerAcquisition": "Nuevos clientes y fuentes"
+  },
+  "recommendations": [
+    {
+      "priority": 1,
+      "title": "Titulo corto",
+      "description": "Que hacer y por que, con datos de soporte",
+      "impact": "high o medium o low",
+      "category": "revenue o sms o customers o campaigns"
+    }
+  ],
+  "smsFunnel": {
+    "analysis": "Analisis del funnel completo con numeros",
+    "bottleneck": "Donde se pierden mas conversiones",
+    "optimization": "Que optimizar primero"
+  },
+  "trends": {
+    "positive": ["Tendencia positiva 1", "Tendencia positiva 2"],
+    "concerning": ["Tendencia preocupante 1"],
+    "opportunities": ["Oportunidad 1", "Oportunidad 2"]
+  },
+  "topProductsAnalysis": "Analisis de los productos mas vendidos y que significan para el negocio",
+  "nextActions": [
+    "Accion concreta 1 para hoy/esta semana",
+    "Accion concreta 2",
+    "Accion concreta 3"
+  ]
+}`;
+  }
+
+  /**
+   * User prompt con datos del snapshot
+   */
+  buildBusinessUserPrompt(snapshot) {
+    const biz = snapshot.business;
+    const sms = snapshot.sms;
+    const products = snapshot.products;
+    const customers = snapshot.customers;
+
+    let shopifySection = '';
+    if (biz.shopifyRealtime) {
+      const sr = biz.shopifyRealtime;
+      shopifySection = `
+DATOS SHOPIFY EN VIVO:
+- Pedidos recientes (24h): ${sr.recentOrders?.count || 0} pedidos, $${sr.recentOrders?.revenue || 0} revenue
+- Pedidos sin enviar: ${sr.unfulfilled?.count || 0} pendientes
+${sr.recentOrders?.topProducts?.length > 0 ? `- Top productos hoy: ${sr.recentOrders.topProducts.map(p => `${p.name} ($${Math.round(p.revenue)})`).join(', ')}` : ''}
+`;
+    }
+
+    let smsSection = '';
+    if (sms) {
+      smsSection = `
+CANAL SMS:
+- Suscriptores: ${sms.subscribers?.total || 0} total, ${sms.subscribers?.active || 0} activos
+- Convertidos: ${sms.subscribers?.converted || 0} (${sms.subscribers?.conversionRate || 0}%)
+- Revenue SMS total: $${sms.subscribers?.totalRevenue || 0}
+- Revenue promedio por conversion: $${sms.subscribers?.avgRevenuePerConversion || 0}
+
+FUNNEL SMS (ultimos 30 dias):
+- Welcome SMS enviados: ${sms.funnel?.welcomeSent || 0}
+- Convertidos desde Welcome: ${sms.funnel?.welcomeConverted || 0} (${sms.funnel?.welcomeRate || 0}%)
+- Second Chance enviados: ${sms.funnel?.secondChanceSent || 0}
+- Convertidos desde Second Chance: ${sms.funnel?.secondChanceConverted || 0} (${sms.funnel?.secondChanceRate || 0}%)
+
+CAMPANAS SMS:
+${sms.campaigns?.campaigns?.length > 0
+  ? sms.campaigns.campaigns.map(c => `- "${c.name}": ${c.sent} enviados, ${c.converted} convertidos, $${c.revenue} revenue`).join('\n')
+  : '- Sin campanas recientes'}
+
+BAJAS SMS:
+- Total desuscritos: ${sms.unsubscribes?.total || 0}
+- Recientes (30d): ${sms.unsubscribes?.recentUnsubscribes || 0}
+- Tasa de baja: ${sms.unsubscribes?.rate || 0}%
+
+TOP ESTADOS:
+${sms.topStates?.slice(0, 5).map(s => `- ${s.state}: ${s.subscribers} suscriptores, ${s.converted} convertidos (${s.conversionRate}%)`).join('\n') || '- Sin datos'}
+`;
+    }
+
+    return `Analiza estos datos REALES de Jersey Pickles:
+
+METRICAS DE NEGOCIO:
+- HOY: ${biz.today?.orders || 0} pedidos, $${biz.today?.revenue || 0} revenue, ticket promedio $${biz.today?.avgTicket || 0}
+- ULTIMOS 7 DIAS: ${biz.last7d?.orders || 0} pedidos, $${biz.last7d?.revenue || 0} revenue, ticket promedio $${biz.last7d?.avgTicket || 0}
+- ULTIMOS 30 DIAS: ${biz.last30d?.orders || 0} pedidos, $${biz.last30d?.revenue || 0} revenue, ticket promedio $${biz.last30d?.avgTicket || 0}
+${shopifySection}
+${smsSection}
+TOP PRODUCTOS (30 dias):
+${products?.topSelling?.slice(0, 8).map((p, i) => `${i + 1}. ${p.name}: $${p.revenue} revenue, ${p.unitsSold} unidades, ${p.orders} pedidos`).join('\n') || 'Sin datos'}
+
+USO DE DESCUENTOS:
+- Welcome (JP codes): ${products?.discountUsage?.welcome || 0} usados
+- Second Chance (SC codes): ${products?.discountUsage?.secondChance || 0} usados
+- Dinamicos (JPC codes): ${products?.discountUsage?.dynamic || 0} usados
+- Otros: ${products?.discountUsage?.other || 0}
+- Total redimidos: ${products?.discountUsage?.totalRedeemed || 0}
+
+CLIENTES:
+- Total: ${customers?.total || 0}
+- Nuevos hoy: ${customers?.newToday || 0}
+- Nuevos este mes: ${customers?.newThisMonth || 0}
+- Clientes via SMS: ${customers?.fromSms || 0}
+
+Genera tu reporte diario de IA Business con recomendaciones accionables.`;
+  }
+
+  /**
+   * Fallback para business report
+   */
+  getBusinessReportFallback(snapshot) {
+    const biz = snapshot.business;
+    const sms = snapshot.sms;
+
+    const todayRevenue = biz?.today?.revenue || 0;
+    const last30dRevenue = biz?.last30d?.revenue || 0;
+    const dailyAvg = last30dRevenue / 30;
+
+    let summaryText = `Hoy el negocio ha generado $${todayRevenue} en revenue. `;
+    if (dailyAvg > 0) {
+      const pct = Math.round((todayRevenue / dailyAvg) * 100);
+      summaryText += `Esto representa ${pct}% del promedio diario de $${Math.round(dailyAvg)}. `;
+    }
+    if (sms?.subscribers?.conversionRate) {
+      summaryText += `El canal SMS mantiene una tasa de conversion de ${sms.subscribers.conversionRate}%.`;
+    }
+
+    const recommendations = [];
+
+    if (sms?.funnel?.secondChanceRate < 5) {
+      recommendations.push({
+        priority: 1,
+        title: 'Optimizar Second Chance SMS',
+        description: `La tasa de conversion del Second Chance es ${sms.funnel.secondChanceRate}%. Considera ajustar el timing o el copy del mensaje.`,
+        impact: 'high',
+        category: 'sms'
+      });
+    }
+
+    if (sms?.unsubscribes?.rate > 5) {
+      recommendations.push({
+        priority: 2,
+        title: 'Revisar tasa de bajas',
+        description: `La tasa de bajas es ${sms.unsubscribes.rate}%, por encima del 3% recomendado.`,
+        impact: 'high',
+        category: 'sms'
+      });
+    }
+
+    recommendations.push({
+      priority: recommendations.length + 1,
+      title: 'Considerar campana SMS',
+      description: 'Evalua lanzar una campana SMS segmentada para los estados con mayor conversion.',
+      impact: 'medium',
+      category: 'campaigns'
+    });
+
+    return {
+      success: true,
+      dailySummary: summaryText,
+      kpis: {
+        revenueToday: `$${todayRevenue} en revenue hoy`,
+        ordersToday: `${biz?.today?.orders || 0} pedidos hoy`,
+        smsPerformance: `${sms?.subscribers?.conversionRate || 0}% tasa de conversion SMS`,
+        customerAcquisition: `${snapshot.customers?.newToday || 0} clientes nuevos hoy`
+      },
+      recommendations,
+      smsFunnel: {
+        analysis: 'Analisis basico - Claude AI no disponible para analisis profundo.',
+        bottleneck: 'Requiere Claude AI para identificar cuellos de botella.',
+        optimization: 'Revisar timing del Second Chance SMS.'
+      },
+      trends: {
+        positive: ['Revenue activo'],
+        concerning: [],
+        opportunities: ['Expandir campanas SMS a estados con alta conversion']
+      },
+      topProductsAnalysis: 'Analisis basico - requiere Claude AI para insights profundos.',
+      nextActions: [
+        'Revisar metricas del funnel SMS',
+        'Evaluar campana para top estados',
+        'Monitorear tasa de bajas'
+      ],
+      generatedAt: new Date().toISOString(),
+      model: 'fallback-analysis',
+      tokensUsed: { input: 0, output: 0 },
+      isFallback: true,
+      analysisType: 'business_daily'
+    };
+  }
+
   // ==================== SMS MESSAGE SUGGESTIONS ====================
 
   /**

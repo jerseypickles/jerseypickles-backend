@@ -263,6 +263,14 @@ try {
   });
 }
 
+// IA BUSINESS ROUTES
+try {
+  const businessRoutes = require('./src/routes/business');
+  app.use('/api/ai/business', businessRoutes);
+} catch (error) {
+  console.log('IA Business routes not available:', error.message);
+}
+
 // PRODUCTS ROUTES
 try {
   const productsRoutes = require('./src/routes/products');

@@ -31,7 +31,10 @@ const aiInsightSchema = new mongoose.Schema({
       'sms_time_to_convert',        // Análisis de timing
       'sms_campaign_performance',   // Performance de campañas SMS
       'sms_comprehensive_report',   // Reporte completo SMS
-      'sms_ai_insights'             // Insights de Claude para SMS
+      'sms_ai_insights',            // Insights de Claude para SMS
+      // IA Business (Daily Snapshot)
+      'business_daily_snapshot',    // Snapshot diario de datos
+      'business_daily_report'       // Reporte IA del negocio
     ],
     required: true,
     index: true

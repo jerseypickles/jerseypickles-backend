@@ -6,6 +6,7 @@ const cron = require('node-cron');
 const AIInsight = require('../models/AIInsight');
 const smsCalculator = require('../services/smsCalculator');
 const claudeService = require('../services/claudeService');
+const dailyBusinessSnapshot = require('../services/dailyBusinessSnapshot');
 
 /**
  * AI Analytics Job (SMS-Focused)
@@ -169,18 +170,22 @@ class AIAnalyticsJob {
         return report;
       }, results);
 
+      // ==================== FASE 4: DAILY BUSINESS SNAPSHOT ====================
+
+      await this.generateBusinessSnapshot(results);
+
       // Cleanup old insights
       await AIInsight.cleanup(90);
 
     } catch (error) {
-      console.error('❌ Error crítico en AI Analytics Job:', error);
+      console.error('Error critico en AI Analytics Job:', error);
     } finally {
       this.isRunning = false;
 
       const duration = ((Date.now() - startTime) / 1000).toFixed(2);
 
       console.log('\n╔════════════════════════════════════════════════╗');
-      console.log('║  ✅ SMS ANALYTICS - COMPLETADO                  ║');
+      console.log('  ANALYTICS + IA BUSINESS - COMPLETADO            ');
       console.log('╚════════════════════════════════════════════════╝');
       console.log(`   Duración: ${duration}s`);
       console.log(`   Exitosos: ${results.success.length}`);
@@ -239,6 +244,47 @@ class AIAnalyticsJob {
     } catch (error) {
       console.error(`      ❌ Error generando insights con Claude: ${error.message}`);
       results.failed.push('sms_ai_insights');
+    }
+  }
+
+  /**
+   * Generar Business Snapshot diario + Reporte IA
+   */
+  async generateBusinessSnapshot(results) {
+    console.log('\n   Generando Business Snapshot (MongoDB + Shopify)...');
+
+    try {
+      // 1. Generar snapshot de datos
+      const snapshot = await dailyBusinessSnapshot.generateSnapshot();
+
+      // Guardar snapshot
+      await AIInsight.saveAnalysis('business_daily_snapshot', 1, snapshot, {
+        recalculateHours: 6
+      });
+      results.success.push('business_daily_snapshot');
+      console.log(`      Snapshot generado: ${snapshot.sources.join(' + ')}`);
+
+      // 2. Generar reporte IA con Claude
+      console.log('      Generando reporte IA Business con Claude...');
+      const report = await claudeService.generateDailyBusinessReport(snapshot);
+
+      await AIInsight.saveAnalysis('business_daily_report', 1, report, {
+        recalculateHours: 6
+      });
+
+      if (report.success) {
+        results.success.push(`business_daily_report (${report.model})`);
+        console.log(`      Reporte IA generado: ${report.recommendations?.length || 0} recomendaciones`);
+        if (report.tokensUsed) {
+          console.log(`      Tokens: ${report.tokensUsed.input} in / ${report.tokensUsed.output} out`);
+        }
+      } else {
+        results.success.push('business_daily_report (fallback)');
+      }
+
+    } catch (error) {
+      console.error(`      Error generando Business Snapshot: ${error.message}`);
+      results.failed.push('business_snapshot');
     }
   }
 
