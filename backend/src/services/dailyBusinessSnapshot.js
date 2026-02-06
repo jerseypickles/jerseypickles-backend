@@ -4,9 +4,7 @@
 const SmsSubscriber = require('../models/SmsSubscriber');
 const Order = require('../models/Order');
 const SmsCampaign = require('../models/SmsCampaign');
-const SmsMessage = require('../models/SmsMessage');
 const Customer = require('../models/Customer');
-const Product = require('../models/Product');
 
 let shopifyService = null;
 try {
@@ -154,9 +152,9 @@ class DailyBusinessSnapshot {
     const [total, active, converted, totalRevenue] = await Promise.all([
       SmsSubscriber.countDocuments(),
       SmsSubscriber.countDocuments({ status: 'active' }),
-      SmsSubscriber.countDocuments({ hasConverted: true }),
+      SmsSubscriber.countDocuments({ converted: true }),
       SmsSubscriber.aggregate([
-        { $match: { hasConverted: true } },
+        { $match: { converted: true } },
         { $group: { _id: null, total: { $sum: '$conversionData.orderTotal' } } }
       ])
     ]);
@@ -177,24 +175,31 @@ class DailyBusinessSnapshot {
   async getSmsFunnel(startDate, endDate) {
     try {
       const [welcomeSent, welcomeConverted, secondChanceSent, secondChanceConverted] = await Promise.all([
-        SmsMessage.countDocuments({
-          type: 'welcome',
+        // Welcome SMS sent = subscribers with welcomeSmsSent=true in date range
+        SmsSubscriber.countDocuments({
+          welcomeSmsSent: true,
           createdAt: { $gte: startDate, $lte: endDate }
         }),
+        // Converted via welcome (first) discount
         SmsSubscriber.countDocuments({
-          hasConverted: true,
-          'conversionData.discount': { $regex: /^JP/i },
-          updatedAt: { $gte: startDate, $lte: endDate }
-        }),
-        SmsMessage.countDocuments({
-          type: 'second_chance',
+          converted: true,
+          $or: [
+            { convertedWith: 'first' },
+            { convertedWith: { $exists: false } },
+            { convertedWith: null }
+          ],
           createdAt: { $gte: startDate, $lte: endDate }
         }),
+        // Second chance SMS sent
         SmsSubscriber.countDocuments({
-          hasConverted: true,
-          secondChanceSent: true,
-          'conversionData.discount': { $regex: /^SC/i },
-          updatedAt: { $gte: startDate, $lte: endDate }
+          secondSmsSent: true,
+          secondSmsAt: { $gte: startDate, $lte: endDate }
+        }),
+        // Converted via second chance
+        SmsSubscriber.countDocuments({
+          converted: true,
+          convertedWith: 'second',
+          createdAt: { $gte: startDate, $lte: endDate }
         })
       ]);
 
@@ -266,7 +271,7 @@ class DailyBusinessSnapshot {
           $group: {
             _id: '$location.regionName',
             count: { $sum: 1 },
-            converted: { $sum: { $cond: ['$hasConverted', 1, 0] } }
+            converted: { $sum: { $cond: ['$converted', 1, 0] } }
           }
         },
         { $sort: { count: -1 } },
@@ -375,7 +380,7 @@ class DailyBusinessSnapshot {
         Customer.countDocuments(),
         Customer.countDocuments({ createdAt: { $gte: todayStart } }),
         Customer.countDocuments({ createdAt: { $gte: last30d } }),
-        SmsSubscriber.countDocuments({ hasConverted: true })
+        SmsSubscriber.countDocuments({ converted: true })
       ]);
 
       return {
