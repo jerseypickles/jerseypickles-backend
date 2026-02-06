@@ -656,6 +656,152 @@ Responde SOLO con JSON válido:
     };
   }
 
+  // ==================== SMS CAMPAIGN TEMPLATE GENERATION ====================
+
+  /**
+   * Generate SMS campaign templates using AI
+   * Returns 6 ready-to-use templates based on context
+   */
+  async generateSmsTemplates(context = {}) {
+    const { discountType, discountPercent, dynamicMin, dynamicMax, audienceType, campaignGoal } = context;
+
+    const discountInfo = discountType === 'dynamic'
+      ? `Descuento DINÁMICO: cada suscriptor recibe un % aleatorio entre ${dynamicMin || 25}% y ${dynamicMax || 30}%. Usa {discount} como placeholder para el porcentaje y {code} para el código.`
+      : `Descuento FIJO: ${discountPercent || 15}%. Usa {discount} para el porcentaje y {code} para el código.`;
+
+    const prompt = `Genera 6 plantillas de mensajes SMS para una campaña de Jersey Pickles (pickles artesanales y olives gourmet de New Jersey).
+
+CONTEXTO:
+- ${discountInfo}
+- Audiencia: ${audienceType || 'todos los suscriptores'}
+- Objetivo: ${campaignGoal || 'conversión'}
+- Variables disponibles: {name} (nombre), {discount} (%), {code} (código descuento), {link} (se reemplaza auto)
+
+REGLAS:
+1. Cada mensaje DEBE incluir "Reply STOP to opt-out" al final
+2. Usa {name}, {discount}, {code} y {link} como variables
+3. Tono: casual, directo, amigable (como un amigo que te recomienda algo)
+4. Máximo 300 caracteres por mensaje (2 segmentos SMS)
+5. Varía los estilos: urgencia, exclusividad, casual, humor, FOMO, gratitud
+6. NO uses "Dear" ni lenguaje formal
+7. Incluye emojis relevantes (🥒🫒✨👀🔥💚) con moderación
+
+IMPORTANTE: Genera plantillas VARIADAS con diferentes enfoques:
+- 1 plantilla de urgencia/escasez
+- 1 plantilla casual/amigable
+- 1 plantilla de exclusividad/VIP
+- 1 plantilla con humor
+- 1 plantilla de restock/novedades
+- 1 plantilla de gratitud/loyalty
+
+Responde SOLO con JSON válido:
+{
+  "templates": [
+    {
+      "id": "unique_id",
+      "name": "Nombre corto (2-3 palabras)",
+      "icon": "emoji representativo",
+      "category": "Categoría (Urgencia, Casual, VIP, Humor, Restock, Loyalty)",
+      "message": "El mensaje completo con variables {name}, {discount}, {code}, {link}"
+    }
+  ]
+}`;
+
+    if (!this.isAvailable()) {
+      return this.getSmsTemplatesFallback(context);
+    }
+
+    try {
+      console.log('🧠 Generando plantillas SMS con Claude...');
+
+      const response = await this.client.messages.create({
+        model: this.model,
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt }]
+      });
+
+      const content = response.content[0]?.text;
+      const parsed = this.parseResponse(content);
+
+      if (!parsed?.templates || parsed.templates.length === 0) {
+        return this.getSmsTemplatesFallback(context);
+      }
+
+      return {
+        success: true,
+        templates: parsed.templates,
+        generatedAt: new Date().toISOString(),
+        model: this.model,
+        tokensUsed: {
+          input: response.usage?.input_tokens || 0,
+          output: response.usage?.output_tokens || 0
+        }
+      };
+
+    } catch (error) {
+      console.error('Error generando plantillas SMS:', error.message);
+      return this.getSmsTemplatesFallback(context);
+    }
+  }
+
+  /**
+   * Fallback templates when Claude is unavailable
+   */
+  getSmsTemplatesFallback(context = {}) {
+    const pct = context.discountType === 'dynamic' ? '{discount}' : (context.discountPercent || '15');
+
+    return {
+      success: true,
+      templates: [
+        {
+          id: 'urgency_1',
+          name: 'Going Fast',
+          icon: '🔥',
+          category: 'Urgencia',
+          message: `Heads up {name} - this batch is going FAST 🥒 ${pct}% off with code {code} before it's gone!\n\n{link}\n\nReply STOP to opt-out`
+        },
+        {
+          id: 'casual_1',
+          name: 'Quick Hey',
+          icon: '👋',
+          category: 'Casual',
+          message: `Hey {name}! Just restocked your favorites. Thought you'd want first dibs - here's ${pct}% off: {code}\n\n{link}\n\nReply STOP to opt-out`
+        },
+        {
+          id: 'vip_1',
+          name: 'VIP Access',
+          icon: '🤫',
+          category: 'VIP',
+          message: `Shhh {name}... friends & family sale. ${pct}% off, code's {code}. Don't tell everyone ;)\n\n{link}\n\nReply STOP to opt-out`
+        },
+        {
+          id: 'humor_1',
+          name: 'Pickle Craving',
+          icon: '😏',
+          category: 'Humor',
+          message: `{name}, your pickle craving called... we answered 🥒 ${pct}% off today with {code}. You're welcome.\n\n{link}\n\nReply STOP to opt-out`
+        },
+        {
+          id: 'restock_1',
+          name: 'Fresh Batch',
+          icon: '✨',
+          category: 'Restock',
+          message: `Fresh batch just came out of the brine ✨ Grab ${pct}% off with {code} while it's fresh, {name}!\n\n{link}\n\nReply STOP to opt-out`
+        },
+        {
+          id: 'loyalty_1',
+          name: 'Thank You',
+          icon: '💚',
+          category: 'Loyalty',
+          message: `{name}, just wanted to say thanks for being a customer 💚 Here's ${pct}% off as a little thank you: {code}\n\n{link}\n\nReply STOP to opt-out`
+        }
+      ],
+      generatedAt: new Date().toISOString(),
+      model: 'fallback-templates',
+      isFallback: true
+    };
+  }
+
   /**
    * Predecir performance de campaña SMS con Claude
    * POST /api/ai/campaigns/predict

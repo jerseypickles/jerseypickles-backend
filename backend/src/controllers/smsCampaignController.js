@@ -134,8 +134,37 @@ const smsCampaignController = {
     }
   },
 
+  // ==================== GENERATE AI TEMPLATES ====================
+
+  /**
+   * POST /api/sms/campaigns/generate-templates
+   * Generate SMS campaign templates using AI
+   */
+  async generateTemplates(req, res) {
+    try {
+      let claudeService;
+      try {
+        claudeService = require('../services/claudeService');
+        claudeService.init();
+      } catch (e) {
+        // Claude not available, will use fallback
+      }
+
+      if (!claudeService) {
+        return res.status(500).json({ success: false, error: 'AI service not available' });
+      }
+
+      const result = await claudeService.generateSmsTemplates(req.body);
+
+      res.json(result);
+    } catch (error) {
+      console.error('❌ Generate Templates Error:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
   // ==================== GET CAMPAIGNS ====================
-  
+
   /**
    * GET /api/sms/campaigns
    * List all campaigns with pagination

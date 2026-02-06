@@ -29,6 +29,9 @@ router.get('/stats/overview', optionalProtect, smsCampaignController.getOverview
 // Get audience count by filters (must be before /:id routes)
 router.get('/audience-count', optionalProtect, smsCampaignController.audienceCount);
 
+// Generate AI templates (must be before /:id routes)
+router.post('/generate-templates', optionalProtect, smsCampaignController.generateTemplates);
+
 // List campaigns
 router.get('/', optionalProtect, smsCampaignController.list);
 
