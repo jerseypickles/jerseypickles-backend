@@ -98,7 +98,8 @@ const corsOptions = {
       'http://localhost:3000',
       'http://localhost:5174',
       'https://jerseypickles.com',
-      'https://www.jerseypickles.com'
+      'https://www.jerseypickles.com',
+      'https://113e43-2.myshopify.com'
     ];
     
     const vercelPatterns = [
