@@ -5,6 +5,7 @@ const Order = require('../models/Order');
 const EmailEvent = require('../models/EmailEvent');
 const EmailSend = require('../models/EmailSend');
 const Campaign = require('../models/Campaign');
+const BybFunnelEvent = require('../models/BybFunnelEvent');
 const WebhookLog = require('../models/WebhookLog');
 const AttributionService = require('../middleware/attributionTracking');
 const crypto = require('crypto');
@@ -49,6 +50,142 @@ const extractMetadata = (req) => ({
   contentLength: req.headers['content-length'],
   receivedAt: new Date()
 });
+
+const parseLineItemProperties = (properties) => {
+  if (!properties) return {};
+
+  if (Array.isArray(properties)) {
+    return properties.reduce((acc, prop) => {
+      const key = prop?.name || prop?.key;
+      if (!key) return acc;
+      acc[String(key)] = prop?.value;
+      return acc;
+    }, {});
+  }
+
+  if (typeof properties === 'object') return properties;
+  return {};
+};
+
+const parseJarCountFromBoxSize = (boxSize) => {
+  if (!boxSize) return undefined;
+  const match = String(boxSize).match(/(\d+)/);
+  if (!match) return undefined;
+  const value = parseInt(match[1], 10);
+  return Number.isFinite(value) ? value : undefined;
+};
+
+const parseSelectedProducts = (selectedProducts) => {
+  if (!selectedProducts || typeof selectedProducts !== 'string') return [];
+
+  return selectedProducts
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const match = item.match(/^(.*)\((\d+)\)$/);
+      if (match) {
+        return {
+          name: match[1].trim(),
+          quantity: parseInt(match[2], 10) || 1
+        };
+      }
+
+      return { name: item, quantity: 1 };
+    });
+};
+
+const extractBybContextFromOrder = (order = {}) => {
+  const lineItems = Array.isArray(order.line_items) ? order.line_items : [];
+  const bybSignalKeys = new Set([
+    'Box_Type',
+    'Jar_Type',
+    'Box_Size',
+    'Max_Items',
+    'Selected_Barcodes',
+    'Selected_Product_Names',
+    'Extra_Olive',
+    '_byb_session',
+    '_byb_addon'
+  ]);
+
+  let isByb = false;
+  let sessionId = null;
+  let baseLineItem = null;
+  let baseProps = null;
+
+  for (const item of lineItems) {
+    const properties = parseLineItemProperties(item?.properties);
+    const propKeys = Object.keys(properties);
+    const hasBybProperty = propKeys.some(
+      (key) => bybSignalKeys.has(key) || key.startsWith('_byb_')
+    );
+    const title = String(item?.title || '').toLowerCase();
+    const productType = String(item?.product_type || '').toLowerCase();
+    const hasBybTitleSignal = title.includes('build your box') || title.includes('byb');
+    const hasBybTypeSignal = productType.includes('build your box') || productType === 'byb';
+
+    if (!hasBybProperty && !hasBybTitleSignal && !hasBybTypeSignal) continue;
+
+    isByb = true;
+
+    if (!sessionId && properties._byb_session) {
+      sessionId = String(properties._byb_session).trim();
+    }
+
+    const isAddon = String(properties._byb_addon || '').toLowerCase() === 'true';
+    if (!isAddon && !baseProps) {
+      baseProps = properties;
+      baseLineItem = item;
+    }
+  }
+
+  if (!sessionId && Array.isArray(order.note_attributes)) {
+    for (const attr of order.note_attributes) {
+      const key = String(attr?.name || '').trim();
+      if (!key) continue;
+      if (key === '_byb_session' || key === 'byb_session_id') {
+        const value = String(attr?.value || '').trim();
+        if (value) {
+          sessionId = value;
+          break;
+        }
+      }
+    }
+  }
+
+  if (!isByb) {
+    return {
+      isByb: false,
+      sessionId: null,
+      metadata: {}
+    };
+  }
+
+  const maxItems = parseInt(baseProps?.Max_Items, 10);
+  const productsSelected = parseSelectedProducts(baseProps?.Selected_Product_Names);
+  const productsCountFromNames = productsSelected.reduce(
+    (sum, product) => sum + (parseInt(product.quantity, 10) || 0),
+    0
+  );
+  const jarCountFromSize = parseJarCountFromBoxSize(baseProps?.Box_Size);
+  const lineItemPrice = parseFloat(baseLineItem?.price || baseLineItem?.final_price || 0);
+  const extraOliveAccepted = String(baseProps?.Extra_Olive || '').toLowerCase() === 'yes';
+
+  return {
+    isByb: true,
+    sessionId: sessionId || null,
+    metadata: {
+      jarType: baseProps?.Jar_Type || undefined,
+      jarCount: jarCountFromSize || (Number.isFinite(maxItems) ? maxItems : undefined),
+      boxPrice: Number.isFinite(lineItemPrice) ? lineItemPrice : undefined,
+      productsSelected,
+      totalProducts: productsCountFromNames || (Number.isFinite(maxItems) ? maxItems : undefined),
+      extraOliveShown: extraOliveAccepted || undefined,
+      extraOliveAccepted: extraOliveAccepted || undefined
+    }
+  };
+};
 
 class WebhooksController {
   
@@ -372,6 +509,31 @@ class WebhooksController {
         details: { orderId: order._id, orderNumber: order.orderNumber, total: order.totalPrice },
         success: true
       });
+
+      const bybFunnelResult = await this.recordBybPurchaseCompleteFromOrder(shopifyOrder, topic);
+      if (bybFunnelResult.tracked) {
+        actions.push({
+          type: 'byb_funnel_step_8_recorded',
+          details: {
+            eventId: bybFunnelResult.eventId,
+            sessionId: bybFunnelResult.sessionId,
+            usedFallbackSession: bybFunnelResult.usedFallbackSession
+          },
+          success: true
+        });
+      } else if (bybFunnelResult.reason === 'already_tracked') {
+        actions.push({
+          type: 'byb_funnel_step_8_already_tracked',
+          details: { orderId: shopifyOrder.id?.toString() },
+          success: true
+        });
+      } else if (bybFunnelResult.reason !== 'not_byb') {
+        actions.push({
+          type: 'byb_funnel_step_8_recorded',
+          details: { error: bybFunnelResult.error || bybFunnelResult.reason },
+          success: false
+        });
+      }
       
       const previousOrdersCount = customer.ordersCount || 0;
       
@@ -1072,6 +1234,65 @@ class WebhooksController {
     }
   }
 
+  async recordBybPurchaseCompleteFromOrder(order, webhookTopic = 'orders/create') {
+    try {
+      const bybContext = extractBybContextFromOrder(order);
+      if (!bybContext.isByb) {
+        return { tracked: false, reason: 'not_byb' };
+      }
+
+      const orderId = order?.id?.toString();
+      if (!orderId) {
+        return { tracked: false, reason: 'missing_order_id' };
+      }
+
+      const existingStep8 = await BybFunnelEvent.findOne({
+        step: 'step_8_purchase_complete',
+        'metadata.orderId': orderId
+      }).select('_id').lean();
+
+      if (existingStep8) {
+        return {
+          tracked: false,
+          reason: 'already_tracked',
+          eventId: existingStep8._id?.toString()
+        };
+      }
+
+      const sessionId = bybContext.sessionId || `byb_order_${orderId}`;
+      const totalPrice = parseFloat(order?.total_price || order?.current_total_price || 0) || 0;
+
+      const event = new BybFunnelEvent({
+        sessionId,
+        customerId: order?.customer?.id?.toString(),
+        step: 'step_8_purchase_complete',
+        metadata: {
+          ...bybContext.metadata,
+          cartTotal: totalPrice,
+          orderId,
+          orderNumber: order?.order_number?.toString()
+        },
+        pageUrl: order?.order_status_url || '',
+        referrer: order?.referring_site || ''
+      });
+
+      await event.save();
+      console.log(
+        `📊 BYB Funnel: Recorded step_8_purchase_complete via ${webhookTopic} for order ${orderId} (session ${sessionId})`
+      );
+
+      return {
+        tracked: true,
+        eventId: event._id?.toString(),
+        sessionId,
+        usedFallbackSession: !bybContext.sessionId
+      };
+    } catch (error) {
+      console.error(`❌ BYB Funnel step_8 webhook error (${webhookTopic}):`, error.message);
+      return { tracked: false, reason: 'error', error: error.message };
+    }
+  }
+
   async orderPaid(req, res) {
     const topic = 'orders/paid';
     let webhookLog;
@@ -1090,10 +1311,39 @@ class WebhooksController {
       });
       
       console.log('💰 Webhook: Order Paid', order.id);
-      
-      await webhookLog.markProcessed([
+
+      await webhookLog.markProcessing();
+
+      const actions = [
         { type: 'order_paid', details: { orderId: order.id }, success: true }
-      ], []);
+      ];
+
+      const bybFunnelResult = await this.recordBybPurchaseCompleteFromOrder(order, topic);
+      if (bybFunnelResult.tracked) {
+        actions.push({
+          type: 'byb_funnel_step_8_recorded',
+          details: {
+            eventId: bybFunnelResult.eventId,
+            sessionId: bybFunnelResult.sessionId,
+            usedFallbackSession: bybFunnelResult.usedFallbackSession
+          },
+          success: true
+        });
+      } else if (bybFunnelResult.reason === 'already_tracked') {
+        actions.push({
+          type: 'byb_funnel_step_8_already_tracked',
+          details: { orderId: order.id?.toString() },
+          success: true
+        });
+      } else if (bybFunnelResult.reason !== 'not_byb') {
+        actions.push({
+          type: 'byb_funnel_step_8_recorded',
+          details: { error: bybFunnelResult.error || bybFunnelResult.reason },
+          success: false
+        });
+      }
+
+      await webhookLog.markProcessed(actions, []);
       
       res.status(200).json({ success: true, logId: webhookLog._id });
       
