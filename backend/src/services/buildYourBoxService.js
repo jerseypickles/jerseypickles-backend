@@ -48,6 +48,8 @@ class BuildYourBoxService {
     this.maxAnalyticsDays = 60;
     this.snapshotRefreshDays = 10;
     this.snapshotInFlight = new Map();
+    this.snapshotLastAttempt = new Map();
+    this.snapshotRefreshCooldownMs = 60 * 60 * 1000; // 1 hour between retries
   }
 
   normalizeAnalyticsDays(days, fallback = this.defaultAnalyticsDays) {
@@ -68,12 +70,11 @@ class BuildYourBoxService {
     return validUntil;
   }
 
-  async loadFreshSnapshot(reportType, periodDays) {
+  async loadLatestSnapshot(reportType, periodDays) {
     try {
       return await BybReportSnapshot.findOne({
         reportType,
-        periodDays,
-        validUntil: { $gt: new Date() }
+        periodDays
       }).sort({ generatedAt: -1 }).lean();
     } catch (error) {
       console.error('⚠️ BYB snapshot read error, using live calc:', error.message);
@@ -112,26 +113,65 @@ class BuildYourBoxService {
     }
   }
 
+  canAttemptSnapshotRefresh(snapshotKey) {
+    const lastAttempt = this.snapshotLastAttempt.get(snapshotKey) || 0;
+    return (Date.now() - lastAttempt) >= this.snapshotRefreshCooldownMs;
+  }
+
+  async buildAndPersistSnapshot(reportType, periodDays, builder, inFlightKey) {
+    this.snapshotLastAttempt.set(inFlightKey, Date.now());
+    const payload = await builder(periodDays);
+    await this.saveSnapshot(reportType, periodDays, payload, {
+      source: 'shopify_orders',
+      generatedAt: new Date().toISOString()
+    });
+    return payload;
+  }
+
   async getOrBuildSnapshot(reportType, days, builder) {
     const normalizedDays = this.normalizeAnalyticsDays(days);
-    const freshSnapshot = await this.loadFreshSnapshot(reportType, normalizedDays);
-    if (freshSnapshot?.payload) {
-      return freshSnapshot.payload;
+    const inFlightKey = this.getSnapshotKey(reportType, normalizedDays);
+    const latestSnapshot = await this.loadLatestSnapshot(reportType, normalizedDays);
+    const hasFreshSnapshot = latestSnapshot?.validUntil && new Date(latestSnapshot.validUntil) > new Date();
+
+    if (hasFreshSnapshot && latestSnapshot?.payload) {
+      console.log(`📦 BYB snapshot hit (${inFlightKey}) validUntil=${new Date(latestSnapshot.validUntil).toISOString()}`);
+      return latestSnapshot.payload;
     }
 
-    const inFlightKey = this.getSnapshotKey(reportType, normalizedDays);
     if (this.snapshotInFlight.has(inFlightKey)) {
       return this.snapshotInFlight.get(inFlightKey);
     }
 
-    const buildPromise = (async () => {
-      const payload = await builder(normalizedDays);
-      await this.saveSnapshot(reportType, normalizedDays, payload, {
-        source: 'shopify_orders',
-        generatedAt: new Date().toISOString()
-      });
-      return payload;
-    })();
+    if (latestSnapshot?.payload) {
+      console.log(`⏳ BYB stale snapshot served (${inFlightKey}) validUntil=${new Date(latestSnapshot.validUntil).toISOString()}`);
+      if (this.canAttemptSnapshotRefresh(inFlightKey)) {
+        console.log(`🔄 BYB snapshot background refresh started (${inFlightKey})`);
+        const backgroundPromise = this.buildAndPersistSnapshot(
+          reportType,
+          normalizedDays,
+          builder,
+          inFlightKey
+        ).catch((error) => {
+          console.error(`⚠️ BYB snapshot background refresh failed (${inFlightKey}):`, error.message);
+          return latestSnapshot.payload;
+        }).finally(() => {
+          this.snapshotInFlight.delete(inFlightKey);
+        });
+
+        this.snapshotInFlight.set(inFlightKey, backgroundPromise);
+      }
+
+      return latestSnapshot.payload;
+    }
+
+    const buildPromise = this.buildAndPersistSnapshot(
+      reportType,
+      normalizedDays,
+      builder,
+      inFlightKey
+    );
+    console.log(`🧱 BYB snapshot build required (${inFlightKey})`);
 
     this.snapshotInFlight.set(inFlightKey, buildPromise);
 
