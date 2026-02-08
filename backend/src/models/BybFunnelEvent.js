@@ -3,6 +3,15 @@
 
 const mongoose = require('mongoose');
 
+const LEGACY_STEP_MAP = {
+  step_1_jar_selected: 'step_1_type_selected',
+  step_5_review: 'step_6_review',
+  step_6_checkout: 'step_7_checkout_started',
+  extra_olive_shown: 'step_5_extra_olive_shown',
+  extra_olive_accepted: 'step_5_extra_olive_accepted',
+  extra_olive_declined: 'step_5_extra_olive_declined'
+};
+
 const bybFunnelEventSchema = new mongoose.Schema({
   // Session identifier (anonymous until checkout)
   sessionId: {
@@ -30,6 +39,7 @@ const bybFunnelEventSchema = new mongoose.Schema({
   step: {
     type: String,
     required: true,
+    set: (value) => LEGACY_STEP_MAP[String(value || '').trim()] || value,
     enum: [
       'step_0_landing',
       'step_1_type_selected',

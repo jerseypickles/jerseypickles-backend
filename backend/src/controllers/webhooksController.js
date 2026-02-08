@@ -1043,6 +1043,24 @@ class WebhooksController {
       res.status(200).json({ success: true, logId: webhookLog._id });
 
     } catch (error) {
+      if (error?.code === 11000 && error?.keyPattern?.shopifyId) {
+        console.warn('⚠️ Duplicate order key detected in outer catch. Returning 200 to avoid webhook retries.');
+        try {
+          if (webhookLog) {
+            await webhookLog.markProcessed([
+              {
+                type: 'order_already_exists',
+                details: { source: 'outer_catch', keyValue: error?.keyValue || null },
+                success: true
+              }
+            ], []);
+          }
+        } catch (markErr) {
+          console.warn('⚠️ Failed to mark webhook log as processed after duplicate:', markErr.message);
+        }
+        return res.status(200).json({ success: true, duplicate: true, recovered: true, logId: webhookLog?._id || null });
+      }
+
       console.error('❌ Error en orderCreate:', error);
       if (webhookLog) await webhookLog.markFailed(error);
       res.status(500).json({ error: error.message });
