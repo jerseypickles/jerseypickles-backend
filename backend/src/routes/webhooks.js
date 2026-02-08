@@ -39,6 +39,10 @@ router.post('/orders/fulfilled', validateShopifyWebhook, webhooksController.orde
 router.post('/orders/cancelled', validateShopifyWebhook, webhooksController.orderCancelled);
 router.post('/orders/paid', validateShopifyWebhook, webhooksController.orderPaid);
 
+// Fulfillment webhooks (delivery confirmation trigger)
+router.post('/fulfillments/update', validateShopifyWebhook, webhooksController.fulfillmentUpdate);
+router.post('/fulfillment_events/create', validateShopifyWebhook, webhooksController.fulfillmentEventCreate);
+
 // Checkout webhooks (Abandoned Cart Tracking)
 router.post('/checkouts/create', validateShopifyWebhook, webhooksController.checkoutCreate);
 router.post('/checkouts/update', validateShopifyWebhook, webhooksController.checkoutUpdate);

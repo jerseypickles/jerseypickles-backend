@@ -258,6 +258,16 @@ class ShopifyService {
         address: `${process.env.APP_URL}/api/webhooks/orders/update`,
         format: 'json'
       },
+      {
+        topic: 'fulfillments/update',
+        address: `${process.env.APP_URL}/api/webhooks/fulfillments/update`,
+        format: 'json'
+      },
+      {
+        topic: 'fulfillment_events/create',
+        address: `${process.env.APP_URL}/api/webhooks/fulfillment_events/create`,
+        format: 'json'
+      },
       
       // 🆕 NUEVOS WEBHOOKS PARA FLOWS
       {

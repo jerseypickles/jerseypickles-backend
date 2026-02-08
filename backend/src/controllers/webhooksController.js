@@ -51,6 +51,55 @@ const extractMetadata = (req) => ({
   receivedAt: new Date()
 });
 
+const normalizeStatus = (value) => String(value || '').trim().toLowerCase();
+
+const isDeliveredStatus = (value) => normalizeStatus(value) === 'delivered';
+
+const isFulfillmentDelivered = (fulfillment = {}) => {
+  const directStatuses = [
+    fulfillment.shipment_status,
+    fulfillment.delivery_status,
+    fulfillment.status,
+    fulfillment.fulfillment_status,
+    fulfillment.event_status
+  ];
+
+  if (directStatuses.some(isDeliveredStatus)) return true;
+
+  if (Array.isArray(fulfillment.events)) {
+    return fulfillment.events.some((event) => isDeliveredStatus(event?.status));
+  }
+
+  return false;
+};
+
+const isFulfillmentEventDelivered = (event = {}) => {
+  const eventStatuses = [
+    event.status,
+    event.shipment_status,
+    event.delivery_status,
+    event.fulfillment_status,
+    event.event_status
+  ];
+
+  if (eventStatuses.some(isDeliveredStatus)) return true;
+  return isFulfillmentDelivered(event.fulfillment || {});
+};
+
+const loadOrderPayloadForSms = async (shopifyOrderId, fallbackOrder = null) => {
+  if (fallbackOrder && typeof fallbackOrder === 'object' && Object.keys(fallbackOrder).length > 0) {
+    return fallbackOrder;
+  }
+
+  if (!shopifyOrderId) return null;
+
+  const orderDoc = await Order.findOne({ shopifyId: shopifyOrderId.toString() })
+    .select('shopifyData')
+    .lean();
+
+  return orderDoc?.shopifyData || null;
+};
+
 const parseLineItemProperties = (properties) => {
   if (!properties) return {};
 
@@ -1104,11 +1153,11 @@ class WebhooksController {
         { type: 'order_updated', details: { orderId: shopifyOrder.id }, success: true }
       ];
 
-      // ==================== SMS SHIPPING NOTIFICATION ====================
-      // Check for new fulfillments with tracking info
+      // ==================== SMS SHIPPING + DELIVERY NOTIFICATIONS ====================
+      // Check fulfillments on order updates (shipping + delivered)
       if (smsTransactionalService && shopifyOrder.fulfillments && shopifyOrder.fulfillments.length > 0) {
         for (const fulfillment of shopifyOrder.fulfillments) {
-          // Only process if has tracking and is recent (created in last 5 minutes)
+          // Shipping trigger: has tracking and created recently
           const hasTracking = fulfillment.tracking_number || fulfillment.tracking_url;
           const createdAt = new Date(fulfillment.created_at);
           const isRecent = (Date.now() - createdAt.getTime()) < 5 * 60 * 1000; // 5 minutes
@@ -1138,9 +1187,36 @@ class WebhooksController {
               console.log('⚠️ SMS Shipping error:', smsErr.message);
             }
           }
+
+          // Delivery trigger: any fulfillment that reports delivered status
+          if (isFulfillmentDelivered(fulfillment)) {
+            try {
+              console.log(`📱 Triggering Delivery SMS for fulfillment ${fulfillment.id}...`);
+              const smsResult = await smsTransactionalService.sendDeliveryConfirmation(shopifyOrder, fulfillment);
+
+              actions.push({
+                type: 'sms_delivery_confirmation',
+                details: {
+                  fulfillmentId: fulfillment.id,
+                  shipmentStatus: fulfillment.shipment_status || fulfillment.status || null,
+                  success: smsResult.success,
+                  reason: smsResult.reason || null
+                },
+                success: smsResult.success
+              });
+
+              if (smsResult.success) {
+                console.log(`✅ Delivery SMS sent for fulfillment ${fulfillment.id}`);
+              } else {
+                console.log(`⚠️ Delivery SMS not sent: ${smsResult.reason}`);
+              }
+            } catch (smsErr) {
+              console.log('⚠️ SMS Delivery error:', smsErr.message);
+            }
+          }
         }
       }
-      // ==================== END SMS SHIPPING NOTIFICATION ====================
+      // ==================== END SMS SHIPPING + DELIVERY NOTIFICATIONS ====================
 
       await webhookLog.markProcessed(actions, []);
 
@@ -1148,6 +1224,203 @@ class WebhooksController {
       
     } catch (error) {
       console.error('❌ Error en orderUpdate:', error);
+      if (webhookLog) await webhookLog.markFailed(error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async fulfillmentUpdate(req, res) {
+    const topic = 'fulfillments/update';
+    let webhookLog;
+
+    try {
+      const fulfillment = req.body || {};
+      const orderId = fulfillment.order_id?.toString() || fulfillment.order?.id?.toString();
+
+      webhookLog = await WebhookLog.logWebhook({
+        topic,
+        source: 'shopify',
+        shopifyId: fulfillment.id?.toString(),
+        email: null,
+        payload: fulfillment,
+        headers: extractHeaders(req),
+        metadata: extractMetadata(req)
+      });
+
+      console.log('📦 Webhook: Fulfillment Update', fulfillment.id);
+      await webhookLog.markProcessing();
+
+      const actions = [
+        {
+          type: 'fulfillment_updated',
+          details: { fulfillmentId: fulfillment.id || null, orderId: orderId || null },
+          success: true
+        }
+      ];
+
+      if (!smsTransactionalService) {
+        actions.push({
+          type: 'sms_delivery_confirmation',
+          details: { success: false, reason: 'sms_service_unavailable' },
+          success: false
+        });
+      } else if (!orderId) {
+        actions.push({
+          type: 'sms_delivery_confirmation',
+          details: { success: false, reason: 'missing_order_id' },
+          success: false
+        });
+      } else if (!isFulfillmentDelivered(fulfillment)) {
+        actions.push({
+          type: 'sms_delivery_confirmation',
+          details: {
+            success: false,
+            reason: 'not_delivered_status',
+            status: fulfillment.shipment_status || fulfillment.status || null
+          },
+          success: false
+        });
+      } else {
+        const orderPayload = await loadOrderPayloadForSms(orderId, fulfillment.order);
+
+        if (!orderPayload) {
+          actions.push({
+            type: 'sms_delivery_confirmation',
+            details: { success: false, reason: 'order_not_found' },
+            success: false
+          });
+        } else {
+          try {
+            console.log(`📱 Triggering Delivery SMS from fulfillment update (order ${orderId})...`);
+            const smsResult = await smsTransactionalService.sendDeliveryConfirmation(orderPayload, fulfillment);
+
+            actions.push({
+              type: 'sms_delivery_confirmation',
+              details: {
+                fulfillmentId: fulfillment.id || null,
+                success: smsResult.success,
+                reason: smsResult.reason || null,
+                messageId: smsResult.messageId || null
+              },
+              success: smsResult.success
+            });
+          } catch (smsErr) {
+            actions.push({
+              type: 'sms_delivery_confirmation',
+              details: { success: false, reason: smsErr.message },
+              success: false
+            });
+          }
+        }
+      }
+
+      await webhookLog.markProcessed(actions, []);
+      res.status(200).json({ success: true, logId: webhookLog._id });
+    } catch (error) {
+      console.error('❌ Error en fulfillmentUpdate:', error);
+      if (webhookLog) await webhookLog.markFailed(error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async fulfillmentEventCreate(req, res) {
+    const topic = 'fulfillment_events/create';
+    let webhookLog;
+
+    try {
+      const event = req.body || {};
+      const orderId = event.order_id?.toString() || event.order?.id?.toString();
+
+      webhookLog = await WebhookLog.logWebhook({
+        topic,
+        source: 'shopify',
+        shopifyId: event.id?.toString(),
+        email: null,
+        payload: event,
+        headers: extractHeaders(req),
+        metadata: extractMetadata(req)
+      });
+
+      console.log('📦 Webhook: Fulfillment Event Create', event.id);
+      await webhookLog.markProcessing();
+
+      const actions = [
+        {
+          type: 'fulfillment_event_received',
+          details: {
+            eventId: event.id || null,
+            fulfillmentId: event.fulfillment_id || event.fulfillment?.id || null,
+            status: event.status || event.shipment_status || null
+          },
+          success: true
+        }
+      ];
+
+      if (!smsTransactionalService) {
+        actions.push({
+          type: 'sms_delivery_confirmation',
+          details: { success: false, reason: 'sms_service_unavailable' },
+          success: false
+        });
+      } else if (!orderId) {
+        actions.push({
+          type: 'sms_delivery_confirmation',
+          details: { success: false, reason: 'missing_order_id' },
+          success: false
+        });
+      } else if (!isFulfillmentEventDelivered(event)) {
+        actions.push({
+          type: 'sms_delivery_confirmation',
+          details: {
+            success: false,
+            reason: 'not_delivered_status',
+            status: event.status || event.shipment_status || null
+          },
+          success: false
+        });
+      } else {
+        const orderPayload = await loadOrderPayloadForSms(orderId, event.order);
+        const fulfillmentPayload = event.fulfillment || {
+          id: event.fulfillment_id,
+          shipment_status: event.status || event.shipment_status,
+          status: event.status
+        };
+
+        if (!orderPayload) {
+          actions.push({
+            type: 'sms_delivery_confirmation',
+            details: { success: false, reason: 'order_not_found' },
+            success: false
+          });
+        } else {
+          try {
+            console.log(`📱 Triggering Delivery SMS from fulfillment event (order ${orderId})...`);
+            const smsResult = await smsTransactionalService.sendDeliveryConfirmation(orderPayload, fulfillmentPayload);
+
+            actions.push({
+              type: 'sms_delivery_confirmation',
+              details: {
+                fulfillmentId: fulfillmentPayload.id || null,
+                success: smsResult.success,
+                reason: smsResult.reason || null,
+                messageId: smsResult.messageId || null
+              },
+              success: smsResult.success
+            });
+          } catch (smsErr) {
+            actions.push({
+              type: 'sms_delivery_confirmation',
+              details: { success: false, reason: smsErr.message },
+              success: false
+            });
+          }
+        }
+      }
+
+      await webhookLog.markProcessed(actions, []);
+      res.status(200).json({ success: true, logId: webhookLog._id });
+    } catch (error) {
+      console.error('❌ Error en fulfillmentEventCreate:', error);
       if (webhookLog) await webhookLog.markFailed(error);
       res.status(500).json({ error: error.message });
     }
