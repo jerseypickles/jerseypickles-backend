@@ -139,7 +139,9 @@ const shopifyWebhookPaths = [
   '/api/webhooks/checkouts',
   '/api/webhooks/carts',
   '/api/webhooks/products',
-  '/api/webhooks/refunds'
+  '/api/webhooks/refunds',
+  '/api/webhooks/fulfillments',
+  '/api/webhooks/fulfillment_events'
 ];
 
 // Aplicar express.raw() SOLO a webhooks de Shopify
