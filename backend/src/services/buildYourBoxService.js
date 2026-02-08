@@ -6,6 +6,15 @@ const BybFunnelEvent = require('../models/BybFunnelEvent');
 const BybReportSnapshot = require('../models/BybReportSnapshot');
 const shopifyService = require('./shopifyService');
 
+const LEGACY_FUNNEL_STEP_MAP = {
+  step_1_jar_selected: 'step_1_type_selected',
+  step_5_review: 'step_6_review',
+  step_6_checkout: 'step_7_checkout_started',
+  extra_olive_shown: 'step_5_extra_olive_shown',
+  extra_olive_accepted: 'step_5_extra_olive_accepted',
+  extra_olive_declined: 'step_5_extra_olive_declined'
+};
+
 class BuildYourBoxService {
   constructor() {
     // Tamaños de jar válidos
@@ -1478,10 +1487,15 @@ Responde SOLO con JSON válido (sin markdown, sin backticks):
    */
   async recordFunnelEvent(eventData) {
     try {
+      const normalizedStep = LEGACY_FUNNEL_STEP_MAP[eventData.step] || eventData.step;
+      if (normalizedStep !== eventData.step) {
+        console.log(`ℹ️ BYB Funnel: mapped legacy step "${eventData.step}" -> "${normalizedStep}"`);
+      }
+
       const event = new BybFunnelEvent({
         sessionId: eventData.sessionId,
         customerId: eventData.customerId,
-        step: eventData.step,
+        step: normalizedStep,
         metadata: eventData.metadata || {},
         timeOnPreviousStep: eventData.timeOnPreviousStep,
         deviceInfo: eventData.deviceInfo || {},
@@ -1491,7 +1505,7 @@ Responde SOLO con JSON válido (sin markdown, sin backticks):
       });
 
       await event.save();
-      console.log(`📊 BYB Funnel: Recorded ${eventData.step} for session ${eventData.sessionId}`);
+      console.log(`📊 BYB Funnel: Recorded ${normalizedStep} for session ${eventData.sessionId}`);
       return { success: true, eventId: event._id };
     } catch (error) {
       console.error('❌ Error recording funnel event:', error);

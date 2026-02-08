@@ -2,6 +2,23 @@
 // 🔧 FIXED - Robust HMAC validation for Shopify webhooks
 const crypto = require('crypto');
 
+const getWebhookSecrets = () => {
+  const raw = [
+    process.env.SHOPIFY_WEBHOOK_SECRET,
+    process.env.SHOPIFY_WEBHOOK_SECRETS,
+    process.env.SHOPIFY_WEBHOOK_SECRET_PREVIOUS,
+    process.env.SHOPIFY_WEBHOOK_SECRET_OLD,
+    process.env.SHOPIFY_API_SECRET,
+    process.env.SHOPIFY_API_SECRET_KEY
+  ]
+    .filter(Boolean)
+    .flatMap(value => String(value).split(','))
+    .map(value => value.trim())
+    .filter(Boolean);
+
+  return [...new Set(raw)];
+};
+
 /**
  * Middleware para capturar raw body ANTES de cualquier parseo
  * Debe usarse ANTES de express.json()
@@ -44,11 +61,13 @@ const validateShopifyWebhook = (req, res, next) => {
     const hmac = req.headers['x-shopify-hmac-sha256'];
     const topic = req.headers['x-shopify-topic'];
     const shopDomain = req.headers['x-shopify-shop-domain'];
-    const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+    const webhookId = req.headers['x-shopify-webhook-id'];
+    const secrets = getWebhookSecrets();
     
     console.log(`\n🔍 Validating Shopify Webhook`);
     console.log(`   Topic: ${topic}`);
     console.log(`   Shop: ${shopDomain}`);
+    if (webhookId) console.log(`   Webhook ID: ${webhookId}`);
     
     // Validar headers requeridos
     if (!hmac) {
@@ -59,8 +78,8 @@ const validateShopifyWebhook = (req, res, next) => {
       });
     }
     
-    if (!secret) {
-      console.error('❌ SHOPIFY_WEBHOOK_SECRET not configured');
+    if (secrets.length === 0) {
+      console.error('❌ Shopify webhook secret(s) not configured');
       return res.status(500).json({ 
         error: 'Configuration error',
         message: 'Webhook secret not configured'
@@ -96,23 +115,27 @@ const validateShopifyWebhook = (req, res, next) => {
     }
     
     console.log(`   Buffer length: ${rawBody.length}`);
-    console.log(`   Secret length: ${secret.length}`);
-    
-    // Calcular HMAC
-    const calculatedHmac = crypto
-      .createHmac('sha256', secret)
-      .update(rawBody)
-      .digest('base64');
-    
-    // Comparar de forma segura (timing-safe)
+    console.log(`   Configured secrets: ${secrets.length}`);
+
+    // Comparar HMAC contra todos los secretos configurados (current + previous)
     const hmacBuffer = Buffer.from(hmac, 'base64');
-    const calculatedBuffer = Buffer.from(calculatedHmac, 'base64');
-    
     let isValid = false;
-    
-    // Solo usar timingSafeEqual si tienen la misma longitud
-    if (hmacBuffer.length === calculatedBuffer.length) {
-      isValid = crypto.timingSafeEqual(hmacBuffer, calculatedBuffer);
+    let calculatedHmac = null;
+
+    for (const secret of secrets) {
+      const candidateHmac = crypto
+        .createHmac('sha256', secret)
+        .update(rawBody)
+        .digest('base64');
+
+      if (!calculatedHmac) calculatedHmac = candidateHmac;
+
+      const candidateBuffer = Buffer.from(candidateHmac, 'base64');
+      if (hmacBuffer.length === candidateBuffer.length && crypto.timingSafeEqual(hmacBuffer, candidateBuffer)) {
+        isValid = true;
+        calculatedHmac = candidateHmac;
+        break;
+      }
     }
     
     if (!isValid) {

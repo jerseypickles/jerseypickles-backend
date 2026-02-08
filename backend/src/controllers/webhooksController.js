@@ -187,6 +187,40 @@ const extractBybContextFromOrder = (order = {}) => {
   };
 };
 
+const appendBybStep8Action = (actions, bybFunnelResult, fallbackOrderId) => {
+  if (!bybFunnelResult) return;
+
+  if (bybFunnelResult.tracked) {
+    actions.push({
+      type: 'byb_funnel_step_8_recorded',
+      details: {
+        eventId: bybFunnelResult.eventId,
+        sessionId: bybFunnelResult.sessionId,
+        usedFallbackSession: bybFunnelResult.usedFallbackSession
+      },
+      success: true
+    });
+    return;
+  }
+
+  if (bybFunnelResult.reason === 'already_tracked') {
+    actions.push({
+      type: 'byb_funnel_step_8_already_tracked',
+      details: { orderId: fallbackOrderId || bybFunnelResult.orderId || null },
+      success: true
+    });
+    return;
+  }
+
+  if (bybFunnelResult.reason !== 'not_byb') {
+    actions.push({
+      type: 'byb_funnel_step_8_recorded',
+      details: { error: bybFunnelResult.error || bybFunnelResult.reason },
+      success: false
+    });
+  }
+};
+
 class WebhooksController {
   
   // ==================== SHOPIFY WEBHOOKS ====================
@@ -454,20 +488,67 @@ class WebhooksController {
       
       const actions = [];
       const flowsTriggered = [];
+
+      const shopifyOrderId = shopifyOrder.id?.toString();
+      const customerEmail = shopifyOrder.customer?.email || shopifyOrder.email;
+      const customerShopifyId = shopifyOrder.customer?.id?.toString();
+
+      // Idempotency guard: Shopify can retry orders/create webhooks.
+      if (shopifyOrderId) {
+        const existingOrder = await Order.findOne({ shopifyId: shopifyOrderId })
+          .select('_id orderNumber totalPrice')
+          .lean();
+
+        if (existingOrder) {
+          console.log(`⏭️ Order already exists in DB: #${existingOrder.orderNumber || shopifyOrderId}`);
+          actions.push({
+            type: 'order_already_exists',
+            details: {
+              orderId: existingOrder._id?.toString(),
+              shopifyId: shopifyOrderId,
+              orderNumber: existingOrder.orderNumber,
+              total: existingOrder.totalPrice
+            },
+            success: true
+          });
+
+          const bybFunnelResult = await WebhooksController.prototype.recordBybPurchaseCompleteFromOrder(
+            shopifyOrder,
+            topic
+          );
+          appendBybStep8Action(actions, bybFunnelResult, shopifyOrderId);
+
+          await webhookLog.markProcessed(actions, flowsTriggered);
+          return res.status(200).json({ success: true, logId: webhookLog._id, duplicate: true });
+        }
+      }
       
       // Buscar o crear cliente
-      let customer = await Customer.findOne({ 
-        shopifyId: shopifyOrder.customer.id.toString() 
-      });
+      if (!customerEmail) {
+        throw new Error('Order missing customer email');
+      }
+
+      let customer = null;
+      if (customerShopifyId) {
+        customer = await Customer.findOne({ shopifyId: customerShopifyId });
+      }
+      if (!customer) {
+        customer = await Customer.findOne({ email: customerEmail.toLowerCase() });
+      }
       
       if (!customer) {
-        customer = await Customer.create({
-          shopifyId: shopifyOrder.customer.id.toString(),
-          email: shopifyOrder.customer.email,
-          firstName: shopifyOrder.customer.first_name,
-          lastName: shopifyOrder.customer.last_name,
-          acceptsMarketing: shopifyOrder.customer.accepts_marketing || false
-        });
+        const customerPayload = {
+          email: customerEmail,
+          firstName: shopifyOrder.customer?.first_name || '',
+          lastName: shopifyOrder.customer?.last_name || '',
+          acceptsMarketing: shopifyOrder.customer?.accepts_marketing || false
+        };
+
+        if (customerShopifyId) {
+          customerPayload.shopifyId = customerShopifyId;
+        }
+
+        customer = await Customer.create(customerPayload);
         console.log('✅ Nuevo cliente creado:', customer.email);
         
         actions.push({
@@ -478,8 +559,8 @@ class WebhooksController {
       }
       
       // Crear orden
-      const order = await Order.create({
-        shopifyId: shopifyOrder.id.toString(),
+      const orderPayload = {
+        shopifyId: shopifyOrderId,
         orderNumber: shopifyOrder.order_number,
         customer: customer._id,
         totalPrice: parseFloat(shopifyOrder.total_price),
@@ -502,7 +583,41 @@ class WebhooksController {
         tags: shopifyOrder.tags?.split(', ') || [],
         orderDate: new Date(shopifyOrder.created_at),
         shopifyData: shopifyOrder
-      });
+      };
+
+      let order;
+      try {
+        order = await Order.create(orderPayload);
+      } catch (createError) {
+        if (createError?.code === 11000 && createError?.keyPattern?.shopifyId) {
+          const dupOrder = await Order.findOne({ shopifyId: shopifyOrderId })
+            .select('_id orderNumber totalPrice')
+            .lean();
+
+          console.log(`⏭️ Duplicate orders/create webhook detected for Shopify order ${shopifyOrderId}`);
+          actions.push({
+            type: 'order_already_exists',
+            details: {
+              orderId: dupOrder?._id?.toString() || null,
+              shopifyId: shopifyOrderId,
+              orderNumber: dupOrder?.orderNumber || shopifyOrder.order_number,
+              total: dupOrder?.totalPrice || parseFloat(shopifyOrder.total_price)
+            },
+            success: true
+          });
+
+          const bybFunnelResult = await WebhooksController.prototype.recordBybPurchaseCompleteFromOrder(
+            shopifyOrder,
+            topic
+          );
+          appendBybStep8Action(actions, bybFunnelResult, shopifyOrderId);
+
+          await webhookLog.markProcessed(actions, flowsTriggered);
+          return res.status(200).json({ success: true, logId: webhookLog._id, duplicate: true });
+        }
+
+        throw createError;
+      }
       
       actions.push({
         type: 'order_created',
@@ -510,30 +625,11 @@ class WebhooksController {
         success: true
       });
 
-      const bybFunnelResult = await this.recordBybPurchaseCompleteFromOrder(shopifyOrder, topic);
-      if (bybFunnelResult.tracked) {
-        actions.push({
-          type: 'byb_funnel_step_8_recorded',
-          details: {
-            eventId: bybFunnelResult.eventId,
-            sessionId: bybFunnelResult.sessionId,
-            usedFallbackSession: bybFunnelResult.usedFallbackSession
-          },
-          success: true
-        });
-      } else if (bybFunnelResult.reason === 'already_tracked') {
-        actions.push({
-          type: 'byb_funnel_step_8_already_tracked',
-          details: { orderId: shopifyOrder.id?.toString() },
-          success: true
-        });
-      } else if (bybFunnelResult.reason !== 'not_byb') {
-        actions.push({
-          type: 'byb_funnel_step_8_recorded',
-          details: { error: bybFunnelResult.error || bybFunnelResult.reason },
-          success: false
-        });
-      }
+      const bybFunnelResult = await WebhooksController.prototype.recordBybPurchaseCompleteFromOrder(
+        shopifyOrder,
+        topic
+      );
+      appendBybStep8Action(actions, bybFunnelResult, shopifyOrderId);
       
       const previousOrdersCount = customer.ordersCount || 0;
       
@@ -542,7 +638,7 @@ class WebhooksController {
         $inc: { ordersCount: 1 },
         $set: { 
           lastOrderDate: new Date(shopifyOrder.created_at),
-          totalSpent: parseFloat(shopifyOrder.customer.total_spent) || 0
+          totalSpent: parseFloat(shopifyOrder.customer?.total_spent) || 0
         }
       });
       
@@ -1318,30 +1414,11 @@ class WebhooksController {
         { type: 'order_paid', details: { orderId: order.id }, success: true }
       ];
 
-      const bybFunnelResult = await this.recordBybPurchaseCompleteFromOrder(order, topic);
-      if (bybFunnelResult.tracked) {
-        actions.push({
-          type: 'byb_funnel_step_8_recorded',
-          details: {
-            eventId: bybFunnelResult.eventId,
-            sessionId: bybFunnelResult.sessionId,
-            usedFallbackSession: bybFunnelResult.usedFallbackSession
-          },
-          success: true
-        });
-      } else if (bybFunnelResult.reason === 'already_tracked') {
-        actions.push({
-          type: 'byb_funnel_step_8_already_tracked',
-          details: { orderId: order.id?.toString() },
-          success: true
-        });
-      } else if (bybFunnelResult.reason !== 'not_byb') {
-        actions.push({
-          type: 'byb_funnel_step_8_recorded',
-          details: { error: bybFunnelResult.error || bybFunnelResult.reason },
-          success: false
-        });
-      }
+      const bybFunnelResult = await WebhooksController.prototype.recordBybPurchaseCompleteFromOrder(
+        order,
+        topic
+      );
+      appendBybStep8Action(actions, bybFunnelResult, order.id?.toString());
 
       await webhookLog.markProcessed(actions, []);
       
