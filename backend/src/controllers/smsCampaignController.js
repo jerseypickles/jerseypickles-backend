@@ -915,6 +915,80 @@ const smsCampaignController = {
     }
   },
 
+  // ==================== A/B VARIANT STATS ====================
+
+  /**
+   * GET /api/sms/campaigns/:id/ab-stats
+   * Get A/B testing stats grouped by discount percent variant
+   */
+  async getAbStats(req, res) {
+    try {
+      const campaign = await SmsCampaign.findById(req.params.id);
+
+      if (!campaign) {
+        return res.status(404).json({ success: false, error: 'Campaign not found' });
+      }
+
+      // Aggregate messages by discountPercent variant
+      const variantStats = await SmsMessage.aggregate([
+        { $match: { campaign: campaign._id, discountPercent: { $exists: true, $ne: null } } },
+        {
+          $group: {
+            _id: '$discountPercent',
+            total: { $sum: 1 },
+            delivered: { $sum: { $cond: [{ $eq: ['$status', 'delivered'] }, 1, 0] } },
+            failed: { $sum: { $cond: [{ $in: ['$status', ['failed', 'undelivered', 'rejected']] }, 1, 0] } },
+            clicked: { $sum: { $cond: ['$clicked', 1, 0] } },
+            converted: { $sum: { $cond: ['$converted', 1, 0] } },
+            revenue: { $sum: { $ifNull: ['$conversionData.orderTotal', 0] } },
+            cost: { $sum: { $ifNull: ['$cost', 0] } }
+          }
+        },
+        { $sort: { _id: 1 } }
+      ]);
+
+      // Calculate rates per variant
+      const variants = variantStats.map(v => ({
+        percent: v._id,
+        total: v.total,
+        delivered: v.delivered,
+        failed: v.failed,
+        clicked: v.clicked,
+        converted: v.converted,
+        revenue: v.revenue,
+        cost: v.cost,
+        deliveryRate: v.total > 0 ? ((v.delivered / v.total) * 100).toFixed(1) : '0',
+        clickRate: v.delivered > 0 ? ((v.clicked / v.delivered) * 100).toFixed(1) : '0',
+        conversionRate: v.delivered > 0 ? ((v.converted / v.delivered) * 100).toFixed(1) : '0',
+        roi: v.cost > 0 ? (((v.revenue - v.cost) / v.cost) * 100).toFixed(0) : '0'
+      }));
+
+      // Find winner (highest conversion rate with at least some deliveries)
+      let winner = null;
+      if (variants.length > 0) {
+        const eligible = variants.filter(v => v.delivered >= 5);
+        if (eligible.length > 0) {
+          winner = eligible.reduce((best, v) =>
+            parseFloat(v.conversionRate) > parseFloat(best.conversionRate) ? v : best
+          );
+        }
+      }
+
+      res.json({
+        success: true,
+        campaignId: campaign._id,
+        dynamicDiscount: campaign.dynamicDiscount,
+        variants,
+        winner: winner ? winner.percent : null,
+        totalVariants: variants.length
+      });
+
+    } catch (error) {
+      console.error('❌ Get A/B Stats Error:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
   // ==================== REPROCESS CONVERSIONS ====================
 
   /**

@@ -73,6 +73,9 @@ router.get('/:id/stats', optionalProtect, smsCampaignController.getStats);
 // Get campaign click stats
 router.get('/:id/clicks', optionalProtect, smsCampaignController.getClickStats);
 
+// Get A/B testing variant stats
+router.get('/:id/ab-stats', optionalProtect, smsCampaignController.getAbStats);
+
 // Set/update discount code for conversion tracking
 router.put('/:id/discount-code', optionalProtect, smsCampaignController.setDiscountCode);
 
