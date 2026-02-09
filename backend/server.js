@@ -78,6 +78,13 @@ try {
   console.log('   ⚠️ ShortUrl model:', e.message);
 }
 
+try {
+  require('./src/models/SmsCampaignTimeReport');
+  console.log('   ✅ SmsCampaignTimeReport model loaded');
+} catch(e) {
+  console.log('   ⚠️ SmsCampaignTimeReport model:', e.message);
+}
+
 console.log('📦 Models ready');
 
 // ==================== MIDDLEWARE ====================
@@ -203,7 +210,8 @@ app.get('/', (req, res) => {
       calendar: '✅ Business Calendar',
       sms_marketing: '✅ SMS Marketing (Telnyx)',
       sms_campaigns: '✅ SMS Campaigns',
-      sms_second_chance: '✅ Second Chance SMS (20% Recovery)'
+      sms_second_chance: '✅ Second Chance SMS (20% Recovery)',
+      sms_smart_schedule: '✅ AI Smart Schedule (Send Time Optimization)'
     },
     endpoints: {
       health: '/health',
@@ -223,7 +231,8 @@ app.get('/', (req, res) => {
       calendar: '/api/calendar',
       sms: '/api/sms',
       sms_campaigns: '/api/sms/campaigns',
-      sms_second_chance: '/api/sms/second-chance'
+      sms_second_chance: '/api/sms/second-chance',
+      sms_smart_schedule: '/api/sms/smart-schedule'
     }
   });
 });
@@ -329,6 +338,21 @@ try {
   app.use('/api/sms/campaigns', (req, res) => {
     res.status(503).json({
       error: 'SMS Campaigns feature is currently unavailable',
+      message: 'Please check configuration'
+    });
+  });
+}
+
+// 🧠 SMS SMART SCHEDULE ROUTES
+try {
+  const smartScheduleRoutes = require('./src/routes/smartSchedule');
+  app.use('/api/sms/smart-schedule', smartScheduleRoutes);
+  console.log('✅ SMS Smart Schedule routes loaded');
+} catch (error) {
+  console.log('⚠️  SMS Smart Schedule routes not available:', error.message);
+  app.use('/api/sms/smart-schedule', (req, res) => {
+    res.status(503).json({
+      error: 'SMS Smart Schedule feature is currently unavailable',
       message: 'Please check configuration'
     });
   });
@@ -530,6 +554,24 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     }
   }, 5500);
 
+  // 🧠 Inicializar Compile Time Report Job (Smart Schedule)
+  let smartScheduleAvailable = false;
+  setTimeout(() => {
+    console.log('\n🧠 Inicializando SMS Smart Schedule Job...');
+    try {
+      const compileTimeReportJob = require('./src/jobs/compileTimeReportJob');
+      compileTimeReportJob.init('0 */6 * * *');
+      smartScheduleAvailable = true;
+      console.log('✅ SMS Smart Schedule Job listo');
+      console.log('   ⏰ Schedule: Every 6 hours');
+      console.log('   ⏳ Compiles reports 48h after campaign completion');
+      console.log('   🧠 AI analysis via Claude');
+    } catch (error) {
+      smartScheduleAvailable = false;
+      console.log('⚠️  SMS Smart Schedule Job no disponible:', error.message);
+    }
+  }, 6500);
+
   // Inicializar Delayed Shipment SMS Job
   let delayedShipmentAvailable = false;
   setTimeout(() => {
@@ -565,6 +607,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`║  SMS Campaigns:      ${smsCampaignsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  Second Chance SMS:  ${secondChanceSmsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  Delayed Shipment:   ${delayedShipmentAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
+    console.log(`║  Smart Schedule:     ${smartScheduleAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log('╚════════════════════════════════════════════════╝');
   }, 7000);
 });

@@ -552,7 +552,17 @@ const smsCampaignController = {
       await SmsMessage.insertMany(messages, { ordered: false });
 
       console.log(`📱 SMS Campaign ${campaign.name} started - ${subscribers.length} messages queued`);
-      
+
+      // Create pending time report for Smart Schedule analysis
+      try {
+        const smartScheduleService = require('../services/smartScheduleService');
+        await smartScheduleService.createPendingReport(campaign._id);
+        console.log(`   🧠 Smart Schedule: pending time report created`);
+      } catch (ssErr) {
+        // Non-critical - don't fail the campaign
+        console.log(`   ⚠️ Smart Schedule report skipped: ${ssErr.message}`);
+      }
+
       // Start background processing
       processCampaignQueue(campaign._id);
       
