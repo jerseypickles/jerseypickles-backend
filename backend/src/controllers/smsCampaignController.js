@@ -426,9 +426,30 @@ const smsCampaignController = {
         });
       }
       
-      // Build test message with [TEST] prefix
-      let testMessage = `[TEST] ${campaign.message}`;
-      
+      // Build test message with [TEST] prefix and replace all variables
+      let testMessage = campaign.message;
+
+      // Replace {name} with 'friend' (SMS subscribers don't have names)
+      testMessage = testMessage.replace(/\{name\}/g, 'friend');
+
+      // Replace {discount} and {code}
+      if (campaign.dynamicDiscount?.enabled) {
+        const { min, max } = campaign.dynamicDiscount;
+        const examplePercent = Math.floor((min + max) / 2);
+        testMessage = testMessage
+          .replace(/\{discount\}/g, String(examplePercent))
+          .replace(/\{code\}/g, `JPC${examplePercent}-TEST`);
+      } else {
+        testMessage = testMessage
+          .replace(/\{discount\}/g, campaign.discountPercent ? String(campaign.discountPercent) : '')
+          .replace(/\{code\}/g, campaign.discountCode || '');
+      }
+
+      // Replace {link}
+      testMessage = testMessage.replace(/\{link\}/g, 'https://jerseypickles.com');
+
+      testMessage = `[TEST] ${testMessage}`;
+
       // Send SMS
       const result = await telnyxService.sendSms(formattedPhone, testMessage);
       
@@ -1183,6 +1204,9 @@ async function processCampaignQueue(campaignId) {
           let finalMessage = msg.message;
           let assignedPercent = null;
           let assignedCode = msg.discountCode;
+
+          // Replace {name} (SMS subscribers don't have names)
+          finalMessage = finalMessage.replace(/\{name\}/g, 'friend');
 
           // Dynamic discount: assign random % and create unique Shopify code
           if (campaign.dynamicDiscount?.enabled && campaign.dynamicDiscount.priceRuleIds) {
