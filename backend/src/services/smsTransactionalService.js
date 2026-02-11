@@ -133,9 +133,9 @@ const replaceVariables = (template, data) => {
 let triggerSettings = {
   order_confirmation: { enabled: true, template: null },
   shipping_notification: { enabled: true, template: null },
-  delivery_confirmation: { enabled: true, template: null },
-  order_cancelled: { enabled: true, template: null },
-  delayed_shipment: { enabled: true, template: null, delayHours: 72 }
+  delivery_confirmation: { enabled: false, template: null },
+  order_cancelled: { enabled: false, template: null },
+  delayed_shipment: { enabled: false, template: null, delayHours: 72 }
 };
 
 // ==================== HELPER FUNCTIONS ====================
