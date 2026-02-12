@@ -126,6 +126,76 @@ router.get('/heatmap', auth, async (req, res) => {
 });
 
 /**
+ * GET /api/sms/smart-schedule/conversion-hours
+ * Get heatmap of when conversions actually happen (hour of purchase, not send time)
+ */
+router.get('/conversion-hours', auth, async (req, res) => {
+  try {
+    const SmsMessage = mongoose.model('SmsMessage');
+
+    const conversionHours = await SmsMessage.aggregate([
+      {
+        $match: {
+          converted: true,
+          convertedAt: { $exists: true, $ne: null }
+        }
+      },
+      {
+        $addFields: {
+          // Extract hour and day of week from convertedAt in ET
+          convHour: {
+            $hour: { date: '$convertedAt', timezone: 'America/New_York' }
+          },
+          convDayOfWeek: {
+            $dayOfWeek: { date: '$convertedAt', timezone: 'America/New_York' }
+          }
+        }
+      },
+      {
+        $group: {
+          _id: { hour: '$convHour', dayOfWeek: '$convDayOfWeek' },
+          conversions: { $sum: 1 },
+          totalRevenue: { $sum: '$conversionData.orderTotal' }
+        }
+      },
+      { $sort: { '_id.hour': 1 } }
+    ]);
+
+    // Map dayOfWeek numbers (1=Sunday in MongoDB) to day names
+    const dayMap = { 1: 'sunday', 2: 'monday', 3: 'tuesday', 4: 'wednesday', 5: 'thursday', 6: 'friday', 7: 'saturday' };
+
+    const formatted = conversionHours.map(item => ({
+      _id: {
+        hour: item._id.hour,
+        day: dayMap[item._id.dayOfWeek] || 'unknown'
+      },
+      conversions: item.conversions,
+      totalRevenue: item.totalRevenue || 0,
+      avgRevenue: item.conversions > 0 ? parseFloat((item.totalRevenue / item.conversions).toFixed(2)) : 0
+    }));
+
+    // Also get totals by hour only (for bar chart)
+    const byHour = {};
+    for (const item of formatted) {
+      const h = item._id.hour;
+      if (!byHour[h]) byHour[h] = { hour: h, conversions: 0, revenue: 0 };
+      byHour[h].conversions += item.conversions;
+      byHour[h].revenue += item.totalRevenue;
+    }
+
+    res.json({
+      success: true,
+      heatmap: formatted,
+      byHour: Object.values(byHour).sort((a, b) => a.hour - b.hour),
+      totalConversions: formatted.reduce((s, i) => s + i.conversions, 0)
+    });
+  } catch (error) {
+    console.error('SmartSchedule conversion-hours error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * GET /api/sms/smart-schedule/speed-metrics
  * Get global response speed metrics
  */
