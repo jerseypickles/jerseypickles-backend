@@ -250,12 +250,12 @@ smsCampaignTimeReportSchema.statics.getGlobalAverages = async function() {
 };
 
 /**
- * Find campaigns pending compilation (sent 48+ hours ago)
+ * Find campaigns pending compilation (sent 4+ hours ago)
  */
 smsCampaignTimeReportSchema.statics.findPendingCompilation = async function() {
   return this.find({
     status: 'pending',
-    sentAt: { $lte: new Date(Date.now() - 48 * 60 * 60 * 1000) }
+    sentAt: { $lte: new Date(Date.now() - 4 * 60 * 60 * 1000) }
   }).populate('campaign');
 };
 

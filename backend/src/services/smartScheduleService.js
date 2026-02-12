@@ -50,9 +50,9 @@ class SmartScheduleService {
     const messages = await SmsMessage.find({ campaign: campaignId }).lean();
 
     // Calculate send time info (in Eastern Time)
-    const sentAt = campaign.startedAt;
+    // Use scheduledAt if campaign was scheduled, otherwise use startedAt
+    const sentAt = campaign.scheduledAt || campaign.startedAt;
     const etOptions = { timeZone: 'America/New_York' };
-    const etDate = new Date(sentAt.toLocaleString('en-US', etOptions));
     const sentHour = parseInt(sentAt.toLocaleString('en-US', { ...etOptions, hour: 'numeric', hour12: false }));
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const sentDay = dayNames[new Date(sentAt.toLocaleString('en-US', etOptions)).getDay()];
@@ -411,7 +411,7 @@ class SmartScheduleService {
     const existing = await SmsCampaignTimeReport.findOne({ campaign: campaignId });
     if (existing) return existing;
 
-    const sentAt = campaign.startedAt || new Date();
+    const sentAt = campaign.scheduledAt || campaign.startedAt || new Date();
     const etOptions = { timeZone: 'America/New_York' };
     const sentHour = parseInt(sentAt.toLocaleString('en-US', { ...etOptions, hour: 'numeric', hour12: false }));
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];

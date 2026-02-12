@@ -67,7 +67,7 @@ class CompileTimeReportJob {
       const completedCampaigns = await SmsCampaign.find({
         status: 'sent',
         completedAt: {
-          $lte: new Date(Date.now() - 48 * 60 * 60 * 1000), // 48h ago
+          $lte: new Date(Date.now() - 4 * 60 * 60 * 1000), // 4h ago (enough time for clicks/conversions to accumulate)
           $gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) // within 90 days
         }
       }).select('_id').lean();

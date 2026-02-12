@@ -1186,8 +1186,26 @@ async function processCampaignQueue(campaignId) {
         campaign.completedAt = new Date();
         campaign.updateRates();
         await campaign.save();
-        
+
         console.log(`✅ SMS Campaign ${campaign.name} completed`);
+
+        // Compile Smart Schedule time report immediately
+        try {
+          const smartScheduleService = require('../services/smartScheduleService');
+          const report = await smartScheduleService.compileCampaignReport(campaignId);
+          if (report) {
+            console.log(`   🧠 Smart Schedule: report compiled for ${campaign.name}`);
+            try {
+              await smartScheduleService.analyzeWithAI(report._id);
+              console.log(`   🧠 Smart Schedule: AI analysis complete`);
+            } catch (aiErr) {
+              console.log(`   ⚠️ Smart Schedule AI analysis skipped: ${aiErr.message}`);
+            }
+          }
+        } catch (ssErr) {
+          console.log(`   ⚠️ Smart Schedule report compilation skipped: ${ssErr.message}`);
+        }
+
         break;
       }
       
