@@ -955,22 +955,40 @@ Responde SOLO con JSON válido:
       ? `Descuento DINÁMICO: cada suscriptor recibe un % aleatorio entre ${dynamicMin || 25}% y ${dynamicMax || 30}%. Usa {discount} como placeholder para el porcentaje y {code} para el código.`
       : `Descuento FIJO: ${discountPercent || 15}%. Usa {discount} para el porcentaje y {code} para el código.`;
 
+    // Get upcoming events for seasonal context
+    let upcomingContext = '';
+    try {
+      const BusinessCalendar = require('../models/BusinessCalendar');
+      const upcoming = await BusinessCalendar.getUpcomingEvents(30);
+      if (upcoming && upcoming.length > 0) {
+        const eventsList = upcoming.map(e => {
+          const daysUntil = Math.ceil((new Date(e.startDate) - new Date()) / (1000 * 60 * 60 * 24));
+          return `${e.name} (en ${daysUntil} días)`;
+        }).join(', ');
+        upcomingContext = `\n- Eventos próximos: ${eventsList}. Si algún evento está a menos de 14 días, genera 1-2 plantillas temáticas para ese evento.`;
+      }
+    } catch (e) {
+      // Calendar not available
+    }
+
     const prompt = `Genera 6 plantillas de mensajes SMS para una campaña de Jersey Pickles (pickles artesanales y olives gourmet de New Jersey).
 
 CONTEXTO:
 - ${discountInfo}
 - Audiencia: ${audienceType || 'todos los suscriptores'}
-- Objetivo: ${campaignGoal || 'conversión'}
-- Variables disponibles: {name} (nombre), {discount} (%), {code} (código descuento), {link} (se reemplaza auto)
+- Objetivo: ${campaignGoal || 'conversión'}${upcomingContext}
+- Variables disponibles: {discount} (%), {code} (código descuento), {link} (se reemplaza auto)
+- NO tenemos el nombre del suscriptor. NO uses {name} ni ninguna variable de nombre.
 
 REGLAS:
 1. Cada mensaje DEBE incluir "Reply STOP to opt-out" al final
-2. Usa {name}, {discount}, {code} y {link} como variables
+2. Usa SOLO {discount}, {code} y {link} como variables. NUNCA {name}.
 3. Tono: casual, directo, amigable (como un amigo que te recomienda algo)
 4. Máximo 300 caracteres por mensaje (2 segmentos SMS)
 5. Varía los estilos: urgencia, exclusividad, casual, humor, FOMO, gratitud
-6. NO uses "Dear" ni lenguaje formal
+6. NO uses "Dear", "Hey [name]" ni lenguaje formal
 7. Incluye emojis relevantes (🥒🫒✨👀🔥💚) con moderación
+8. Comienza los mensajes directamente sin saludar con nombre (ej: "Fresh batch just dropped", "Your pickle craving called")
 
 IMPORTANTE: Genera plantillas VARIADAS con diferentes enfoques:
 - 1 plantilla de urgencia/escasez
@@ -979,6 +997,7 @@ IMPORTANTE: Genera plantillas VARIADAS con diferentes enfoques:
 - 1 plantilla con humor
 - 1 plantilla de restock/novedades
 - 1 plantilla de gratitud/loyalty
+(Si hay un evento próximo a menos de 14 días, reemplaza 1-2 plantillas por versiones temáticas del evento)
 
 Responde SOLO con JSON válido:
 {
@@ -987,8 +1006,8 @@ Responde SOLO con JSON válido:
       "id": "unique_id",
       "name": "Nombre corto (2-3 palabras)",
       "icon": "emoji representativo",
-      "category": "Categoría (Urgencia, Casual, VIP, Humor, Restock, Loyalty)",
-      "message": "El mensaje completo con variables {name}, {discount}, {code}, {link}"
+      "category": "Categoría (Urgencia, Casual, VIP, Humor, Restock, Loyalty, Seasonal)",
+      "message": "El mensaje completo con variables {discount}, {code}, {link}. SIN {name}."
     }
   ]
 }`;
@@ -1044,42 +1063,42 @@ Responde SOLO con JSON válido:
           name: 'Going Fast',
           icon: '🔥',
           category: 'Urgencia',
-          message: `Heads up {name} - this batch is going FAST 🥒 ${pct}% off with code {code} before it's gone!\n\n{link}\n\nReply STOP to opt-out`
+          message: `Heads up - this batch is going FAST 🥒 ${pct}% off with code {code} before it's gone!\n\n{link}\n\nReply STOP to opt-out`
         },
         {
           id: 'casual_1',
           name: 'Quick Hey',
           icon: '👋',
           category: 'Casual',
-          message: `Hey {name}! Just restocked your favorites. Thought you'd want first dibs - here's ${pct}% off: {code}\n\n{link}\n\nReply STOP to opt-out`
+          message: `Hey! Just restocked your favorites 🥒 Thought you'd want first dibs - here's ${pct}% off: {code}\n\n{link}\n\nReply STOP to opt-out`
         },
         {
           id: 'vip_1',
           name: 'VIP Access',
           icon: '🤫',
           category: 'VIP',
-          message: `Shhh {name}... friends & family sale. ${pct}% off, code's {code}. Don't tell everyone ;)\n\n{link}\n\nReply STOP to opt-out`
+          message: `Shhh... friends & family sale 🤫 ${pct}% off, code's {code}. Don't tell everyone ;)\n\n{link}\n\nReply STOP to opt-out`
         },
         {
           id: 'humor_1',
           name: 'Pickle Craving',
           icon: '😏',
           category: 'Humor',
-          message: `{name}, your pickle craving called... we answered 🥒 ${pct}% off today with {code}. You're welcome.\n\n{link}\n\nReply STOP to opt-out`
+          message: `Your pickle craving called... we answered 🥒 ${pct}% off today with {code}. You're welcome.\n\n{link}\n\nReply STOP to opt-out`
         },
         {
           id: 'restock_1',
           name: 'Fresh Batch',
           icon: '✨',
           category: 'Restock',
-          message: `Fresh batch just came out of the brine ✨ Grab ${pct}% off with {code} while it's fresh, {name}!\n\n{link}\n\nReply STOP to opt-out`
+          message: `Fresh batch just came out of the brine ✨ Grab ${pct}% off with {code} while it's fresh!\n\n{link}\n\nReply STOP to opt-out`
         },
         {
           id: 'loyalty_1',
           name: 'Thank You',
           icon: '💚',
           category: 'Loyalty',
-          message: `{name}, just wanted to say thanks for being a customer 💚 Here's ${pct}% off as a little thank you: {code}\n\n{link}\n\nReply STOP to opt-out`
+          message: `Just wanted to say thanks for being part of the pickle fam 💚 Here's ${pct}% off as a little thank you: {code}\n\n{link}\n\nReply STOP to opt-out`
         }
       ],
       generatedAt: new Date().toISOString(),

@@ -213,6 +213,114 @@ class BusinessCalendarService {
 
   async initializeCommonEvents(year = new Date().getFullYear()) {
     const events = [
+      // ==================== MAJOR HOLIDAYS ====================
+      {
+        name: "New Year's Day",
+        startDate: `${year}-01-01`,
+        endDate: `${year}-01-01`,
+        eventType: "national_holiday",
+        keywords: ["new year", "new years", "fresh start", "resolution"],
+      },
+      {
+        name: "Valentine's Day",
+        startDate: `${year}-02-14`,
+        endDate: `${year}-02-14`,
+        eventType: "shopping_holiday",
+        keywords: ["valentine", "valentines", "love", "heart", "gift", "date night"],
+      },
+      {
+        name: "St. Patrick's Day",
+        startDate: `${year}-03-17`,
+        endDate: `${year}-03-17`,
+        eventType: "national_holiday",
+        keywords: ["st patrick", "irish", "green", "lucky"],
+      },
+      {
+        name: "Easter",
+        startDate: this.getEasterDate(year),
+        endDate: this.getEasterDate(year),
+        eventType: "national_holiday",
+        keywords: ["easter", "spring", "brunch", "family gathering"],
+      },
+      {
+        name: "Mother's Day",
+        startDate: this.getNthDayOfMonth(year, 4, 0, 2), // 2nd Sunday of May
+        endDate: this.getNthDayOfMonth(year, 4, 0, 2),
+        eventType: "shopping_holiday",
+        keywords: ["mothers day", "mom", "mother", "gift for mom"],
+      },
+      {
+        name: "Memorial Day",
+        startDate: this.getLastDayOfMonth(year, 4, 1), // Last Monday of May
+        endDate: this.getLastDayOfMonth(year, 4, 1),
+        eventType: "national_holiday",
+        keywords: ["memorial day", "memorial weekend", "bbq", "cookout"],
+      },
+      {
+        name: "Father's Day",
+        startDate: this.getNthDayOfMonth(year, 5, 0, 3), // 3rd Sunday of June
+        endDate: this.getNthDayOfMonth(year, 5, 0, 3),
+        eventType: "shopping_holiday",
+        keywords: ["fathers day", "dad", "father", "gift for dad"],
+      },
+      {
+        name: "July 4th",
+        startDate: `${year}-07-04`,
+        endDate: `${year}-07-04`,
+        eventType: "national_holiday",
+        keywords: ["july 4", "4th of july", "independence", "fourth", "bbq", "cookout"],
+      },
+      {
+        name: "Labor Day",
+        startDate: this.getNthDayOfMonth(year, 8, 1, 1), // 1st Monday of September
+        endDate: this.getNthDayOfMonth(year, 8, 1, 1),
+        eventType: "national_holiday",
+        keywords: ["labor day", "labour day", "end of summer", "last bbq"],
+      },
+      {
+        name: "Halloween",
+        startDate: `${year}-10-31`,
+        endDate: `${year}-10-31`,
+        eventType: "national_holiday",
+        keywords: ["halloween", "spooky", "trick or treat", "costume"],
+      },
+      {
+        name: "Thanksgiving",
+        startDate: this.getNthDayOfMonth(year, 10, 4, 4), // 4th Thursday of November
+        endDate: this.getNthDayOfMonth(year, 10, 4, 4),
+        eventType: "national_holiday",
+        keywords: ["thanksgiving", "grateful", "turkey", "family dinner"],
+      },
+      // ==================== SHOPPING EVENTS ====================
+      {
+        name: "Super Bowl Sunday",
+        startDate: this.getNthDayOfMonth(year, 1, 0, 2), // 2nd Sunday of February (approx)
+        endDate: this.getNthDayOfMonth(year, 1, 0, 2),
+        eventType: "shopping_holiday",
+        keywords: ["super bowl", "game day", "football", "snacks", "party"],
+      },
+      {
+        name: "Black Friday",
+        startDate: this.addDays(this.getNthDayOfMonth(year, 10, 4, 4), 1), // Day after Thanksgiving
+        endDate: this.addDays(this.getNthDayOfMonth(year, 10, 4, 4), 1),
+        eventType: "shopping_holiday",
+        keywords: ["black friday", "bfcm", "biggest sale"],
+      },
+      {
+        name: "Small Business Saturday",
+        startDate: this.addDays(this.getNthDayOfMonth(year, 10, 4, 4), 2), // 2 days after Thanksgiving
+        endDate: this.addDays(this.getNthDayOfMonth(year, 10, 4, 4), 2),
+        eventType: "shopping_holiday",
+        keywords: ["small business", "shop small", "shop local"],
+      },
+      {
+        name: "Cyber Monday",
+        startDate: this.addDays(this.getNthDayOfMonth(year, 10, 4, 4), 4), // Monday after Thanksgiving
+        endDate: this.addDays(this.getNthDayOfMonth(year, 10, 4, 4), 4),
+        eventType: "shopping_holiday",
+        keywords: ["cyber monday", "online deals"],
+      },
+      // ==================== BRAND EVENTS ====================
       {
         name: "National Pickle Day",
         startDate: `${year}-11-14`,
@@ -221,25 +329,19 @@ class BusinessCalendarService {
         keywords: ["pickle day", "national pickle", "celebrate"],
       },
       {
-        name: "Black Friday",
-        startDate: this.getNthDayOfMonth(year, 10, 5, 4), // 4th Friday of November (Friday=5)
-        endDate: this.getNthDayOfMonth(year, 10, 5, 4),
-        eventType: "shopping_holiday",
-        keywords: ["black friday", "bfcm", "biggest sale"],
+        name: "National Olive Day",
+        startDate: `${year}-06-01`,
+        endDate: `${year}-06-01`,
+        eventType: "brand_event",
+        keywords: ["olive day", "national olive", "olives"],
       },
+      // ==================== SEASONAL ====================
       {
-        name: "Cyber Monday",
-        startDate: this.addDays(this.getNthDayOfMonth(year, 10, 5, 4), 3),
-        endDate: this.addDays(this.getNthDayOfMonth(year, 10, 5, 4), 3),
-        eventType: "shopping_holiday",
-        keywords: ["cyber monday", "online deals"],
-      },
-      {
-        name: "Holiday Season",
+        name: "Holiday Gift Season",
         startDate: `${year}-12-01`,
         endDate: `${year}-12-25`,
         eventType: "seasonal",
-        keywords: ["holiday", "christmas", "gift", "navidad", "festive"],
+        keywords: ["holiday", "christmas", "gift", "navidad", "festive", "stocking stuffer"],
       },
       {
         name: "BBQ Season",
@@ -249,25 +351,11 @@ class BusinessCalendarService {
         keywords: ["bbq", "grill", "summer", "cookout", "picnic"],
       },
       {
-        name: "July 4th",
-        startDate: `${year}-07-04`,
-        endDate: `${year}-07-04`,
-        eventType: "national_holiday",
-        keywords: ["july 4", "4th of july", "independence", "fourth"],
-      },
-      {
-        name: "Memorial Day",
-        startDate: this.getLastDayOfMonth(year, 4, 1), // Last Monday of May (Monday=1)
-        endDate: this.getLastDayOfMonth(year, 4, 1),
-        eventType: "national_holiday",
-        keywords: ["memorial day", "memorial weekend"],
-      },
-      {
-        name: "Labor Day",
-        startDate: this.getNthDayOfMonth(year, 8, 1, 1), // 1st Monday of September (Monday=1)
-        endDate: this.getNthDayOfMonth(year, 8, 1, 1),
-        eventType: "national_holiday",
-        keywords: ["labor day", "labour day"],
+        name: "Spring Refresh",
+        startDate: `${year}-03-20`,
+        endDate: `${year}-04-15`,
+        eventType: "seasonal",
+        keywords: ["spring", "fresh start", "new season", "spring cleaning"],
       },
     ];
 
@@ -314,6 +402,27 @@ class BusinessCalendarService {
     const date = new Date(dateStr);
     date.setDate(date.getDate() + days);
     return date.toISOString().split("T")[0];
+  }
+
+  // Anonymous Gregorian algorithm for Easter date
+  getEasterDate(year) {
+    const a = year % 19;
+    const b = Math.floor(year / 100);
+    const c = year % 100;
+    const d = Math.floor(b / 4);
+    const e = b % 4;
+    const f = Math.floor((b + 8) / 25);
+    const g = Math.floor((b - f + 1) / 3);
+    const h = (19 * a + b - d - g + 15) % 30;
+    const i = Math.floor(c / 4);
+    const k = c % 4;
+    const l = (32 + 2 * e + 2 * i - h - k) % 7;
+    const m = Math.floor((a + 11 * h + 22 * l) / 451);
+    const month = Math.floor((h + l - 7 * m + 114) / 31);
+    const day = ((h + l - 7 * m + 114) % 31) + 1;
+    const mm = String(month).padStart(2, '0');
+    const dd = String(day).padStart(2, '0');
+    return `${year}-${mm}-${dd}`;
   }
 
   // ==================== CONTEXTO PARA LLM ====================
