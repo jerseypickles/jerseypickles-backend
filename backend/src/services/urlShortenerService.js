@@ -3,7 +3,7 @@
 const ShortUrl = require('../models/ShortUrl');
 
 // Base URL for short links (update this to your domain)
-const BASE_URL = process.env.SHORT_URL_BASE || process.env.API_URL || 'https://api.jerseypickles.com';
+const BASE_URL = process.env.SHORT_URL_BASE || process.env.API_URL || 'https://jerseypickles-backend.onrender.com';
 
 const urlShortenerService = {
 
