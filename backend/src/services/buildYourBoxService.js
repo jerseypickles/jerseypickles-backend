@@ -53,9 +53,9 @@ class BuildYourBoxService {
     this.ordersCacheTtlMs = 5 * 60 * 1000; // 5 min
 
     // Config para reportes BYB pesados
-    this.defaultAnalyticsDays = 60;
-    this.maxAnalyticsDays = 60;
-    this.snapshotRefreshDays = 10;
+    this.defaultAnalyticsDays = 7;
+    this.maxAnalyticsDays = 7;
+    this.snapshotRefreshDays = 1;
     this.snapshotInFlight = new Map();
     this.snapshotLastAttempt = new Map();
     this.snapshotRefreshCooldownMs = 60 * 60 * 1000; // 1 hour between retries
@@ -1892,6 +1892,28 @@ Responde SOLO con JSON válido (sin markdown, sin backticks):
         topProduct: topProduct?.name,
         period: data.summary.period
       }
+    };
+  }
+
+  /**
+   * Reset funnel: delete all BybFunnelEvent docs + invalidate all BybReportSnapshot cache
+   */
+  async resetFunnel() {
+    const funnelResult = await BybFunnelEvent.deleteMany({});
+    const snapshotResult = await BybReportSnapshot.deleteMany({});
+
+    // Clear in-memory caches
+    this.ordersCache.clear();
+    this.inFlightOrders.clear();
+    this.snapshotInFlight.clear();
+    this.snapshotLastAttempt.clear();
+
+    console.log(`🔄 BYB Funnel Reset: ${funnelResult.deletedCount} funnel events deleted, ${snapshotResult.deletedCount} snapshots deleted`);
+
+    return {
+      funnelEventsDeleted: funnelResult.deletedCount,
+      snapshotsDeleted: snapshotResult.deletedCount,
+      resetAt: new Date().toISOString()
     };
   }
 }

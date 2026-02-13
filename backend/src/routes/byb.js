@@ -62,6 +62,9 @@ router.get('/week-over-week', optionalProtect, buildYourBoxController.getWeekOve
 // Record funnel event (POST from Shopify tracking)
 router.post('/funnel/event', buildYourBoxController.recordFunnelEvent);
 
+// Reset all funnel data + invalidate snapshots
+router.delete('/funnel/reset', optionalProtect, buildYourBoxController.resetFunnel);
+
 // Get funnel analytics
 router.get('/funnel/analytics', optionalProtect, buildYourBoxController.getFunnelAnalytics);
 
