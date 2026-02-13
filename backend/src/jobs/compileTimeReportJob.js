@@ -108,7 +108,34 @@ class CompileTimeReportJob {
         }
       }
 
-      // 4. Also re-analyze any pending reports that are 48h+ old
+      // 4. Re-compile recent reports (< 7 days) to catch late conversions
+      const recentReports = await SmsCampaignTimeReport.find({
+        status: { $in: ['compiled', 'analyzed'] },
+        sentAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }
+      }).lean();
+
+      console.log(`   Found ${recentReports.length} recent reports to refresh`);
+
+      for (const report of recentReports) {
+        try {
+          const cId = report.campaign._id || report.campaign;
+          console.log(`   🔄 Refreshing report for campaign ${cId}...`);
+          const compiled = await smartScheduleService.compileCampaignReport(cId);
+          if (compiled) {
+            result.compiled++;
+            try {
+              await smartScheduleService.analyzeWithAI(compiled._id);
+              result.analyzed++;
+            } catch (aiErr) {
+              console.log(`   ⚠️  AI re-analysis skipped: ${aiErr.message}`);
+            }
+          }
+        } catch (err) {
+          console.error(`   ❌ Error refreshing report: ${err.message}`);
+        }
+      }
+
+      // 5. Also re-analyze any pending reports that are 4h+ old
       const pendingReports = await SmsCampaignTimeReport.findPendingCompilation();
       for (const report of pendingReports) {
         try {
