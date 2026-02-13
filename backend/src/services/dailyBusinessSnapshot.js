@@ -231,7 +231,8 @@ class DailyBusinessSnapshot {
           sent: c.stats?.sent || 0,
           delivered: c.stats?.delivered || 0,
           converted: c.stats?.converted || 0,
-          revenue: c.stats?.revenue || 0,
+          revenue: c.stats?.totalRevenue || 0,
+          unsubscribed: c.stats?.unsubscribed || 0,
           createdAt: c.createdAt
         }))
       };
@@ -326,6 +327,7 @@ class DailyBusinessSnapshot {
 
   async getDiscountUsage(startDate) {
     try {
+      // discountCodes is [String] (e.g. ['JP-ABC', 'SC-DEF']), not [Object]
       const discounts = await Order.aggregate([
         {
           $match: {
@@ -338,16 +340,16 @@ class DailyBusinessSnapshot {
           $group: {
             _id: {
               $cond: [
-                { $regexMatch: { input: '$discountCodes.code', regex: /^JP/i } },
-                'welcome',
+                { $regexMatch: { input: '$discountCodes', regex: /^JPC/i } },
+                'dynamic',
                 {
                   $cond: [
-                    { $regexMatch: { input: '$discountCodes.code', regex: /^SC/i } },
-                    'secondChance',
+                    { $regexMatch: { input: '$discountCodes', regex: /^JP/i } },
+                    'welcome',
                     {
                       $cond: [
-                        { $regexMatch: { input: '$discountCodes.code', regex: /^JPC/i } },
-                        'dynamic',
+                        { $regexMatch: { input: '$discountCodes', regex: /^SC/i } },
+                        'secondChance',
                         'other'
                       ]
                     }
@@ -355,8 +357,7 @@ class DailyBusinessSnapshot {
                 }
               ]
             },
-            count: { $sum: 1 },
-            totalDiscount: { $sum: { $toDouble: '$discountCodes.amount' } }
+            count: { $sum: 1 }
           }
         }
       ]);
