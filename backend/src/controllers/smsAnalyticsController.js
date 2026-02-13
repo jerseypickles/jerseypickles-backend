@@ -467,6 +467,35 @@ const smsAnalyticsController = {
       const { days = 30 } = req.query;
       const analytics = await SmsSubscriber.getUnsubscribeAnalytics(parseInt(days));
 
+      // Enrich byCampaign with campaign names
+      if (analytics.byCampaign && analytics.byCampaign.length > 0) {
+        try {
+          const SmsCampaign = require('../models/SmsCampaign');
+          const campaignIds = analytics.byCampaign.map(c => c._id);
+          const campaigns = await SmsCampaign.find({ _id: { $in: campaignIds } })
+            .select('name stats.delivered stats.sent')
+            .lean();
+
+          const campaignMap = {};
+          campaigns.forEach(c => { campaignMap[c._id.toString()] = c; });
+
+          analytics.byCampaign = analytics.byCampaign.map(c => {
+            const campaign = campaignMap[c._id?.toString()];
+            const delivered = campaign?.stats?.delivered || 0;
+            return {
+              campaignId: c._id,
+              name: campaign?.name || 'Campaña eliminada',
+              count: c.count,
+              unsubscribeRate: delivered > 0
+                ? ((c.count / delivered) * 100).toFixed(2) + '%'
+                : 'N/A'
+            };
+          });
+        } catch (e) {
+          // SmsCampaign model might not be available
+        }
+      }
+
       res.json({
         success: true,
         ...analytics,

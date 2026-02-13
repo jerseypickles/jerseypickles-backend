@@ -250,6 +250,11 @@ const smsSubscriberSchema = new mongoose.Schema({
   unsubscribeKeyword: {
     type: String // The exact keyword used (STOP, UNSUBSCRIBE, etc.)
   },
+  unsubscribeCampaignId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'SmsCampaign',
+    default: null
+  },
 
   // ==================== PENDING UNSUBSCRIBE (Two-step STOP) ====================
   pendingUnsubscribe: {
@@ -277,6 +282,7 @@ smsSubscriberSchema.index({ 'conversionData.convertedAt': -1 });
 // Geolocation indexes for map analytics
 smsSubscriberSchema.index({ 'location.region': 1, status: 1 });
 smsSubscriberSchema.index({ 'location.city': 1, 'location.region': 1 });
+smsSubscriberSchema.index({ unsubscribeCampaignId: 1, status: 1 });
 
 // ==================== VIRTUALS ====================
 
@@ -850,6 +856,24 @@ smsSubscriberSchema.statics.getUnsubscribeAnalytics = async function(dateRange =
           },
           { $sort: { '_id.year': -1, '_id.week': -1 } },
           { $limit: 4 }
+        ],
+
+        // Unsubscribes by campaign
+        byCampaign: [
+          {
+            $match: {
+              status: 'unsubscribed',
+              unsubscribeCampaignId: { $exists: true, $ne: null }
+            }
+          },
+          {
+            $group: {
+              _id: '$unsubscribeCampaignId',
+              count: { $sum: 1 }
+            }
+          },
+          { $sort: { count: -1 } },
+          { $limit: 20 }
         ]
       }
     }
@@ -944,6 +968,8 @@ smsSubscriberSchema.statics.getUnsubscribeAnalytics = async function(dateRange =
 
     keywords: s.byKeyword,
 
+    byCampaign: s.byCampaign || [],
+
     feedback: s.recentFeedback.map(f => {
       // Clean up feedback text from two-step STOP system
       let cleanFeedback = f.feedback;
@@ -1007,6 +1033,7 @@ smsSubscriberSchema.methods.recordUnsubscribe = async function(data = {}) {
   this.unsubscribeReason = data.reason || 'stop_keyword';
   this.unsubscribeKeyword = data.keyword || null;
   this.unsubscribeFeedback = data.feedback || null;
+  this.unsubscribeCampaignId = data.campaignId || null;
 
   return this.save();
 };

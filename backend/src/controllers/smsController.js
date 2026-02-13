@@ -1334,12 +1334,45 @@ async function handleInboundSms(webhookData) {
 
       console.log(`🚫 STOP received - unsubscribing: ${fromPhone}`);
 
-      // Record unsubscribe with analytics
-      await subscriber.recordUnsubscribe({
+      // Find the last campaign SMS sent to this subscriber to attribute the unsub
+      let lastCampaignId = null;
+      try {
+        const SmsMessage = require('../models/SmsMessage');
+        const SmsCampaign = require('../models/SmsCampaign');
+
+        const lastCampaignMsg = await SmsMessage.findOne({
+          subscriber: subscriber._id,
+          status: { $in: ['sent', 'delivered'] }
+        }).sort({ createdAt: -1 }).lean();
+
+        if (lastCampaignMsg && lastCampaignMsg.campaign) {
+          lastCampaignId = lastCampaignMsg.campaign;
+
+          // Increment unsubscribed count on the campaign
+          await SmsCampaign.findByIdAndUpdate(lastCampaignId, {
+            $inc: { 'stats.unsubscribed': 1 }
+          });
+          console.log(`   📊 Unsub attributed to campaign: ${lastCampaignId}`);
+        }
+      } catch (e) {
+        console.log(`   ⚠️ Could not attribute unsub to campaign: ${e.message}`);
+      }
+
+      // Build unsubscribe data with campaign attribution
+      const unsubData = {
         source: 'reply_stop',
         reason: 'stop_keyword',
         keyword: keywordUsed.toUpperCase()
-      });
+      };
+
+      // If unsub is after a campaign, set afterSms and campaignId
+      if (lastCampaignId) {
+        unsubData.afterSms = 'campaign';
+        unsubData.campaignId = lastCampaignId;
+      }
+
+      // Record unsubscribe with analytics
+      await subscriber.recordUnsubscribe(unsubData);
 
       console.log(`   Keyword: ${keywordUsed.toUpperCase()}`);
       console.log(`   After SMS: ${subscriber.unsubscribeAfterSms}`);
@@ -1364,6 +1397,7 @@ async function handleInboundSms(webhookData) {
         subscriber.smsCountBeforeUnsub = null;
         subscriber.unsubscribeFeedback = null;
         subscriber.unsubscribeKeyword = null;
+        subscriber.unsubscribeCampaignId = null;
         await subscriber.save();
 
         console.log(`✅ Re-subscribed via SMS START: ${fromPhone}`);
