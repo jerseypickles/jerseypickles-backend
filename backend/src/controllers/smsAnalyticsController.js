@@ -3,6 +3,7 @@
 
 const smsAnalyticsService = require('../services/smsAnalyticsService');
 const SmsSubscriber = require('../models/SmsSubscriber');
+const AIInsight = require('../models/AIInsight');
 
 // Cargar claudeService de forma segura
 let claudeService = null;
@@ -371,44 +372,64 @@ const smsAnalyticsController = {
     try {
       const { forceRefresh = false } = req.query;
 
-      // Obtener últimos insights guardados
+      // 1. Intentar cache en memoria (más rápido)
       const cached = smsAnalyticsService.getLastAiInsights();
 
-      // Si hay insights válidos y no se pide refresh, devolverlos
       if (cached.insights && !cached.isStale && forceRefresh !== 'true') {
         return res.json({
           success: true,
           insights: cached.insights,
           generatedAt: cached.generatedAt,
-          fromCache: true
+          fromCache: true,
+          source: 'memory'
         });
       }
 
-      // Generar nuevos insights
+      // 2. Si no hay cache en memoria, leer de MongoDB (generado por aiAnalyticsJob)
+      if (forceRefresh !== 'true') {
+        const dbInsight = await AIInsight.getLatest('sms_ai_insights', 30);
+        if (dbInsight?.data) {
+          // Rehidratar cache en memoria para próximas peticiones
+          smsAnalyticsService.saveAiInsights(dbInsight.data);
+          return res.json({
+            success: true,
+            insights: dbInsight.data,
+            generatedAt: dbInsight.createdAt,
+            fromCache: true,
+            source: 'database'
+          });
+        }
+      }
+
+      // 3. Solo si se pide forceRefresh Y Claude está disponible, generar nuevos
       if (!claudeService || !claudeService.isAvailable()) {
         return res.json({
           success: true,
           insights: cached.insights || null,
           generatedAt: cached.generatedAt,
-          message: 'Claude AI not available. Showing cached insights if available.',
+          message: 'Claude AI not available. Waiting for next scheduled analysis.',
           aiAvailable: false
         });
       }
 
-      // Preparar datos y generar insights
+      // Generar nuevos insights bajo demanda (solo forceRefresh)
       const data = await smsAnalyticsService.prepareAiInsightsData();
       const insights = await claudeService.generateSmsInsights(data);
 
-      // Guardar para cache
       if (insights.success) {
         smsAnalyticsService.saveAiInsights(insights);
+        // También guardar en MongoDB para persistencia
+        await AIInsight.saveAnalysis('sms_ai_insights', 30, insights, {
+          recalculateHours: 6
+        });
       }
 
       res.json({
         success: true,
         insights,
         generatedAt: new Date().toISOString(),
-        fromCache: false
+        fromCache: false,
+        source: 'claude_on_demand'
       });
 
     } catch (error) {
@@ -531,8 +552,21 @@ const smsAnalyticsController = {
         .sort((a, b) => b.subscribers - a.subscribers)
         .slice(0, 5);
 
-      // Insights cacheados
-      const cachedInsights = smsAnalyticsService.getLastAiInsights();
+      // Insights: intentar cache en memoria, fallback a MongoDB
+      let cachedInsights = smsAnalyticsService.getLastAiInsights();
+
+      if (!cachedInsights.insights) {
+        // Rehidratar desde MongoDB si el cache en memoria está vacío
+        const dbInsight = await AIInsight.getLatest('sms_ai_insights', 30);
+        if (dbInsight?.data) {
+          smsAnalyticsService.saveAiInsights(dbInsight.data);
+          cachedInsights = {
+            insights: dbInsight.data,
+            generatedAt: dbInsight.createdAt,
+            isStale: false
+          };
+        }
+      }
 
       res.json({
         success: true,

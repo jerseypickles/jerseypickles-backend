@@ -7,6 +7,7 @@ const AIInsight = require('../models/AIInsight');
 const smsCalculator = require('../services/smsCalculator');
 const claudeService = require('../services/claudeService');
 const dailyBusinessSnapshot = require('../services/dailyBusinessSnapshot');
+const smsAnalyticsService = require('../services/smsAnalyticsService');
 
 /**
  * AI Analytics Job (SMS-Focused)
@@ -214,12 +215,16 @@ class AIAnalyticsJob {
       // Llamar a Claude con el nuevo método SMS
       const claudeResponse = await claudeService.generateSmsInsights(dataForClaude);
 
-      if (claudeResponse.success) {
-        // Guardar respuesta completa de Claude
-        await AIInsight.saveAnalysis('sms_ai_insights', 30, claudeResponse, {
-          recalculateHours: 6
-        });
+      // Guardar en MongoDB (persistente)
+      await AIInsight.saveAnalysis('sms_ai_insights', 30, claudeResponse, {
+        recalculateHours: 6
+      });
 
+      // Guardar en cache en memoria de smsAnalyticsService
+      // Esto alimenta el tab Resumen de SMS Studio sin necesidad de llamar a Claude otra vez
+      smsAnalyticsService.saveAiInsights(claudeResponse);
+
+      if (claudeResponse.success) {
         results.success.push('sms_ai_insights (Claude)');
         console.log(`      ✅ Claude generó análisis SMS completo`);
         console.log(`      📊 Tokens: ${claudeResponse.tokensUsed?.input || 0} in / ${claudeResponse.tokensUsed?.output || 0} out`);
@@ -232,12 +237,6 @@ class AIAnalyticsJob {
         }
       } else {
         console.log('      ⚠️  Claude no disponible, usando insights básicos');
-
-        // El fallback también tiene la estructura correcta
-        await AIInsight.saveAnalysis('sms_ai_insights', 30, claudeResponse, {
-          recalculateHours: 6
-        });
-
         results.success.push('sms_ai_insights (fallback)');
       }
 
