@@ -19,7 +19,7 @@ const EmailSend = require('../models/EmailSend');
 const EmailEvent = require('../models/EmailEvent');
 const emailService = require('../services/emailService');
 const templateService = require('../services/templateService');
-const segmentationService = require('../services/segmentationService');
+// segmentationService removed - campaigns now use lists only
 
 // ==================== HELPER FUNCTIONS ====================
 
@@ -569,7 +569,7 @@ class CampaignsController {
         const list = await List.findById(campaign.list._id).select('members');
         totalRecipients = list?.members?.length || 0;
       } else {
-        totalRecipients = await segmentationService.countSegment(campaign.segment.conditions);
+        totalRecipients = 0;
       }
       
       timer.end('count_recipients');
@@ -677,10 +677,8 @@ class CampaignsController {
               .cursor({ batchSize: CURSOR_BATCH_SIZE });
               
           } else {
-            cursor = await segmentationService.getCursorForSegment(
-              segmentConditions,
-              { select: 'email firstName lastName _id' }
-            );
+            // Segments removed - lists only
+            cursor = null;
           }
           
           timer.end('create_cursor');
@@ -978,10 +976,8 @@ class CampaignsController {
             .lean();
         }
       } else {
-        const customers = await segmentationService.evaluateSegment(
-          campaign.segment.conditions,
-          { select: 'email firstName lastName _id', limit: 1 }
-        );
+        // Segments removed - lists only
+        const customers = [];
         testCustomer = customers[0];
       }
       

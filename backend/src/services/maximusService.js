@@ -1,0 +1,485 @@
+// backend/src/services/maximusService.js
+// 🏛️ MAXIMUS - Autonomous Email Campaign Agent
+// Named after the greatest gladiator - he fights for your revenue
+
+const Anthropic = require('@anthropic-ai/sdk');
+const MaximusConfig = require('../models/MaximusConfig');
+const MaximusCampaignLog = require('../models/MaximusCampaignLog');
+const Campaign = require('../models/Campaign');
+const List = require('../models/List');
+
+class MaximusService {
+  constructor() {
+    this.client = null;
+    this.model = 'claude-sonnet-4-6';
+    this.initialized = false;
+  }
+
+  // ==================== INITIALIZATION ====================
+
+  init() {
+    if (this.initialized) return;
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      console.log('🏛️ Maximus: ANTHROPIC_API_KEY not configured');
+      return;
+    }
+
+    try {
+      this.client = new Anthropic({ apiKey });
+      this.initialized = true;
+      console.log('🏛️ Maximus: Initialized');
+    } catch (error) {
+      console.error('🏛️ Maximus: Init error:', error.message);
+    }
+  }
+
+  isAvailable() {
+    return this.initialized && this.client !== null;
+  }
+
+  // ==================== MAIN EXECUTION ====================
+
+  /**
+   * Main daily execution - called by maximusJob
+   * Maximus decides everything: whether to send, what, to whom, when
+   */
+  async execute() {
+    console.log('\n🏛️ ═══════════════════════════════════════');
+    console.log('   MAXIMUS - Campaign Agent Executing');
+    console.log('═══════════════════════════════════════\n');
+
+    const config = await MaximusConfig.getConfig();
+
+    // Check if active
+    if (!config.active) {
+      console.log('🏛️ Maximus: Dormant (not active)');
+      return { executed: false, reason: 'not_active' };
+    }
+
+    if (!config.creativeAgentReady) {
+      console.log('🏛️ Maximus: Waiting for creative agent');
+      return { executed: false, reason: 'creative_agent_not_ready' };
+    }
+
+    // Check weekly limit
+    const campaignsThisWeek = await MaximusCampaignLog.getCampaignsThisWeek();
+    if (campaignsThisWeek.length >= config.maxCampaignsPerWeek) {
+      console.log(`🏛️ Maximus: Weekly limit reached (${campaignsThisWeek.length}/${config.maxCampaignsPerWeek})`);
+      return { executed: false, reason: 'weekly_limit_reached' };
+    }
+
+    // Check if already sent today
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const sentToday = campaignsThisWeek.find(c =>
+      new Date(c.sentAt) >= today
+    );
+    if (sentToday) {
+      console.log('🏛️ Maximus: Already sent today');
+      return { executed: false, reason: 'already_sent_today' };
+    }
+
+    // Check if today is a rest day
+    if (!config.canSendToday()) {
+      console.log('🏛️ Maximus: Today is a rest day');
+      return { executed: false, reason: 'rest_day' };
+    }
+
+    // Check lists
+    if (!config.lists || config.lists.length === 0) {
+      console.log('🏛️ Maximus: No lists configured');
+      return { executed: false, reason: 'no_lists' };
+    }
+
+    // Gather learning data
+    const learningData = await this.gatherLearningData();
+
+    // Ask Claude to make decisions
+    const decision = await this.makeDecision(config, learningData, campaignsThisWeek);
+    if (!decision) {
+      console.log('🏛️ Maximus: Could not make decision');
+      return { executed: false, reason: 'decision_failed' };
+    }
+
+    console.log('🏛️ Maximus Decision:');
+    console.log(`   Subject: "${decision.subjectLine}"`);
+    console.log(`   Preview: "${decision.previewText}"`);
+    console.log(`   List: ${decision.listName}`);
+    console.log(`   Hour: ${decision.sendHour}:00`);
+    console.log(`   Reasoning: ${decision.reasoning.whyThisTime}`);
+
+    // Schedule or execute based on optimal hour
+    const result = await this.scheduleCampaign(config, decision);
+
+    return { executed: true, ...result };
+  }
+
+  // ==================== DECISION MAKING ====================
+
+  /**
+   * Ask Claude Sonnet 4.6 to decide subject, preview text, list, and timing
+   */
+  async makeDecision(config, learningData, campaignsThisWeek) {
+    if (!this.isAvailable()) {
+      console.log('🏛️ Maximus: Claude not available');
+      return null;
+    }
+
+    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const now = new Date();
+    const today = dayNames[now.getDay()];
+
+    const listsInfo = config.lists.map(l => `- "${l.name}" (ID: ${l.listId})`).join('\n');
+
+    const recentCampaigns = campaignsThisWeek.map(c =>
+      `- "${c.subjectLine}" → List: ${c.listName}, Day: ${c.sentDay}, Hour: ${c.sentHour}:00, Open: ${c.metrics.openRate}%, Click: ${c.metrics.clickRate}%`
+    ).join('\n') || 'No campaigns sent this week yet.';
+
+    let learningSection = 'No historical data yet (initial phase).';
+    if (learningData.totalCampaigns > 0) {
+      learningSection = `Historical data (${learningData.totalCampaigns} campaigns):
+- Average open rate: ${learningData.avgOpenRate?.toFixed(1)}%
+- Average click rate: ${learningData.avgClickRate?.toFixed(1)}%
+- Total revenue: $${learningData.totalRevenue?.toFixed(0)}
+
+Best performing days:
+${learningData.byDay?.map(d => `  ${d._id}: ${d.avgOpenRate?.toFixed(1)}% opens, ${d.avgClickRate?.toFixed(1)}% clicks (${d.campaigns} campaigns)`).join('\n') || '  No data yet'}
+
+Best performing hours:
+${learningData.byHour?.map(h => `  ${h._id}:00: ${h.avgOpenRate?.toFixed(1)}% opens, ${h.avgClickRate?.toFixed(1)}% clicks (${h.campaigns} campaigns)`).join('\n') || '  No data yet'}
+
+Performance by list:
+${learningData.byList?.map(l => `  "${l.listName}": ${l.avgOpenRate?.toFixed(1)}% opens, ${l.avgClickRate?.toFixed(1)}% clicks (${l.campaigns} campaigns)`).join('\n') || '  No data yet'}`;
+    }
+
+    const prompt = `You are MAXIMUS, an autonomous email campaign agent for Jersey Pickles - an artisanal pickle and gourmet olive shop from New Jersey.
+
+TODAY: ${today}, ${now.toISOString().split('T')[0]}
+SEND WINDOW: ${config.sendWindowStart}:00 - ${config.sendWindowEnd}:00 (${config.timezone})
+CAMPAIGNS LEFT THIS WEEK: ${config.maxCampaignsPerWeek - campaignsThisWeek.length}
+
+AVAILABLE LISTS:
+${listsInfo}
+
+THIS WEEK'S CAMPAIGNS:
+${recentCampaigns}
+
+LEARNING DATA:
+${learningSection}
+
+BRAND VOICE:
+- Warm, friendly, artisanal, family-oriented
+- Products: Pickles, Olives, Marinated Mushrooms, Pickled Vegetables, Build Your Box, Gift Sets
+- NOT overly commercial - focus on craft and quality
+- Use emojis sparingly (max 1-2)
+- Keep subjects under 50 characters
+- Preview text should complement the subject, not repeat it
+
+YOUR TASK:
+Decide the campaign for today. You must choose:
+1. Subject line (compelling, under 50 chars)
+2. Preview text (adds context, under 80 chars)
+3. Which list to send to (pick one based on performance data or rotate)
+4. What hour to send (between ${config.sendWindowStart}-${config.sendWindowEnd}, based on learning data)
+
+${learningData.totalCampaigns < 7 ? 'LEARNING PHASE: Try different hours to gather data. Vary between the lists.' : 'OPTIMIZED PHASE: Use your learning data to pick the best performing time and list.'}
+
+DO NOT repeat a subject line used this week.
+
+Respond ONLY with valid JSON:
+{
+  "subjectLine": "...",
+  "previewText": "...",
+  "listId": "...",
+  "listName": "...",
+  "sendHour": <number>,
+  "reasoning": {
+    "whyThisSubject": "...",
+    "whyThisList": "...",
+    "whyThisTime": "..."
+  }
+}`;
+
+    try {
+      const response = await this.client.messages.create({
+        model: this.model,
+        max_tokens: 500,
+        messages: [{ role: 'user', content: prompt }]
+      });
+
+      const content = response.content?.[0]?.text || '';
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        console.error('🏛️ Maximus: Could not parse Claude response');
+        return null;
+      }
+
+      const decision = JSON.parse(jsonMatch[0]);
+
+      // Validate the decision
+      const validList = config.lists.find(l => l.listId.toString() === decision.listId);
+      if (!validList) {
+        console.error('🏛️ Maximus: Invalid list selected');
+        return null;
+      }
+
+      if (decision.sendHour < config.sendWindowStart || decision.sendHour >= config.sendWindowEnd) {
+        decision.sendHour = config.getOptimalSendHour();
+      }
+
+      return decision;
+
+    } catch (error) {
+      console.error('🏛️ Maximus: Claude error:', error.message);
+      return null;
+    }
+  }
+
+  // ==================== CAMPAIGN CREATION & SCHEDULING ====================
+
+  /**
+   * Create the campaign in the system and schedule it
+   */
+  async scheduleCampaign(config, decision) {
+    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const now = new Date();
+    const today = dayNames[now.getDay()];
+
+    // Get the week number
+    const startOfYear = new Date(now.getFullYear(), 0, 1);
+    const weekNumber = Math.ceil(((now - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7);
+
+    // Create the campaign in the existing system
+    const campaign = await Campaign.create({
+      name: `[Maximus] ${decision.subjectLine}`,
+      subject: decision.subjectLine,
+      previewText: decision.previewText,
+      htmlContent: '<p>Awaiting creative from design agent</p>',
+      targetType: 'list',
+      list: decision.listId,
+      fromName: 'Jersey Pickles',
+      fromEmail: 'info@jerseypickles.com',
+      status: 'draft',
+      tags: ['maximus', 'agent-generated'],
+      'stats.totalRecipients': 0
+    });
+
+    // Log in Maximus history
+    const log = await MaximusCampaignLog.create({
+      campaign: campaign._id,
+      subjectLine: decision.subjectLine,
+      previewText: decision.previewText,
+      list: decision.listId,
+      listName: decision.listName,
+      sentAt: now,
+      sentDay: today,
+      sentHour: decision.sendHour,
+      isLearningPhase: config.learning.phase !== 'optimized',
+      weekNumber,
+      weekYear: now.getFullYear(),
+      reasoning: decision.reasoning
+    });
+
+    // Update config stats
+    config.stats.totalCampaignsSent += 1;
+    config.stats.lastCampaignAt = now;
+    await config.save();
+
+    console.log(`🏛️ Maximus: Campaign created - ${campaign._id}`);
+    console.log(`🏛️ Maximus: Log created - ${log._id}`);
+
+    return {
+      campaignId: campaign._id,
+      logId: log._id,
+      subjectLine: decision.subjectLine,
+      previewText: decision.previewText,
+      listName: decision.listName,
+      sendHour: decision.sendHour
+    };
+  }
+
+  // ==================== LEARNING ====================
+
+  /**
+   * Gather all historical data for decision making
+   */
+  async gatherLearningData() {
+    const [summary, byDay, byHour, byList] = await Promise.all([
+      MaximusCampaignLog.getLearningSummary(),
+      MaximusCampaignLog.getPerformanceByDay(),
+      MaximusCampaignLog.getPerformanceByHour(),
+      MaximusCampaignLog.getPerformanceByList()
+    ]);
+
+    const summaryData = summary[0] || {
+      totalCampaigns: 0,
+      avgOpenRate: 0,
+      avgClickRate: 0,
+      totalRevenue: 0
+    };
+
+    return {
+      ...summaryData,
+      byDay,
+      byHour,
+      byList
+    };
+  }
+
+  /**
+   * Update metrics for a campaign log after data comes in
+   * Called by a separate job or webhook handler
+   */
+  async updateCampaignMetrics(campaignId) {
+    const campaign = await Campaign.findById(campaignId);
+    if (!campaign) return null;
+
+    const log = await MaximusCampaignLog.findOne({ campaign: campaignId });
+    if (!log) return null;
+
+    const stats = campaign.stats || {};
+    const delivered = stats.delivered || 0;
+
+    log.metrics = {
+      sent: stats.sent || 0,
+      delivered,
+      opened: stats.opened || 0,
+      clicked: stats.clicked || 0,
+      converted: stats.converted || 0,
+      bounced: stats.bounced || 0,
+      unsubscribed: stats.unsubscribed || 0,
+      revenue: stats.revenue || 0,
+      openRate: delivered > 0 ? parseFloat(((stats.opened || 0) / delivered * 100).toFixed(1)) : 0,
+      clickRate: delivered > 0 ? parseFloat(((stats.clicked || 0) / delivered * 100).toFixed(1)) : 0,
+      conversionRate: delivered > 0 ? parseFloat(((stats.converted || 0) / delivered * 100).toFixed(1)) : 0
+    };
+    log.metricsUpdatedAt = new Date();
+    await log.save();
+
+    // Update learning in config
+    await this.updateLearning();
+
+    return log;
+  }
+
+  /**
+   * Recalculate learning data and update config
+   */
+  async updateLearning() {
+    const config = await MaximusConfig.getConfig();
+    const learningData = await this.gatherLearningData();
+
+    if (learningData.totalCampaigns === 0) return;
+
+    // Update phase
+    if (learningData.totalCampaigns >= 7) {
+      config.learning.phase = 'optimized';
+    } else if (learningData.totalCampaigns >= 1) {
+      config.learning.phase = 'learning';
+    }
+
+    config.learning.campaignsAnalyzed = learningData.totalCampaigns;
+
+    // Best days
+    if (learningData.byDay.length > 0) {
+      config.learning.bestDays = learningData.byDay.map(d => ({
+        day: d._id,
+        score: (d.avgOpenRate * 0.6) + (d.avgClickRate * 0.4),
+        avgOpenRate: d.avgOpenRate,
+        avgClickRate: d.avgClickRate
+      }));
+
+      // Determine rest days (worst 1-2 days if we have enough data)
+      if (learningData.totalCampaigns >= 7) {
+        const sorted = [...config.learning.bestDays].sort((a, b) => a.score - b.score);
+        config.learning.restDays = sorted.slice(0, 2).map(d => d.day);
+      }
+    }
+
+    // Best hours
+    if (learningData.byHour.length > 0) {
+      config.learning.bestHours = learningData.byHour.map(h => ({
+        hour: h._id,
+        score: (h.avgOpenRate * 0.6) + (h.avgClickRate * 0.4),
+        avgOpenRate: h.avgOpenRate,
+        avgClickRate: h.avgClickRate
+      })).sort((a, b) => b.score - a.score);
+    }
+
+    // Best list
+    if (learningData.byList.length > 0) {
+      const bestList = learningData.byList.sort((a, b) =>
+        ((b.avgOpenRate * 0.6) + (b.avgClickRate * 0.4)) -
+        ((a.avgOpenRate * 0.6) + (a.avgClickRate * 0.4))
+      )[0];
+      config.learning.bestList = {
+        listId: bestList._id,
+        name: bestList.listName,
+        avgOpenRate: bestList.avgOpenRate
+      };
+    }
+
+    // Update global stats
+    config.stats.avgOpenRate = learningData.avgOpenRate || 0;
+    config.stats.avgClickRate = learningData.avgClickRate || 0;
+    config.stats.totalRevenue = learningData.totalRevenue || 0;
+
+    config.learning.lastLearningUpdate = new Date();
+    await config.save();
+
+    console.log(`🏛️ Maximus: Learning updated (${learningData.totalCampaigns} campaigns, phase: ${config.learning.phase})`);
+  }
+
+  // ==================== STATUS ====================
+
+  async getStatus() {
+    const config = await MaximusConfig.getConfig();
+    const learningData = await this.gatherLearningData();
+    const campaignsThisWeek = await MaximusCampaignLog.getCampaignsThisWeek();
+    const recentLogs = await MaximusCampaignLog.find()
+      .sort({ sentAt: -1 })
+      .limit(10)
+      .lean();
+
+    return {
+      agent: 'Maximus',
+      active: config.active,
+      creativeAgentReady: config.creativeAgentReady,
+      model: this.model,
+      claudeAvailable: this.isAvailable(),
+      lists: config.lists,
+      constraints: {
+        maxPerWeek: config.maxCampaignsPerWeek,
+        sendWindow: `${config.sendWindowStart}:00 - ${config.sendWindowEnd}:00`,
+        timezone: config.timezone
+      },
+      thisWeek: {
+        sent: campaignsThisWeek.length,
+        remaining: config.maxCampaignsPerWeek - campaignsThisWeek.length,
+        campaigns: campaignsThisWeek.map(c => ({
+          subject: c.subjectLine,
+          list: c.listName,
+          day: c.sentDay,
+          hour: c.sentHour,
+          openRate: c.metrics.openRate,
+          clickRate: c.metrics.clickRate
+        }))
+      },
+      learning: {
+        phase: config.learning.phase,
+        campaignsAnalyzed: config.learning.campaignsAnalyzed,
+        bestDays: config.learning.bestDays,
+        bestHours: config.learning.bestHours?.slice(0, 3),
+        bestList: config.learning.bestList,
+        restDays: config.learning.restDays
+      },
+      stats: config.stats,
+      recentCampaigns: recentLogs
+    };
+  }
+}
+
+const maximusService = new MaximusService();
+module.exports = maximusService;

@@ -5,7 +5,6 @@ const Order = require('../models/Order');
 const EmailEvent = require('../models/EmailEvent');
 const EmailSend = require('../models/EmailSend');
 const Campaign = require('../models/Campaign');
-const BybFunnelEvent = require('../models/BybFunnelEvent');
 const WebhookLog = require('../models/WebhookLog');
 const AttributionService = require('../middleware/attributionTracking');
 const crypto = require('crypto');
@@ -236,39 +235,7 @@ const extractBybContextFromOrder = (order = {}) => {
   };
 };
 
-const appendBybStep8Action = (actions, bybFunnelResult, fallbackOrderId) => {
-  if (!bybFunnelResult) return;
-
-  if (bybFunnelResult.tracked) {
-    actions.push({
-      type: 'byb_funnel_step_8_recorded',
-      details: {
-        eventId: bybFunnelResult.eventId,
-        sessionId: bybFunnelResult.sessionId,
-        usedFallbackSession: bybFunnelResult.usedFallbackSession
-      },
-      success: true
-    });
-    return;
-  }
-
-  if (bybFunnelResult.reason === 'already_tracked') {
-    actions.push({
-      type: 'byb_funnel_step_8_already_tracked',
-      details: { orderId: fallbackOrderId || bybFunnelResult.orderId || null },
-      success: true
-    });
-    return;
-  }
-
-  if (bybFunnelResult.reason !== 'not_byb') {
-    actions.push({
-      type: 'byb_funnel_step_8_recorded',
-      details: { error: bybFunnelResult.error || bybFunnelResult.reason },
-      success: false
-    });
-  }
-};
+// BYB funnel tracking removed
 
 class WebhooksController {
   
@@ -561,11 +528,6 @@ class WebhooksController {
             success: true
           });
 
-          const bybFunnelResult = await WebhooksController.prototype.recordBybPurchaseCompleteFromOrder(
-            shopifyOrder,
-            topic
-          );
-          appendBybStep8Action(actions, bybFunnelResult, shopifyOrderId);
 
           await webhookLog.markProcessed(actions, flowsTriggered);
           return res.status(200).json({ success: true, logId: webhookLog._id, duplicate: true });
@@ -655,11 +617,6 @@ class WebhooksController {
             success: true
           });
 
-          const bybFunnelResult = await WebhooksController.prototype.recordBybPurchaseCompleteFromOrder(
-            shopifyOrder,
-            topic
-          );
-          appendBybStep8Action(actions, bybFunnelResult, shopifyOrderId);
 
           await webhookLog.markProcessed(actions, flowsTriggered);
           return res.status(200).json({ success: true, logId: webhookLog._id, duplicate: true });
@@ -674,11 +631,6 @@ class WebhooksController {
         success: true
       });
 
-      const bybFunnelResult = await WebhooksController.prototype.recordBybPurchaseCompleteFromOrder(
-        shopifyOrder,
-        topic
-      );
-      appendBybStep8Action(actions, bybFunnelResult, shopifyOrderId);
       
       const previousOrdersCount = customer.ordersCount || 0;
       
@@ -1621,64 +1573,7 @@ class WebhooksController {
     }
   }
 
-  async recordBybPurchaseCompleteFromOrder(order, webhookTopic = 'orders/create') {
-    try {
-      const bybContext = extractBybContextFromOrder(order);
-      if (!bybContext.isByb) {
-        return { tracked: false, reason: 'not_byb' };
-      }
-
-      const orderId = order?.id?.toString();
-      if (!orderId) {
-        return { tracked: false, reason: 'missing_order_id' };
-      }
-
-      const existingStep8 = await BybFunnelEvent.findOne({
-        step: 'step_8_purchase_complete',
-        'metadata.orderId': orderId
-      }).select('_id').lean();
-
-      if (existingStep8) {
-        return {
-          tracked: false,
-          reason: 'already_tracked',
-          eventId: existingStep8._id?.toString()
-        };
-      }
-
-      const sessionId = bybContext.sessionId || `byb_order_${orderId}`;
-      const totalPrice = parseFloat(order?.total_price || order?.current_total_price || 0) || 0;
-
-      const event = new BybFunnelEvent({
-        sessionId,
-        customerId: order?.customer?.id?.toString(),
-        step: 'step_8_purchase_complete',
-        metadata: {
-          ...bybContext.metadata,
-          cartTotal: totalPrice,
-          orderId,
-          orderNumber: order?.order_number?.toString()
-        },
-        pageUrl: order?.order_status_url || '',
-        referrer: order?.referring_site || ''
-      });
-
-      await event.save();
-      console.log(
-        `📊 BYB Funnel: Recorded step_8_purchase_complete via ${webhookTopic} for order ${orderId} (session ${sessionId})`
-      );
-
-      return {
-        tracked: true,
-        eventId: event._id?.toString(),
-        sessionId,
-        usedFallbackSession: !bybContext.sessionId
-      };
-    } catch (error) {
-      console.error(`❌ BYB Funnel step_8 webhook error (${webhookTopic}):`, error.message);
-      return { tracked: false, reason: 'error', error: error.message };
-    }
-  }
+  // BYB funnel tracking removed
 
   async orderPaid(req, res) {
     const topic = 'orders/paid';
@@ -1705,11 +1600,6 @@ class WebhooksController {
         { type: 'order_paid', details: { orderId: order.id }, success: true }
       ];
 
-      const bybFunnelResult = await WebhooksController.prototype.recordBybPurchaseCompleteFromOrder(
-        order,
-        topic
-      );
-      appendBybStep8Action(actions, bybFunnelResult, order.id?.toString());
 
       await webhookLog.markProcessed(actions, []);
       

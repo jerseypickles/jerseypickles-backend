@@ -26,7 +26,6 @@ try { require('./src/models/Customer'); } catch(e) { /* opcional */ }
 try { require('./src/models/Order'); } catch(e) { /* opcional */ }
 try { require('./src/models/Campaign'); } catch(e) { /* opcional */ }
 try { require('./src/models/List'); } catch(e) { /* opcional */ }
-try { require('./src/models/Segment'); } catch(e) { /* opcional */ }
 
 try { 
   require('./src/models/Product'); 
@@ -83,6 +82,15 @@ try {
   console.log('   ✅ SmsCampaignTimeReport model loaded');
 } catch(e) {
   console.log('   ⚠️ SmsCampaignTimeReport model:', e.message);
+}
+
+// 🏛️ MAXIMUS MODELS
+try {
+  require('./src/models/MaximusConfig');
+  require('./src/models/MaximusCampaignLog');
+  console.log('   ✅ Maximus models loaded');
+} catch(e) {
+  console.log('   ⚠️ Maximus models:', e.message);
 }
 
 console.log('📦 Models ready');
@@ -201,38 +209,24 @@ app.get('/', (req, res) => {
     status: 'running',
     features: {
       campaigns: '✅ Email Campaigns',
-      flows: '✅ Automation Flows',
-      segmentation: '✅ Dynamic Segments',
-      revenue_tracking: '✅ Revenue Attribution',
-      shopify_integration: '✅ Shopify Webhooks',
-      ai_analytics: '✅ AI-Powered Insights',
-      products: '✅ Product Analytics',
-      calendar: '✅ Business Calendar',
       sms_marketing: '✅ SMS Marketing (Telnyx)',
       sms_campaigns: '✅ SMS Campaigns',
-      sms_second_chance: '✅ Second Chance SMS (20% Recovery)',
-      sms_smart_schedule: '✅ AI Smart Schedule (Send Time Optimization)'
+      sms_second_chance: '✅ Second Chance SMS',
+      maximus_agent: '✅ Maximus Agent (Email)',
+      ai_analytics: '✅ AI-Powered Insights',
+      shopify_integration: '✅ Shopify Webhooks'
     },
     endpoints: {
       health: '/health',
       auth: '/api/auth',
-      customers: '/api/customers',
-      orders: '/api/orders',
-      segments: '/api/segments',
       campaigns: '/api/campaigns',
-      flows: '/api/flows',
       lists: '/api/lists',
-      webhooks: '/api/webhooks',
-      tracking: '/api/track',
-      analytics: '/api/analytics',
-      popup: '/api/popup',
-      ai: '/api/ai',
-      products: '/api/products',
-      calendar: '/api/calendar',
       sms: '/api/sms',
       sms_campaigns: '/api/sms/campaigns',
-      sms_second_chance: '/api/sms/second-chance',
-      sms_smart_schedule: '/api/sms/smart-schedule'
+      maximus: '/api/maximus',
+      ai: '/api/ai',
+      webhooks: '/api/webhooks',
+      tracking: '/api/track'
     }
   });
 });
@@ -242,24 +236,7 @@ app.get('/', (req, res) => {
 app.use('/api/auth', require('./src/routes/auth'));
 app.use('/api/test', require('./src/routes/test'));
 // NOTA: webhooks ya están montados arriba ANTES de express.json()
-app.use('/api/customers', require('./src/routes/customers'));
-app.use('/api/orders', require('./src/routes/orders'));
-app.use('/api/segments', require('./src/routes/segments'));
 app.use('/api/campaigns', require('./src/routes/campaigns'));
-
-// FLOWS ROUTES
-try {
-  const flowsRoutes = require('./src/routes/flows');
-  app.use('/api/flows', flowsRoutes);
-} catch (error) {
-  console.log('⚠️  Flows routes not available:', error.message);
-  app.use('/api/flows', (req, res) => {
-    res.status(503).json({ 
-      error: 'Flows feature is currently unavailable',
-      message: 'Please check system configuration'
-    });
-  });
-}
 
 // AI ANALYTICS ROUTES
 try {
@@ -273,14 +250,6 @@ try {
       message: 'Please check system configuration'
     });
   });
-}
-
-// IA BUSINESS ROUTES
-try {
-  const businessRoutes = require('./src/routes/business');
-  app.use('/api/ai/business', businessRoutes);
-} catch (error) {
-  console.log('IA Business routes not available:', error.message);
 }
 
 // PRODUCTS ROUTES
@@ -373,6 +342,15 @@ try {
   });
 }
 
+// 🏛️ Maximus Agent
+try {
+  const maximusRoutes = require('./src/routes/maximus');
+  app.use('/api/maximus', maximusRoutes);
+  console.log('✅ Maximus routes loaded');
+} catch (error) {
+  console.log('⚠️  Maximus routes not available:', error.message);
+}
+
 app.use('/api/lists', require('./src/routes/lists'));
 app.use('/api/track', require('./src/routes/tracking'));
 app.use('/api/analytics', require('./src/routes/analytics'));
@@ -402,7 +380,6 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 
-let flowEngineAvailable = false;
 let aiAnalyticsAvailable = false;
 let productsAvailable = false;
 let calendarAvailable = false;
@@ -424,19 +401,6 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server ready - Payload limit: 10MB`);
   console.log(`🔧 Shopify webhooks: express.raw() enabled`);
   console.log(`🔧 Telnyx webhooks: express.json() enabled`);
-  
-  // Inicializar Flow Queue
-  setTimeout(() => {
-    console.log('\n🔄 Inicializando Flow Engine...');
-    try {
-      const flowQueue = require('./src/jobs/flowQueue');
-      flowEngineAvailable = true;
-      console.log('✅ Flow Engine listo para automatizaciones');
-    } catch (error) {
-      flowEngineAvailable = false;
-      console.log('⚠️  Flow Engine no disponible:', error.message);
-    }
-  }, 2000);
   
   // Inicializar AI Analytics Job
   setTimeout(() => {
@@ -594,12 +558,26 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     }
   }, 6000);
 
+  // 🏛️ Inicializar Maximus Agent (dormant)
+  let maximusAvailable = false;
+  setTimeout(() => {
+    console.log('\n🏛️ Inicializando Maximus Agent...');
+    try {
+      const maximusJob = require('./src/jobs/maximusJob');
+      maximusJob.init();
+      maximusAvailable = true;
+      console.log('✅ Maximus Agent listo (DORMANT until activated)');
+    } catch (error) {
+      maximusAvailable = false;
+      console.log('⚠️  Maximus Agent no disponible:', error.message);
+    }
+  }, 7000);
+
   // Resumen de features
   setTimeout(() => {
     console.log('\n╔════════════════════════════════════════════════╗');
     console.log('║              FEATURES STATUS                   ║');
     console.log('╠════════════════════════════════════════════════╣');
-    console.log(`║  Flow Engine:        ${flowEngineAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  AI Analytics:       ${aiAnalyticsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  Product Analytics:  ${productsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  Business Calendar:  ${calendarAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
@@ -608,6 +586,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`║  Second Chance SMS:  ${secondChanceSmsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  Delayed Shipment:   ${delayedShipmentAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  Smart Schedule:     ${smartScheduleAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
+    console.log(`║  🏛️ Maximus Agent:   ${maximusAvailable ? '✅ Dormant' : '❌ Inactive'}              ║`);
     console.log('╚════════════════════════════════════════════════╝');
   }, 7000);
 });
@@ -625,18 +604,6 @@ const gracefulShutdown = async (signal) => {
       console.log('✅ Email queue closed');
     } catch (err) {
       console.error('⚠️  Error closing email queue:', err.message);
-    }
-    
-    if (flowEngineAvailable) {
-      try {
-        const flowQueueModule = require('./src/jobs/flowQueue');
-        if (flowQueueModule && typeof flowQueueModule.close === 'function') {
-          await flowQueueModule.close();
-          console.log('✅ Flow queue closed');
-        }
-      } catch (err) {
-        console.log('⚠️  Flow queue not closed:', err.message);
-      }
     }
     
     if (aiAnalyticsAvailable) {
@@ -664,6 +631,15 @@ const gracefulShutdown = async (signal) => {
       }
     }
     
+    // Stop Maximus
+    try {
+      const maximusJob = require('./src/jobs/maximusJob');
+      maximusJob.stop();
+      console.log('✅ Maximus stopped');
+    } catch (err) {
+      // Maximus not loaded
+    }
+
     try {
       await mongoose.connection.close();
       console.log('✅ MongoDB connection closed');

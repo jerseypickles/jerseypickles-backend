@@ -6,7 +6,6 @@ const cron = require('node-cron');
 const AIInsight = require('../models/AIInsight');
 const smsCalculator = require('../services/smsCalculator');
 const claudeService = require('../services/claudeService');
-const dailyBusinessSnapshot = require('../services/dailyBusinessSnapshot');
 const smsAnalyticsService = require('../services/smsAnalyticsService');
 
 /**
@@ -171,10 +170,6 @@ class AIAnalyticsJob {
         return report;
       }, results);
 
-      // ==================== FASE 4: DAILY BUSINESS SNAPSHOT ====================
-
-      await this.generateBusinessSnapshot(results);
-
       // Cleanup old insights
       await AIInsight.cleanup(90);
 
@@ -227,46 +222,6 @@ class AIAnalyticsJob {
     }
   }
 
-  /**
-   * Generar Business Snapshot diario + Reporte IA
-   */
-  async generateBusinessSnapshot(results) {
-    console.log('\n   Generando Business Snapshot (MongoDB + Shopify)...');
-
-    try {
-      // 1. Generar snapshot de datos
-      const snapshot = await dailyBusinessSnapshot.generateSnapshot();
-
-      // Guardar snapshot
-      await AIInsight.saveAnalysis('business_daily_snapshot', 1, snapshot, {
-        recalculateHours: 24
-      });
-      results.success.push('business_daily_snapshot');
-      console.log(`      Snapshot generado: ${snapshot.sources.join(' + ')}`);
-
-      // 2. Generar reporte con fallback (sin Claude)
-      console.log('      Generando reporte Business con fallback...');
-      const report = claudeService.getBusinessReportFallback(snapshot);
-
-      await AIInsight.saveAnalysis('business_daily_report', 1, report, {
-        recalculateHours: 24
-      });
-
-      if (report.success) {
-        results.success.push(`business_daily_report (${report.model})`);
-        console.log(`      Reporte IA generado: ${report.recommendations?.length || 0} recomendaciones`);
-        if (report.tokensUsed) {
-          console.log(`      Tokens: ${report.tokensUsed.input} in / ${report.tokensUsed.output} out`);
-        }
-      } else {
-        results.success.push('business_daily_report (fallback)');
-      }
-
-    } catch (error) {
-      console.error(`      Error generando Business Snapshot: ${error.message}`);
-      results.failed.push('business_snapshot');
-    }
-  }
 
   /**
    * Ejecutar un análisis específico

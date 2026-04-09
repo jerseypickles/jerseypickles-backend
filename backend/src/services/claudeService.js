@@ -4,13 +4,6 @@
 
 const Anthropic = require('@anthropic-ai/sdk');
 
-// 🆕 Importar servicios de contexto de negocio
-let businessContextService = null;
-try {
-  businessContextService = require('./businessContextService');
-} catch (error) {
-  console.log('⚠️  businessContextService no disponible:', error.message);
-}
 
 class ClaudeService {
   constructor() {
@@ -54,20 +47,7 @@ class ClaudeService {
       return this.getSmsFallbackInsights(metricsData);
     }
 
-    // Obtener contexto de negocio si está disponible
-    let businessContext = null;
     let businessContextPrompt = '';
-
-    if (businessContextService) {
-      try {
-        console.log('📦 Obteniendo contexto de negocio para Claude...');
-        businessContext = await businessContextService.getFullBusinessContext();
-        businessContextPrompt = businessContextService.formatBusinessContextForPrompt(businessContext);
-        console.log('✅ Contexto de negocio obtenido');
-      } catch (error) {
-        console.log('⚠️  Error obteniendo contexto de negocio:', error.message);
-      }
-    }
 
     const systemPrompt = this.buildSmsSystemPrompt();
     const userPrompt = this.buildSmsUserPrompt(metricsData, businessContextPrompt);
@@ -1180,20 +1160,7 @@ Responde SOLO con JSON válido:
       return this.getFallbackInsights(metricsData);
     }
 
-    // 🆕 Obtener contexto de negocio (productos, goals, promociones)
-    let businessContext = null;
     let businessContextPrompt = '';
-    
-    if (businessContextService) {
-      try {
-        console.log('📦 Obteniendo contexto de negocio para Claude...');
-        businessContext = await businessContextService.getFullBusinessContext();
-        businessContextPrompt = businessContextService.formatBusinessContextForPrompt(businessContext);
-        console.log('✅ Contexto de negocio obtenido');
-      } catch (error) {
-        console.log('⚠️  Error obteniendo contexto de negocio:', error.message);
-      }
-    }
 
     const systemPrompt = this.buildSystemPrompt();
     const userPrompt = this.buildUserPrompt(metricsData, businessContextPrompt);
@@ -1837,9 +1804,9 @@ IMPORTANTE:
 
     // 🆕 Obtener productos top si están disponibles
     let productContext = '';
-    if (businessContextService) {
+    if (null /* businessContextService removed */) {
       try {
-        const businessContext = await businessContextService.getFullBusinessContext();
+        const businessContext = await null /* businessContextService removed */.getFullBusinessContext();
         if (businessContext.products?.topSellingProducts?.length > 0) {
           productContext = `\nProductos más vendidos para mencionar: ${businessContext.products.topSellingProducts.slice(0, 3).map(p => p.title).join(', ')}`;
         }
@@ -1911,9 +1878,9 @@ Responde SOLO con JSON válido:
     }
 
     let productData = '';
-    if (businessContextService) {
+    if (null /* businessContextService removed */) {
       try {
-        const context = await businessContextService.getFullBusinessContext();
+        const context = await null /* businessContextService removed */.getFullBusinessContext();
         const product = context.products?.topSellingProducts?.find(
           p => p.title.toLowerCase().includes(productName.toLowerCase())
         );
