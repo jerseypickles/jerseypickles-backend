@@ -251,7 +251,21 @@ Respond ONLY with valid JSON:
     const startOfYear = new Date(now.getFullYear(), 0, 1);
     const weekNumber = Math.ceil(((now - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7);
 
+    // Calculate scheduledAt based on decision.sendHour (in ET)
+    const scheduledAt = new Date();
+    // Set to the decided hour in ET
+    const etNow = new Date(scheduledAt.toLocaleString('en-US', { timeZone: config.timezone }));
+    const hourDiff = decision.sendHour - etNow.getHours();
+    if (hourDiff > 0) {
+      scheduledAt.setTime(scheduledAt.getTime() + hourDiff * 60 * 60 * 1000);
+    }
+    scheduledAt.setMinutes(0, 0, 0);
+
     // Create the campaign in the existing system
+    // Status: 'scheduled' so the schedulerJob picks it up at the right time
+    // When creative agent is not ready, stays as 'draft' instead
+    const isReadyToSchedule = config.creativeAgentReady;
+
     const campaign = await Campaign.create({
       name: `[Maximus] ${decision.subjectLine}`,
       subject: decision.subjectLine,
@@ -261,7 +275,8 @@ Respond ONLY with valid JSON:
       list: decision.listId,
       fromName: 'Jersey Pickles',
       fromEmail: 'info@jerseypickles.com',
-      status: 'draft',
+      status: isReadyToSchedule ? 'scheduled' : 'draft',
+      scheduledAt: isReadyToSchedule ? scheduledAt : null,
       tags: ['maximus', 'agent-generated'],
       'stats.totalRecipients': 0
     });
@@ -287,8 +302,12 @@ Respond ONLY with valid JSON:
     config.stats.lastCampaignAt = now;
     await config.save();
 
-    console.log(`🏛️ Maximus: Campaign created - ${campaign._id}`);
-    console.log(`🏛️ Maximus: Log created - ${log._id}`);
+    console.log(`🏛️ Maximus: Campaign created - ${campaign._id} (${campaign.status})`);
+    if (isReadyToSchedule) {
+      console.log(`🏛️ Maximus: Scheduled for ${scheduledAt.toISOString()}`);
+    } else {
+      console.log(`🏛️ Maximus: Draft (waiting for creative agent)`);
+    }
 
     return {
       campaignId: campaign._id,

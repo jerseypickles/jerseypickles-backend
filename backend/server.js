@@ -213,6 +213,7 @@ app.get('/', (req, res) => {
       sms_campaigns: '✅ SMS Campaigns',
       sms_second_chance: '✅ Second Chance SMS',
       maximus_agent: '✅ Maximus Agent (Email)',
+      campaign_scheduler: '✅ Campaign Scheduler',
       ai_analytics: '✅ AI-Powered Insights',
       shopify_integration: '✅ Shopify Webhooks'
     },
@@ -558,6 +559,21 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     }
   }, 6000);
 
+  // 📅 Inicializar Campaign Scheduler
+  let schedulerAvailable = false;
+  setTimeout(() => {
+    console.log('\n📅 Inicializando Campaign Scheduler...');
+    try {
+      const schedulerJob = require('./src/jobs/schedulerJob');
+      schedulerJob.init();
+      schedulerAvailable = true;
+      console.log('✅ Campaign Scheduler listo (every minute)');
+    } catch (error) {
+      schedulerAvailable = false;
+      console.log('⚠️  Campaign Scheduler no disponible:', error.message);
+    }
+  }, 6500);
+
   // 🏛️ Inicializar Maximus Agent (dormant)
   let maximusAvailable = false;
   setTimeout(() => {
@@ -586,6 +602,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`║  Second Chance SMS:  ${secondChanceSmsAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  Delayed Shipment:   ${delayedShipmentAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  Smart Schedule:     ${smartScheduleAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
+    console.log(`║  📅 Scheduler:       ${schedulerAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  🏛️ Maximus Agent:   ${maximusAvailable ? '✅ Dormant' : '❌ Inactive'}              ║`);
     console.log('╚════════════════════════════════════════════════╝');
   }, 7000);
@@ -631,14 +648,20 @@ const gracefulShutdown = async (signal) => {
       }
     }
     
+    // Stop Scheduler
+    try {
+      const schedulerJob = require('./src/jobs/schedulerJob');
+      schedulerJob.stop();
+      console.log('✅ Scheduler stopped');
+    } catch (err) {}
+
     // Stop Maximus
     try {
       const maximusJob = require('./src/jobs/maximusJob');
       maximusJob.stop();
       console.log('✅ Maximus stopped');
-    } catch (err) {
-      // Maximus not loaded
-    }
+    } catch (err) {}
+
 
     try {
       await mongoose.connection.close();
