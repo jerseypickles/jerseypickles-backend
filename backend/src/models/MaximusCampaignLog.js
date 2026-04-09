@@ -12,6 +12,7 @@ const maximusCampaignLogSchema = new mongoose.Schema({
   },
 
   // What Maximus decided
+  campaignType: { type: String, enum: ['promotional', 'content', 'product_spotlight'], default: 'promotional' },
   subjectLine: { type: String, required: true },
   previewText: { type: String, required: true },
   list: {

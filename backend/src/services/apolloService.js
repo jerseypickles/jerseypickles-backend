@@ -195,14 +195,18 @@ class ApolloService {
    */
   buildPrompt(brief, product) {
     const dayOfWeek = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+    const type = brief.campaignType || 'promotional';
 
-    return `ASPECT RATIO: 9:16 vertical portrait, designed for email marketing.
+    const baseScene = `ASPECT RATIO: 9:16 vertical portrait, designed for email marketing.
 
 CRITICAL: You MUST use the reference product photo provided above as the EXACT jar in this image. Reproduce the jar's label, shape, glass color, lid, and proportions with 100% fidelity. Do NOT create a different jar or modify the label design.
 
 Place the EXACT jar from the reference photo upright as the dominant foreground subject on a rustic wooden kitchen counter or weeknight dinner table. Surrounded by complementary fresh ingredients that match the product. Warm amber evening light from a low kitchen window, candle glow suggesting a cozy ${dayOfWeek} night dinner at home. Shallow depth of field with soft bokeh on a blurred warm kitchen interior in the background. The jar is front-lit with label perfectly sharp and readable. Hyper-detailed glass texture with warm candlelight refracting through the brine. Premium lifestyle food photography, hyperrealistic, 8K, 9:16 vertical portrait.
 
-${product.promptHints || ''}
+${product.promptHints || ''}`;
+
+    if (type === 'promotional') {
+      return `${baseScene}
 
 TOP OVERLAY TEXT (warm white bold serif):
 "${brief.headline}"
@@ -218,6 +222,42 @@ Bright green rounded pill button: "SHOP NOW"
 FOOTER: Dark green bar. "www.jerseypickles.com" small pickle icons on each side.
 
 RULES: Single jar only (the EXACT one from the reference photo), no duplicates, no text outside overlay zones, hyperrealistic premium lifestyle food photography, 8K, 9:16 vertical.`;
+
+    } else if (type === 'content') {
+      return `${baseScene}
+
+TOP OVERLAY TEXT (warm white bold serif):
+"${brief.headline}"
+Below, small italic white text: "Jersey Pickles — ${product.name}"
+
+MIDDLE: Let the lifestyle scene breathe. The jar and food setting should tell a story. Warm, inviting, artisanal feel. No discount text, no codes. This is about the experience, not a sale.
+
+BOTTOM: Semi-transparent dark green gradient overlay.
+Small elegant white text: "${brief.contentAngle || 'Handcrafted in New Jersey'}"
+Bright green rounded pill button: "READ MORE"
+
+FOOTER: Dark green bar. "www.jerseypickles.com" small pickle icons on each side.
+
+RULES: Single jar only (the EXACT one from the reference photo), no duplicates, warm storytelling mood, NO discount text, NO codes, hyperrealistic premium lifestyle food photography, 8K, 9:16 vertical.`;
+
+    } else {
+      // product_spotlight
+      return `${baseScene}
+
+TOP OVERLAY TEXT (warm white bold serif):
+"${brief.headline}"
+Below, small italic white text: "Jersey Pickles — ${product.name}"
+
+MIDDLE: Hero the product beautifully. Close attention to the jar, the ingredients visible through the glass, the quality of the label. Make it look premium and irresistible. No discount text.
+
+BOTTOM: Semi-transparent dark green gradient overlay.
+Elegant white text: "Handcrafted • Small Batch • New Jersey"
+Bright green rounded pill button: "SHOP NOW"
+
+FOOTER: Dark green bar. "www.jerseypickles.com" small pickle icons on each side.
+
+RULES: Single jar only (the EXACT one from the reference photo), no duplicates, premium product photography feel, NO discount text, NO codes, hyperrealistic, 8K, 9:16 vertical.`;
+    }
   }
 
   // ==================== CLOUDINARY UPLOAD ====================
@@ -247,6 +287,12 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
    * Full-width image + CTA button + unsubscribe footer
    */
   buildEmailHtml(imageUrl, brief) {
+    const type = brief.campaignType || 'promotional';
+    const ctaText = type === 'content' ? 'READ MORE' : 'SHOP NOW';
+    const ctaUrl = type === 'content'
+      ? 'https://jerseypickles.com/blogs'
+      : 'https://jerseypickles.com';
+
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -258,14 +304,14 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:600px;margin:0 auto;background-color:#ffffff;">
     <tr>
       <td style="padding:0;">
-        <a href="https://jerseypickles.com" target="_blank" style="display:block;">
+        <a href="${ctaUrl}" target="_blank" style="display:block;">
           <img src="${imageUrl}" alt="${brief.headline}" width="600" style="display:block;width:100%;height:auto;border:0;" />
         </a>
       </td>
     </tr>
     <tr>
       <td style="padding:20px 24px;text-align:center;background-color:#1a3d17;">
-        <a href="https://jerseypickles.com" target="_blank" style="display:inline-block;background-color:#34d399;color:#0a0e17;text-decoration:none;padding:14px 32px;border-radius:8px;font-size:16px;font-weight:bold;letter-spacing:0.5px;">SHOP NOW</a>
+        <a href="${ctaUrl}" target="_blank" style="display:inline-block;background-color:#34d399;color:#0a0e17;text-decoration:none;padding:14px 32px;border-radius:8px;font-size:16px;font-weight:bold;letter-spacing:0.5px;">${ctaText}</a>
       </td>
     </tr>
     <tr>

@@ -223,6 +223,11 @@ ${learningData.byList?.map(l => `  "${l.listName}": ${l.avgOpenRate?.toFixed(1)}
     const usedCodesFromTags = existingCampaignTags.flatMap(c => (c.tags || []).filter(t => t === t.toUpperCase() && t.length >= 4 && t.length <= 12));
     const allUsedCodes = [...new Set([...usedCodes, ...usedCodesFromTags])];
 
+    // Count campaign types this week
+    const promoThisWeek = campaignsThisWeek.filter(c => c.campaignType === 'promotional').length;
+    const contentThisWeek = campaignsThisWeek.filter(c => c.campaignType === 'content').length;
+    const spotlightThisWeek = campaignsThisWeek.filter(c => c.campaignType === 'product_spotlight').length;
+
     const prompt = `You are MAXIMUS, an autonomous email campaign agent for Jersey Pickles - an artisanal pickle and gourmet olive shop from New Jersey.
 
 TODAY: ${today}, ${now.toISOString().split('T')[0]}
@@ -240,6 +245,7 @@ ${productsInfo}
 
 THIS WEEK'S CAMPAIGNS:
 ${recentCampaigns}
+Types sent this week: ${promoThisWeek} promotional, ${contentThisWeek} content, ${spotlightThisWeek} product spotlight
 
 LEARNING DATA:
 ${learningSection}
@@ -257,36 +263,51 @@ BRAND VOICE:
 - Use emojis sparingly (max 1-2)
 - Keep subjects under 50 characters
 - Preview text should complement the subject, not repeat it
-- Discount codes should be short, memorable, ALL CAPS (e.g., PICKLE20, OLIVE15, TUESDAY25)
+
+CAMPAIGN TYPES — you MUST choose one:
+
+1. "promotional" — Discount offer (15-30% OFF). Use max 1-2x/week. Include discount code.
+   Example subjects: "20% OFF Hot Tomatoes today only", "Your weekend pickle deal 🥒"
+
+2. "content" — Storytelling, recipes, behind the scenes. NO discount. Build brand love & engagement.
+   Example subjects: "The secret behind our Hot Tomatoes", "3 ways to enjoy pickles this weekend"
+
+3. "product_spotlight" — Feature a product without discount. Highlight quality, craft, ingredients. Link to shop.
+   Example subjects: "Meet our Hot Tomatoes 🍅", "Why our olives are different"
+
+STRATEGY: Balance your week. Don't send 5 promos — mix it up. Ideal week: 1-2 promotional + 2-3 content/spotlight.
+If you already sent a promo this week, strongly prefer content or spotlight.
 
 YOUR TASK:
-Decide the COMPLETE campaign for today. You must choose:
-1. Subject line (compelling, under 50 chars)
-2. Preview text (adds context, under 80 chars)
-3. Headline for the creative image (catchy, can reference the day of week)
-4. Which product to feature (pick from available products)
-5. Discount percentage (between 15-30%)
-6. Discount code (short, memorable, ALL CAPS, related to the product). MUST be unique — do NOT reuse these codes: ${allUsedCodes.join(', ') || 'none yet'}
-7. Which list to send to (pick one based on performance data or rotate)
-8. What hour to send — MUST be >= ${earliestSendHour} and < ${config.sendWindowEnd} (current time is ${currentETHour}:00 ET, you cannot send in the past)${earliestSendHour >= config.sendWindowEnd ? '. Today is over — pick an hour for TOMORROW.' : ''}
+1. Choose campaign type (promotional, content, or product_spotlight)
+2. Subject line (compelling, under 50 chars)
+3. Preview text (adds context, under 80 chars)
+4. Headline for the creative image
+5. Which product to feature
+6. ONLY if type is "promotional": discount percentage (15-30%) and discount code (ALL CAPS, unique). Do NOT reuse: ${allUsedCodes.join(', ') || 'none yet'}
+7. Which list to send to
+8. What hour to send — MUST be >= ${earliestSendHour} and < ${config.sendWindowEnd} (current time is ${currentETHour}:00 ET)${earliestSendHour >= config.sendWindowEnd ? '. Today is over — pick hour for TOMORROW.' : ''}
 
-${learningData.totalCampaigns < 7 ? 'LEARNING PHASE: Try different hours to gather data. Vary between the lists and products.' : 'OPTIMIZED PHASE: Use your learning data to pick the best performing time and list.'}
+${learningData.totalCampaigns < 7 ? 'LEARNING PHASE: Try different types, hours, and lists to gather data.' : 'OPTIMIZED PHASE: Use your learning data to pick the best performing time and list.'}
 
-DO NOT repeat a subject line or product used this week.
+DO NOT repeat a subject line used this week.
 
 Respond ONLY with valid JSON:
 {
+  "campaignType": "promotional|content|product_spotlight",
   "subjectLine": "...",
   "previewText": "...",
   "headline": "...",
   "product": "<product slug>",
   "productName": "<product full name>",
-  "discountPercent": <number 15-30>,
-  "discountCode": "<SHORT_CODE>",
+  "discountPercent": <number 15-30 or null if not promotional>,
+  "discountCode": "<SHORT_CODE or null if not promotional>",
+  "contentAngle": "<only for content/spotlight: what story or angle to use>",
   "listId": "...",
   "listName": "...",
   "sendHour": <number>,
   "reasoning": {
+    "whyThisType": "...",
     "whyThisSubject": "...",
     "whyThisProduct": "...",
     "whyThisList": "...",
@@ -393,13 +414,19 @@ Respond ONLY with valid JSON:
       return { success: false, reason: 'decision_failed' };
     }
 
+    // Default campaignType if missing
+    if (!decision.campaignType) decision.campaignType = 'promotional';
+
     console.log('🏛️ Maximus Proposal Decision:');
+    console.log(`   Type: ${decision.campaignType}`);
     console.log(`   Subject: "${decision.subjectLine}"`);
     console.log(`   Product: ${decision.product}`);
-    console.log(`   Discount: ${decision.discountPercent}% OFF`);
+    if (decision.campaignType === 'promotional') {
+      console.log(`   Discount: ${decision.discountPercent}% OFF (${decision.discountCode})`);
+    } else {
+      console.log(`   Angle: ${decision.contentAngle || 'N/A'}`);
+    }
     console.log(`   List: ${decision.listName}`);
-
-    // NOTE: Shopify discount code is created ONLY on approval (approveProposal)
 
     // Step 2: Generate creative with Apollo
     let imageUrl = null;
@@ -408,21 +435,34 @@ Respond ONLY with valid JSON:
     apolloService.init();
     if (apolloService.isAvailable()) {
       console.log('\n🏛️ Maximus: Requesting creative from Apollo...');
-      const creative = await apolloService.generateCreative({
+
+      const apolloBrief = {
         product: decision.product,
-        discount: `${decision.discountPercent}% OFF TODAY ONLY`,
-        code: decision.discountCode,
         headline: decision.headline || decision.subjectLine,
-        productName: decision.productName
-      });
+        productName: decision.productName,
+        campaignType: decision.campaignType
+      };
+
+      if (decision.campaignType === 'promotional') {
+        apolloBrief.discount = `${decision.discountPercent}% OFF TODAY ONLY`;
+        apolloBrief.code = decision.discountCode;
+      } else {
+        apolloBrief.discount = null;
+        apolloBrief.code = null;
+        apolloBrief.contentAngle = decision.contentAngle;
+      }
+
+      const creative = await apolloService.generateCreative(apolloBrief);
 
       if (creative.success) {
         imageUrl = creative.imageUrl;
         htmlContent = apolloService.buildEmailHtml(creative.imageUrl, {
           headline: decision.headline || decision.subjectLine,
           product: decision.product,
-          discount: `${decision.discountPercent}% OFF`,
-          code: decision.discountCode
+          discount: decision.campaignType === 'promotional' ? `${decision.discountPercent}% OFF` : null,
+          code: decision.campaignType === 'promotional' ? decision.discountCode : null,
+          campaignType: decision.campaignType,
+          contentAngle: decision.contentAngle
         });
         console.log(`🏛️ Maximus: ✅ Creative received from Apollo`);
       } else {
@@ -442,13 +482,15 @@ Respond ONLY with valid JSON:
       createdAt: new Date(),
       scheduledAt,
       decision: {
+        campaignType: decision.campaignType,
         subjectLine: decision.subjectLine,
         previewText: decision.previewText,
         headline: decision.headline,
         product: decision.product,
         productName: decision.productName,
-        discountPercent: decision.discountPercent,
-        discountCode: decision.discountCode,
+        contentAngle: decision.contentAngle,
+        discountPercent: decision.campaignType === 'promotional' ? decision.discountPercent : null,
+        discountCode: decision.campaignType === 'promotional' ? decision.discountCode : null,
         listId: decision.listId,
         listName: decision.listName,
         sendHour: decision.sendHour,
@@ -480,16 +522,18 @@ Respond ONLY with valid JSON:
 
     const { decision, htmlContent, imageUrl } = config.pendingProposal;
 
-    console.log('🏛️ Maximus: Proposal APPROVED — scheduling campaign');
+    console.log(`🏛️ Maximus: Proposal APPROVED (${decision.campaignType || 'promotional'}) — scheduling campaign`);
 
-    // Create Shopify discount code now
-    console.log('🏛️ Maximus: Creating Shopify discount code...');
-    const discountResult = await this.createShopifyDiscount(decision);
-    if (!discountResult.success) {
-      console.error('🏛️ Maximus: Failed to create discount code:', discountResult.error);
-      return { success: false, reason: 'discount_creation_failed', error: discountResult.error };
+    // Create Shopify discount code ONLY for promotional campaigns
+    if (decision.campaignType === 'promotional' && decision.discountCode) {
+      console.log('🏛️ Maximus: Creating Shopify discount code...');
+      const discountResult = await this.createShopifyDiscount(decision);
+      if (!discountResult.success) {
+        console.error('🏛️ Maximus: Failed to create discount code:', discountResult.error);
+        return { success: false, reason: 'discount_creation_failed', error: discountResult.error };
+      }
+      console.log(`🏛️ Maximus: ✅ Discount code "${decision.discountCode}" created`);
     }
-    console.log(`🏛️ Maximus: ✅ Discount code "${decision.discountCode}" created`);
 
     // Create and schedule the campaign
     const result = await this.scheduleCampaign(config, decision, htmlContent);
@@ -664,6 +708,7 @@ Respond ONLY with valid JSON:
     // Log in Maximus history (use scheduled date, not approval date)
     const log = await MaximusCampaignLog.create({
       campaign: campaign._id,
+      campaignType: decision.campaignType || 'promotional',
       subjectLine: decision.subjectLine,
       previewText: decision.previewText,
       list: decision.listId,

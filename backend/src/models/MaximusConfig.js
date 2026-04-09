@@ -62,11 +62,13 @@ const maximusConfigSchema = new mongoose.Schema({
     createdAt: { type: Date },
     scheduledAt: { type: Date },
     decision: {
+      campaignType: { type: String, enum: ['promotional', 'content', 'product_spotlight'], default: 'promotional' },
       subjectLine: String,
       previewText: String,
       headline: String,
       product: String,
       productName: String,
+      contentAngle: String,
       discountPercent: Number,
       discountCode: String,
       listId: { type: mongoose.Schema.Types.ObjectId, ref: 'List' },
