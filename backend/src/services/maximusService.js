@@ -305,6 +305,176 @@ Respond ONLY with valid JSON:
     }
   }
 
+  // ==================== PROPOSAL SYSTEM ====================
+
+  /**
+   * Generate a proposal for human review (does NOT schedule)
+   * Creates discount, generates creative, saves as pending proposal
+   */
+  async generateProposal() {
+    console.log('\n🏛️ ═══════════════════════════════════════');
+    console.log('   MAXIMUS - Generating Proposal for Review');
+    console.log('═══════════════════════════════════════\n');
+
+    const config = await MaximusConfig.getConfig();
+
+    // Check for existing pending proposal
+    if (config.pendingProposal?.active) {
+      console.log('🏛️ Maximus: Already has a pending proposal');
+      return { success: false, reason: 'pending_proposal_exists' };
+    }
+
+    // Check lists
+    if (!config.lists || config.lists.length === 0) {
+      return { success: false, reason: 'no_lists' };
+    }
+
+    // Gather learning data
+    const learningData = await this.gatherLearningData();
+    const campaignsThisWeek = await MaximusCampaignLog.getCampaignsThisWeek();
+
+    // Step 1: Ask Claude for decision
+    const decision = await this.makeDecision(config, learningData, campaignsThisWeek);
+    if (!decision) {
+      return { success: false, reason: 'decision_failed' };
+    }
+
+    console.log('🏛️ Maximus Proposal Decision:');
+    console.log(`   Subject: "${decision.subjectLine}"`);
+    console.log(`   Product: ${decision.product}`);
+    console.log(`   Discount: ${decision.discountPercent}% OFF`);
+    console.log(`   List: ${decision.listName}`);
+
+    // Step 2: Create Shopify discount code
+    console.log('\n🏛️ Maximus: Creating Shopify discount code...');
+    const discountResult = await this.createShopifyDiscount(decision);
+    const discountCreated = discountResult.success;
+    if (!discountCreated) {
+      console.warn('🏛️ Maximus: Discount code not created:', discountResult.error);
+    } else {
+      console.log(`🏛️ Maximus: ✅ Discount code "${decision.discountCode}" created`);
+    }
+
+    // Step 3: Generate creative with Apollo
+    let imageUrl = null;
+    let htmlContent = null;
+
+    apolloService.init();
+    if (apolloService.isAvailable()) {
+      console.log('\n🏛️ Maximus: Requesting creative from Apollo...');
+      const creative = await apolloService.generateCreative({
+        product: decision.product,
+        discount: `${decision.discountPercent}% OFF TODAY ONLY`,
+        code: decision.discountCode,
+        headline: decision.headline || decision.subjectLine,
+        productName: decision.productName
+      });
+
+      if (creative.success) {
+        imageUrl = creative.imageUrl;
+        htmlContent = apolloService.buildEmailHtml(creative.imageUrl, {
+          headline: decision.headline || decision.subjectLine,
+          product: decision.product,
+          discount: `${decision.discountPercent}% OFF`,
+          code: decision.discountCode
+        });
+        console.log(`🏛️ Maximus: ✅ Creative received from Apollo`);
+      } else {
+        console.warn('🏛️ Maximus: Apollo failed, proposal will be without image:', creative.error);
+      }
+    } else {
+      console.log('🏛️ Maximus: Apollo not available, proposal without image');
+    }
+
+    // Step 4: Save as pending proposal
+    config.pendingProposal = {
+      active: true,
+      createdAt: new Date(),
+      decision: {
+        subjectLine: decision.subjectLine,
+        previewText: decision.previewText,
+        headline: decision.headline,
+        product: decision.product,
+        productName: decision.productName,
+        discountPercent: decision.discountPercent,
+        discountCode: decision.discountCode,
+        listId: decision.listId,
+        listName: decision.listName,
+        sendHour: decision.sendHour,
+        reasoning: decision.reasoning
+      },
+      imageUrl,
+      htmlContent,
+      discountCreated
+    };
+    await config.save();
+
+    console.log('🏛️ Maximus: ✅ Proposal saved, awaiting approval');
+
+    return {
+      success: true,
+      proposal: config.pendingProposal
+    };
+  }
+
+  /**
+   * Approve the pending proposal → create and schedule the campaign
+   */
+  async approveProposal() {
+    const config = await MaximusConfig.getConfig();
+
+    if (!config.pendingProposal?.active) {
+      return { success: false, reason: 'no_pending_proposal' };
+    }
+
+    const { decision, htmlContent, imageUrl } = config.pendingProposal;
+
+    console.log('🏛️ Maximus: Proposal APPROVED — scheduling campaign');
+
+    // Create and schedule the campaign
+    const result = await this.scheduleCampaign(config, decision, htmlContent);
+
+    // Clear the proposal
+    config.pendingProposal = { active: false };
+    await config.save();
+
+    console.log(`🏛️ Maximus: ✅ Campaign scheduled (${result.campaignId})`);
+
+    return { success: true, ...result, imageUrl };
+  }
+
+  /**
+   * Reject the pending proposal
+   */
+  async rejectProposal(reason) {
+    const config = await MaximusConfig.getConfig();
+
+    if (!config.pendingProposal?.active) {
+      return { success: false, reason: 'no_pending_proposal' };
+    }
+
+    const { decision } = config.pendingProposal;
+    console.log(`🏛️ Maximus: Proposal REJECTED — "${decision.subjectLine}"`);
+    if (reason) console.log(`   Reason: ${reason}`);
+
+    // Clear the proposal
+    config.pendingProposal = { active: false };
+    await config.save();
+
+    return { success: true, rejected: decision.subjectLine };
+  }
+
+  /**
+   * Get the current pending proposal (if any)
+   */
+  async getProposal() {
+    const config = await MaximusConfig.getConfig();
+    if (!config.pendingProposal?.active) {
+      return { exists: false };
+    }
+    return { exists: true, proposal: config.pendingProposal };
+  }
+
   // ==================== SHOPIFY DISCOUNT CODE ====================
 
   /**
@@ -394,7 +564,7 @@ Respond ONLY with valid JSON:
     await config.save();
 
     console.log(`🏛️ Maximus: Campaign created - ${campaign._id} (${campaign.status})`);
-    if (isReadyToSchedule) {
+    if (hasCreative) {
       console.log(`🏛️ Maximus: Scheduled for ${scheduledAt.toISOString()}`);
     } else {
       console.log(`🏛️ Maximus: Draft (waiting for creative agent)`);

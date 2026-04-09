@@ -199,6 +199,66 @@ router.get('/learning', authorize('admin'), async (req, res) => {
   }
 });
 
+// ==================== PROPOSAL SYSTEM ====================
+
+/**
+ * GET /api/maximus/proposal
+ * Get current pending proposal
+ */
+router.get('/proposal', authorize('admin'), async (req, res) => {
+  try {
+    const result = await maximusService.getProposal();
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('Maximus proposal get error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/maximus/propose
+ * Generate a new proposal for review
+ */
+router.post('/propose', authorize('admin'), async (req, res) => {
+  try {
+    console.log('🏛️ Maximus: Proposal requested from API');
+    const result = await maximusService.generateProposal();
+    res.json(result);
+  } catch (error) {
+    console.error('Maximus propose error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/maximus/proposal/approve
+ * Approve pending proposal → schedule campaign
+ */
+router.post('/proposal/approve', authorize('admin'), async (req, res) => {
+  try {
+    const result = await maximusService.approveProposal();
+    res.json(result);
+  } catch (error) {
+    console.error('Maximus approve error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/maximus/proposal/reject
+ * Reject pending proposal
+ */
+router.post('/proposal/reject', authorize('admin'), async (req, res) => {
+  try {
+    const { reason } = req.body || {};
+    const result = await maximusService.rejectProposal(reason);
+    res.json(result);
+  } catch (error) {
+    console.error('Maximus reject error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // ==================== MANUAL TRIGGER ====================
 
 /**

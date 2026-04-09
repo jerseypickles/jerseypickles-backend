@@ -50,6 +50,33 @@ const maximusConfigSchema = new mongoose.Schema({
   // Model config
   model: { type: String, default: 'claude-sonnet-4-6' },
 
+  // Pending proposal (awaiting human approval)
+  pendingProposal: {
+    active: { type: Boolean, default: false },
+    createdAt: { type: Date },
+    decision: {
+      subjectLine: String,
+      previewText: String,
+      headline: String,
+      product: String,
+      productName: String,
+      discountPercent: Number,
+      discountCode: String,
+      listId: { type: mongoose.Schema.Types.ObjectId, ref: 'List' },
+      listName: String,
+      sendHour: Number,
+      reasoning: {
+        whyThisSubject: String,
+        whyThisProduct: String,
+        whyThisList: String,
+        whyThisTime: String
+      }
+    },
+    imageUrl: String,
+    htmlContent: String,
+    discountCreated: { type: Boolean, default: false }
+  },
+
   // Stats
   stats: {
     totalCampaignsSent: { type: Number, default: 0 },
