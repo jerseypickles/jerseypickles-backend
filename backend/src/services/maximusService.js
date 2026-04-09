@@ -608,14 +608,17 @@ Respond ONLY with valid JSON:
   async scheduleCampaign(config, decision, htmlContent) {
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const now = new Date();
-    const today = dayNames[now.getDay()];
-
-    // Get the week number
-    const startOfYear = new Date(now.getFullYear(), 0, 1);
-    const weekNumber = Math.ceil(((now - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7);
 
     // Calculate scheduledAt based on decision.sendHour (in ET)
     const scheduledAt = this.calculateScheduledAt(decision.sendHour, config.timezone);
+
+    // Use the SCHEDULED date for the log (not approval date)
+    const scheduledDay = dayNames[scheduledAt.getDay()];
+    const scheduledHourET = parseInt(scheduledAt.toLocaleString('en-US', { timeZone: config.timezone, hour: 'numeric', hour12: false }));
+
+    // Get the week number based on scheduled date
+    const startOfYear = new Date(scheduledAt.getFullYear(), 0, 1);
+    const weekNumber = Math.ceil(((scheduledAt - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7);
 
     // If we have htmlContent (from Apollo), campaign is ready to schedule
     const hasCreative = htmlContent && htmlContent !== '<p>Awaiting creative from design agent</p>';
@@ -635,16 +638,16 @@ Respond ONLY with valid JSON:
       'stats.totalRecipients': 0
     });
 
-    // Log in Maximus history
+    // Log in Maximus history (use scheduled date, not approval date)
     const log = await MaximusCampaignLog.create({
       campaign: campaign._id,
       subjectLine: decision.subjectLine,
       previewText: decision.previewText,
       list: decision.listId,
       listName: decision.listName,
-      sentAt: now,
-      sentDay: today,
-      sentHour: decision.sendHour,
+      sentAt: scheduledAt,
+      sentDay: scheduledDay,
+      sentHour: scheduledHourET,
       isLearningPhase: config.learning.phase !== 'optimized',
       weekNumber,
       weekYear: now.getFullYear(),
