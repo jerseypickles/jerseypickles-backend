@@ -68,6 +68,9 @@ class ApolloService {
     console.log(`   Headline: ${brief.headline}`);
 
     // 1. Get product from bank
+    const allSlugs = config.products.map(p => `"${p.slug}" (active: ${p.active})`);
+    console.log(`   Available products: ${allSlugs.join(', ') || 'NONE'}`);
+    console.log(`   Looking for slug: "${brief.product}"`);
     const product = config.getProduct(brief.product);
     if (!product) {
       console.error(`🏛️ Apollo: Product "${brief.product}" not found in bank`);
