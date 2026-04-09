@@ -231,6 +231,46 @@ router.post('/propose', authorize('admin'), async (req, res) => {
 });
 
 /**
+ * POST /api/maximus/proposal/test
+ * Send a test email with the proposal's creative to preview
+ */
+router.post('/proposal/test', authorize('admin'), async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'Email address required' });
+    }
+
+    const result = await maximusService.getProposal();
+    if (!result.exists) {
+      return res.status(404).json({ error: 'No pending proposal' });
+    }
+
+    const { decision, htmlContent } = result.proposal;
+
+    if (!htmlContent) {
+      return res.status(400).json({ error: 'Proposal has no creative content' });
+    }
+
+    const emailService = require('../services/emailService');
+    const sendResult = await emailService.sendEmail({
+      to: email,
+      subject: `[TEST] ${decision.subjectLine}`,
+      html: htmlContent,
+      from: 'Jersey Pickles <info@jerseypickles.com>',
+      includeUnsubscribe: false,
+      tags: [{ name: 'type', value: 'maximus-test' }]
+    });
+
+    console.log(`🏛️ Maximus: Test email sent to ${email}`);
+    res.json({ success: true, message: `Test sent to ${email}`, resendId: sendResult.id });
+  } catch (error) {
+    console.error('Maximus test email error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * POST /api/maximus/proposal/approve
  * Approve pending proposal → schedule campaign
  */
