@@ -208,6 +208,8 @@ ${learningData.byList?.map(l => `  "${l.listName}": ${l.avgOpenRate?.toFixed(1)}
       ? availableProducts.map(p => `- "${p.name}" (slug: ${p.slug}, category: ${p.category})`).join('\n')
       : '- No products configured yet';
 
+    const recentInsights = await this._getRecentInsights();
+
     // Calculate current ET hour for the prompt
     const currentETHour = parseInt(now.toLocaleString('en-US', { timeZone: config.timezone, hour: 'numeric', hour12: false }));
     const earliestSendHour = Math.max(config.sendWindowStart, currentETHour + 1);
@@ -241,6 +243,12 @@ ${recentCampaigns}
 
 LEARNING DATA:
 ${learningSection}
+
+YOUR MEMORY (lessons from past campaigns):
+${config.memory?.insights?.length > 0 ? config.memory.insights.map(i => `- ${i}`).join('\n') : 'No memories yet — this is early stage.'}
+
+RECENT CAMPAIGN INSIGHTS:
+${recentInsights}
 
 BRAND VOICE:
 - Warm, friendly, artisanal, family-oriented
@@ -551,6 +559,21 @@ Respond ONLY with valid JSON:
     return { exists: true, proposal: config.pendingProposal, availability };
   }
 
+  /**
+   * Get recent campaign insights for the prompt
+   */
+  async _getRecentInsights() {
+    const recentLogs = await MaximusCampaignLog.find({
+      'claudeInsight.analyzedAt': { $exists: true }
+    }).sort({ sentAt: -1 }).limit(5).lean();
+
+    if (recentLogs.length === 0) return 'No analyzed campaigns yet.';
+
+    return recentLogs.map(l =>
+      `- "${l.subjectLine}" (${l.listName}, ${l.sentDay} ${l.sentHour}:00) → ${l.metrics.openRate}% opens, ${l.metrics.clickRate}% clicks, $${l.metrics.revenue} revenue. Lesson: ${l.claudeInsight.lessonForNext}`
+    ).join('\n');
+  }
+
   // ==================== SCHEDULING HELPERS ====================
 
   /**
@@ -737,7 +760,99 @@ Respond ONLY with valid JSON:
     // Update learning in config
     await this.updateLearning();
 
+    // Analyze with Claude if enough data and not yet analyzed
+    if (delivered >= 50 && !log.claudeInsight?.analyzedAt) {
+      try {
+        await this.analyzeCampaignWithClaude(log);
+      } catch (err) {
+        console.error('🏛️ Maximus: Campaign analysis error:', err.message);
+      }
+    }
+
     return log;
+  }
+
+  /**
+   * Ask Claude to analyze a completed campaign and extract learnings
+   * Updates the log with insights and accumulates memory in config
+   */
+  async analyzeCampaignWithClaude(log) {
+    if (!this.isAvailable()) return;
+
+    const config = await MaximusConfig.getConfig();
+    const existingMemory = (config.memory?.insights || []).join('\n- ');
+
+    const prompt = `You are MAXIMUS, an email campaign agent for Jersey Pickles. Analyze this campaign result and extract learnings.
+
+CAMPAIGN:
+- Subject: "${log.subjectLine}"
+- Preview: "${log.previewText}"
+- List: ${log.listName}
+- Day: ${log.sentDay}, Hour: ${log.sentHour}:00 ET
+- Product: ${log.reasoning?.whyThisProduct || 'unknown'}
+
+RESULTS:
+- Delivered: ${log.metrics.delivered}
+- Opened: ${log.metrics.opened} (${log.metrics.openRate}%)
+- Clicked: ${log.metrics.clicked} (${log.metrics.clickRate}%)
+- Converted: ${log.metrics.converted} (${log.metrics.conversionRate}%)
+- Revenue: $${log.metrics.revenue}
+- Bounced: ${log.metrics.bounced}
+- Unsubscribed: ${log.metrics.unsubscribed}
+
+YOUR EXISTING MEMORY:
+${existingMemory ? `- ${existingMemory}` : 'Empty — this is your first campaign.'}
+
+BENCHMARKS: Open rate 40-50% is good, 50%+ excellent. Click rate 2-5% is good. Conversion 0.5-2% is good.
+
+Respond ONLY with valid JSON:
+{
+  "analysis": "Brief 1-sentence summary of how this campaign performed",
+  "whatWorked": "What aspect drove good results (or null if poor)",
+  "whatDidnt": "What underperformed (or null if all good)",
+  "lessonForNext": "One concrete takeaway for future campaigns",
+  "newInsight": "A new pattern or learning to add to your memory (max 100 chars, or null if nothing new)"
+}`;
+
+    try {
+      const response = await this.client.messages.create({
+        model: this.model,
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }]
+      });
+
+      const content = response.content?.[0]?.text || '';
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return;
+
+      const analysis = JSON.parse(jsonMatch[0]);
+
+      // Save insight to the campaign log
+      log.claudeInsight = {
+        analysis: analysis.analysis,
+        whatWorked: analysis.whatWorked,
+        whatDidnt: analysis.whatDidnt,
+        lessonForNext: analysis.lessonForNext,
+        analyzedAt: new Date()
+      };
+      await log.save();
+
+      // Accumulate insight in config memory (max 15)
+      if (analysis.newInsight) {
+        if (!config.memory) config.memory = { insights: [] };
+        config.memory.insights.push(analysis.newInsight);
+        if (config.memory.insights.length > 15) {
+          config.memory.insights = config.memory.insights.slice(-15);
+        }
+        config.memory.lastUpdated = new Date();
+        await config.save();
+        console.log(`🏛️ Maximus Memory: "${analysis.newInsight}"`);
+      }
+
+      console.log(`🏛️ Maximus: Campaign analyzed — ${analysis.analysis}`);
+    } catch (error) {
+      console.error('🏛️ Maximus: Analysis Claude error:', error.message);
+    }
   }
 
   /**

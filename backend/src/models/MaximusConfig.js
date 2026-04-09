@@ -47,6 +47,12 @@ const maximusConfigSchema = new mongoose.Schema({
     lastLearningUpdate: { type: Date }
   },
 
+  // Accumulated intelligence (Claude writes, Claude reads)
+  memory: {
+    insights: [{ type: String }],       // Max 15 — patterns, lessons learned
+    lastUpdated: { type: Date }
+  },
+
   // Model config
   model: { type: String, default: 'claude-sonnet-4-6' },
 

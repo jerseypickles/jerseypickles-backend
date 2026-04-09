@@ -54,8 +54,18 @@ const maximusCampaignLogSchema = new mongoose.Schema({
   // Maximus reasoning
   reasoning: {
     whyThisSubject: { type: String },
+    whyThisProduct: { type: String },
     whyThisList: { type: String },
     whyThisTime: { type: String }
+  },
+
+  // Claude's post-campaign analysis (written after metrics come in)
+  claudeInsight: {
+    analysis: { type: String },
+    whatWorked: { type: String },
+    whatDidnt: { type: String },
+    lessonForNext: { type: String },
+    analyzedAt: { type: Date }
   }
 }, {
   timestamps: true
