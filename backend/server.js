@@ -84,13 +84,14 @@ try {
   console.log('   ⚠️ SmsCampaignTimeReport model:', e.message);
 }
 
-// 🏛️ MAXIMUS MODELS
+// 🏛️ AGENT MODELS
 try {
   require('./src/models/MaximusConfig');
   require('./src/models/MaximusCampaignLog');
-  console.log('   ✅ Maximus models loaded');
+  require('./src/models/ApolloConfig');
+  console.log('   ✅ Agent models loaded (Maximus + Apollo)');
 } catch(e) {
-  console.log('   ⚠️ Maximus models:', e.message);
+  console.log('   ⚠️ Agent models:', e.message);
 }
 
 console.log('📦 Models ready');
@@ -213,6 +214,7 @@ app.get('/', (req, res) => {
       sms_campaigns: '✅ SMS Campaigns',
       sms_second_chance: '✅ Second Chance SMS',
       maximus_agent: '✅ Maximus Agent (Email)',
+      apollo_agent: '✅ Apollo Agent (Creatives)',
       campaign_scheduler: '✅ Campaign Scheduler',
       ai_analytics: '✅ AI-Powered Insights',
       shopify_integration: '✅ Shopify Webhooks'
@@ -225,6 +227,7 @@ app.get('/', (req, res) => {
       sms: '/api/sms',
       sms_campaigns: '/api/sms/campaigns',
       maximus: '/api/maximus',
+      apollo: '/api/apollo',
       ai: '/api/ai',
       webhooks: '/api/webhooks',
       tracking: '/api/track'
@@ -350,6 +353,15 @@ try {
   console.log('✅ Maximus routes loaded');
 } catch (error) {
   console.log('⚠️  Maximus routes not available:', error.message);
+}
+
+// 🏛️ Apollo Creative Agent
+try {
+  const apolloRoutes = require('./src/routes/apollo');
+  app.use('/api/apollo', apolloRoutes);
+  console.log('✅ Apollo routes loaded');
+} catch (error) {
+  console.log('⚠️  Apollo routes not available:', error.message);
 }
 
 app.use('/api/lists', require('./src/routes/lists'));

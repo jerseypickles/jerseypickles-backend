@@ -7,6 +7,16 @@ const MaximusConfig = require('../models/MaximusConfig');
 const MaximusCampaignLog = require('../models/MaximusCampaignLog');
 const Campaign = require('../models/Campaign');
 const List = require('../models/List');
+const apolloService = require('./apolloService');
+
+// Lazy load shopifyService to avoid circular deps
+let shopifyService = null;
+const getShopifyService = () => {
+  if (!shopifyService) {
+    try { shopifyService = require('./shopifyService'); } catch (e) {}
+  }
+  return shopifyService;
+};
 
 class MaximusService {
   constructor() {
@@ -106,14 +116,50 @@ class MaximusService {
     console.log('🏛️ Maximus Decision:');
     console.log(`   Subject: "${decision.subjectLine}"`);
     console.log(`   Preview: "${decision.previewText}"`);
+    console.log(`   Product: ${decision.product}`);
+    console.log(`   Discount: ${decision.discountPercent}% OFF`);
+    console.log(`   Code: ${decision.discountCode}`);
     console.log(`   List: ${decision.listName}`);
     console.log(`   Hour: ${decision.sendHour}:00`);
-    console.log(`   Reasoning: ${decision.reasoning.whyThisTime}`);
 
-    // Schedule or execute based on optimal hour
-    const result = await this.scheduleCampaign(config, decision);
+    // Step 2: Create Shopify discount code
+    console.log('\n🏛️ Maximus: Creating Shopify discount code...');
+    const discountResult = await this.createShopifyDiscount(decision);
+    if (!discountResult.success) {
+      console.error('🏛️ Maximus: Failed to create discount code:', discountResult.error);
+      return { executed: false, reason: 'discount_creation_failed', error: discountResult.error };
+    }
+    console.log(`🏛️ Maximus: ✅ Discount code "${decision.discountCode}" created`);
 
-    return { executed: true, ...result };
+    // Step 3: Ask Apollo to generate creative
+    console.log('\n🏛️ Maximus: Requesting creative from Apollo...');
+    apolloService.init();
+    const creative = await apolloService.generateCreative({
+      product: decision.product,
+      discount: `${decision.discountPercent}% OFF TODAY ONLY`,
+      code: decision.discountCode,
+      headline: decision.headline || decision.subjectLine,
+      productName: decision.productName
+    });
+
+    if (!creative.success) {
+      console.error('🏛️ Maximus: Apollo failed:', creative.error);
+      return { executed: false, reason: 'creative_generation_failed', error: creative.error };
+    }
+    console.log(`🏛️ Maximus: ✅ Creative received from Apollo (${(creative.generationTime / 1000).toFixed(1)}s)`);
+
+    // Step 4: Build email HTML
+    const htmlContent = apolloService.buildEmailHtml(creative.imageUrl, {
+      headline: decision.headline || decision.subjectLine,
+      product: decision.product,
+      discount: `${decision.discountPercent}% OFF`,
+      code: decision.discountCode
+    });
+
+    // Step 5: Schedule campaign
+    const result = await this.scheduleCampaign(config, decision, htmlContent);
+
+    return { executed: true, ...result, imageUrl: creative.imageUrl };
   }
 
   // ==================== DECISION MAKING ====================
@@ -154,6 +200,14 @@ Performance by list:
 ${learningData.byList?.map(l => `  "${l.listName}": ${l.avgOpenRate?.toFixed(1)}% opens, ${l.avgClickRate?.toFixed(1)}% clicks (${l.campaigns} campaigns)`).join('\n') || '  No data yet'}`;
     }
 
+    // Get available products from Apollo bank
+    const ApolloConfig = require('../models/ApolloConfig');
+    const apolloConfig = await ApolloConfig.getConfig();
+    const availableProducts = apolloConfig.getActiveProducts();
+    const productsInfo = availableProducts.length > 0
+      ? availableProducts.map(p => `- "${p.name}" (slug: ${p.slug}, category: ${p.category})`).join('\n')
+      : '- No products configured yet';
+
     const prompt = `You are MAXIMUS, an autonomous email campaign agent for Jersey Pickles - an artisanal pickle and gourmet olive shop from New Jersey.
 
 TODAY: ${today}, ${now.toISOString().split('T')[0]}
@@ -163,6 +217,9 @@ CAMPAIGNS LEFT THIS WEEK: ${config.maxCampaignsPerWeek - campaignsThisWeek.lengt
 AVAILABLE LISTS:
 ${listsInfo}
 
+AVAILABLE PRODUCTS (for creative):
+${productsInfo}
+
 THIS WEEK'S CAMPAIGNS:
 ${recentCampaigns}
 
@@ -171,32 +228,43 @@ ${learningSection}
 
 BRAND VOICE:
 - Warm, friendly, artisanal, family-oriented
-- Products: Pickles, Olives, Marinated Mushrooms, Pickled Vegetables, Build Your Box, Gift Sets
+- Products: Pickles, Olives, Marinated Mushrooms, Pickled Vegetables, Gift Sets
 - NOT overly commercial - focus on craft and quality
 - Use emojis sparingly (max 1-2)
 - Keep subjects under 50 characters
 - Preview text should complement the subject, not repeat it
+- Discount codes should be short, memorable, ALL CAPS (e.g., PICKLE20, OLIVE15, TUESDAY25)
 
 YOUR TASK:
-Decide the campaign for today. You must choose:
+Decide the COMPLETE campaign for today. You must choose:
 1. Subject line (compelling, under 50 chars)
 2. Preview text (adds context, under 80 chars)
-3. Which list to send to (pick one based on performance data or rotate)
-4. What hour to send (between ${config.sendWindowStart}-${config.sendWindowEnd}, based on learning data)
+3. Headline for the creative image (catchy, can reference the day of week)
+4. Which product to feature (pick from available products)
+5. Discount percentage (between 15-30%)
+6. Discount code (short, memorable, ALL CAPS, related to the product)
+7. Which list to send to (pick one based on performance data or rotate)
+8. What hour to send (between ${config.sendWindowStart}-${config.sendWindowEnd}, based on learning data)
 
-${learningData.totalCampaigns < 7 ? 'LEARNING PHASE: Try different hours to gather data. Vary between the lists.' : 'OPTIMIZED PHASE: Use your learning data to pick the best performing time and list.'}
+${learningData.totalCampaigns < 7 ? 'LEARNING PHASE: Try different hours to gather data. Vary between the lists and products.' : 'OPTIMIZED PHASE: Use your learning data to pick the best performing time and list.'}
 
-DO NOT repeat a subject line used this week.
+DO NOT repeat a subject line or product used this week.
 
 Respond ONLY with valid JSON:
 {
   "subjectLine": "...",
   "previewText": "...",
+  "headline": "...",
+  "product": "<product slug>",
+  "productName": "<product full name>",
+  "discountPercent": <number 15-30>,
+  "discountCode": "<SHORT_CODE>",
   "listId": "...",
   "listName": "...",
   "sendHour": <number>,
   "reasoning": {
     "whyThisSubject": "...",
+    "whyThisProduct": "...",
     "whyThisList": "...",
     "whyThisTime": "..."
   }
@@ -237,12 +305,37 @@ Respond ONLY with valid JSON:
     }
   }
 
+  // ==================== SHOPIFY DISCOUNT CODE ====================
+
+  /**
+   * Create a discount code in Shopify for this campaign
+   */
+  async createShopifyDiscount(decision) {
+    try {
+      const shopify = getShopifyService();
+      if (!shopify) {
+        return { success: false, error: 'Shopify service not available' };
+      }
+
+      const result = await shopify.createSmsDiscount(
+        decision.discountCode,
+        decision.discountPercent,
+        7 // expires in 7 days
+      );
+
+      return result;
+    } catch (error) {
+      console.error('🏛️ Maximus: Shopify discount error:', error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
   // ==================== CAMPAIGN CREATION & SCHEDULING ====================
 
   /**
    * Create the campaign in the system and schedule it
    */
-  async scheduleCampaign(config, decision) {
+  async scheduleCampaign(config, decision, htmlContent) {
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const now = new Date();
     const today = dayNames[now.getDay()];
@@ -261,23 +354,21 @@ Respond ONLY with valid JSON:
     }
     scheduledAt.setMinutes(0, 0, 0);
 
-    // Create the campaign in the existing system
-    // Status: 'scheduled' so the schedulerJob picks it up at the right time
-    // When creative agent is not ready, stays as 'draft' instead
-    const isReadyToSchedule = config.creativeAgentReady;
+    // If we have htmlContent (from Apollo), campaign is ready to schedule
+    const hasCreative = htmlContent && htmlContent !== '<p>Awaiting creative from design agent</p>';
 
     const campaign = await Campaign.create({
       name: `[Maximus] ${decision.subjectLine}`,
       subject: decision.subjectLine,
       previewText: decision.previewText,
-      htmlContent: '<p>Awaiting creative from design agent</p>',
+      htmlContent: htmlContent || '<p>Awaiting creative from design agent</p>',
       targetType: 'list',
       list: decision.listId,
       fromName: 'Jersey Pickles',
       fromEmail: 'info@jerseypickles.com',
-      status: isReadyToSchedule ? 'scheduled' : 'draft',
-      scheduledAt: isReadyToSchedule ? scheduledAt : null,
-      tags: ['maximus', 'agent-generated'],
+      status: hasCreative ? 'scheduled' : 'draft',
+      scheduledAt: hasCreative ? scheduledAt : null,
+      tags: ['maximus', 'agent-generated', decision.product, decision.discountCode].filter(Boolean),
       'stats.totalRecipients': 0
     });
 
