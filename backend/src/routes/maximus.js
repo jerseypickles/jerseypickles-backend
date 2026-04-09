@@ -259,6 +259,46 @@ router.post('/proposal/reject', authorize('admin'), async (req, res) => {
   }
 });
 
+/**
+ * POST /api/maximus/campaigns/:id/cancel
+ * Cancel a Maximus campaign (deletes Campaign + MaximusCampaignLog)
+ */
+router.post('/campaigns/:id/cancel', authorize('admin'), async (req, res) => {
+  try {
+    const log = await MaximusCampaignLog.findById(req.params.id);
+    if (!log) {
+      return res.status(404).json({ error: 'Campaign log not found' });
+    }
+
+    // Cancel the actual Campaign (prevent schedulerJob from sending)
+    const Campaign = require('../models/Campaign');
+    if (log.campaign) {
+      const campaign = await Campaign.findById(log.campaign);
+      if (campaign && ['draft', 'scheduled'].includes(campaign.status)) {
+        campaign.status = 'failed';
+        await campaign.save();
+        console.log(`🏛️ Maximus: Campaign ${campaign._id} cancelled`);
+      }
+    }
+
+    // Delete the log
+    await MaximusCampaignLog.findByIdAndDelete(req.params.id);
+
+    // Decrement stats
+    const config = await MaximusConfig.getConfig();
+    if (config.stats.totalCampaignsSent > 0) {
+      config.stats.totalCampaignsSent -= 1;
+      await config.save();
+    }
+
+    console.log(`🏛️ Maximus: Campaign log ${req.params.id} deleted`);
+    res.json({ success: true, message: 'Campaign cancelled and log deleted' });
+  } catch (error) {
+    console.error('Maximus cancel error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== MANUAL TRIGGER ====================
 
 /**
