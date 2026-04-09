@@ -54,6 +54,7 @@ const maximusConfigSchema = new mongoose.Schema({
   pendingProposal: {
     active: { type: Boolean, default: false },
     createdAt: { type: Date },
+    scheduledAt: { type: Date },
     decision: {
       subjectLine: String,
       previewText: String,

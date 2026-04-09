@@ -378,10 +378,15 @@ Respond ONLY with valid JSON:
       console.log('🏛️ Maximus: Apollo not available, proposal without image');
     }
 
-    // Step 4: Save as pending proposal
+    // Step 4: Calculate when it would be sent
+    const config2 = await MaximusConfig.getConfig();
+    const scheduledAt = this.calculateScheduledAt(decision.sendHour, config2.timezone || 'America/New_York');
+
+    // Step 5: Save as pending proposal
     config.pendingProposal = {
       active: true,
       createdAt: new Date(),
+      scheduledAt,
       decision: {
         subjectLine: decision.subjectLine,
         previewText: decision.previewText,
@@ -476,6 +481,30 @@ Respond ONLY with valid JSON:
     return { exists: true, proposal: config.pendingProposal };
   }
 
+  // ==================== SCHEDULING HELPERS ====================
+
+  /**
+   * Calculate the actual scheduledAt Date for a given hour in ET
+   * If the hour has already passed today, schedules for tomorrow
+   */
+  calculateScheduledAt(sendHour, timezone = 'America/New_York') {
+    const now = new Date();
+    const etString = now.toLocaleString('en-US', { timeZone: timezone, hour12: false });
+    const etNow = new Date(etString);
+    const currentETHour = etNow.getHours();
+
+    let hourDiff = sendHour - currentETHour;
+
+    // If the hour has passed today, schedule for tomorrow
+    if (hourDiff <= 0) {
+      hourDiff += 24;
+    }
+
+    const scheduledAt = new Date(now.getTime() + hourDiff * 60 * 60 * 1000);
+    scheduledAt.setMinutes(0, 0, 0);
+    return scheduledAt;
+  }
+
   // ==================== SHOPIFY DISCOUNT CODE ====================
 
   /**
@@ -516,14 +545,7 @@ Respond ONLY with valid JSON:
     const weekNumber = Math.ceil(((now - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7);
 
     // Calculate scheduledAt based on decision.sendHour (in ET)
-    const scheduledAt = new Date();
-    // Set to the decided hour in ET
-    const etNow = new Date(scheduledAt.toLocaleString('en-US', { timeZone: config.timezone }));
-    const hourDiff = decision.sendHour - etNow.getHours();
-    if (hourDiff > 0) {
-      scheduledAt.setTime(scheduledAt.getTime() + hourDiff * 60 * 60 * 1000);
-    }
-    scheduledAt.setMinutes(0, 0, 0);
+    const scheduledAt = this.calculateScheduledAt(decision.sendHour, config.timezone);
 
     // If we have htmlContent (from Apollo), campaign is ready to schedule
     const hasCreative = htmlContent && htmlContent !== '<p>Awaiting creative from design agent</p>';
