@@ -12,7 +12,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 const Campaign = require('../models/Campaign');
-const Segment = require('../models/Segment');
+// Segment model removed
 const List = require('../models/List');
 const Customer = require('../models/Customer');
 const EmailSend = require('../models/EmailSend');
