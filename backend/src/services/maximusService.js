@@ -208,10 +208,26 @@ ${learningData.byList?.map(l => `  "${l.listName}": ${l.avgOpenRate?.toFixed(1)}
       ? availableProducts.map(p => `- "${p.name}" (slug: ${p.slug}, category: ${p.category})`).join('\n')
       : '- No products configured yet';
 
+    // Calculate current ET hour for the prompt
+    const currentETHour = parseInt(now.toLocaleString('en-US', { timeZone: config.timezone, hour: 'numeric', hour12: false }));
+    const earliestSendHour = Math.max(config.sendWindowStart, currentETHour + 1);
+
+    // Collect existing discount codes this week to avoid duplicates
+    const usedCodes = campaignsThisWeek.map(c => c.reasoning?.discountCode).filter(Boolean);
+    const existingCampaignTags = await Campaign.find({
+      tags: 'maximus',
+      createdAt: { $gte: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000) }
+    }).select('tags').lean();
+    const usedCodesFromTags = existingCampaignTags.flatMap(c => (c.tags || []).filter(t => t === t.toUpperCase() && t.length >= 4 && t.length <= 12));
+    const allUsedCodes = [...new Set([...usedCodes, ...usedCodesFromTags])];
+
     const prompt = `You are MAXIMUS, an autonomous email campaign agent for Jersey Pickles - an artisanal pickle and gourmet olive shop from New Jersey.
 
 TODAY: ${today}, ${now.toISOString().split('T')[0]}
+CURRENT TIME: ${currentETHour}:00 ${config.timezone}
 SEND WINDOW: ${config.sendWindowStart}:00 - ${config.sendWindowEnd}:00 (${config.timezone})
+EARLIEST POSSIBLE SEND HOUR TODAY: ${earliestSendHour}:00 (must be AFTER current time)
+${earliestSendHour >= config.sendWindowEnd ? 'NOTE: Today\'s send window has closed. Schedule for tomorrow — pick any hour in the send window.' : ''}
 CAMPAIGNS LEFT THIS WEEK: ${config.maxCampaignsPerWeek - campaignsThisWeek.length}
 
 AVAILABLE LISTS:
@@ -242,9 +258,9 @@ Decide the COMPLETE campaign for today. You must choose:
 3. Headline for the creative image (catchy, can reference the day of week)
 4. Which product to feature (pick from available products)
 5. Discount percentage (between 15-30%)
-6. Discount code (short, memorable, ALL CAPS, related to the product)
+6. Discount code (short, memorable, ALL CAPS, related to the product). MUST be unique — do NOT reuse these codes: ${allUsedCodes.join(', ') || 'none yet'}
 7. Which list to send to (pick one based on performance data or rotate)
-8. What hour to send (between ${config.sendWindowStart}-${config.sendWindowEnd}, based on learning data)
+8. What hour to send — MUST be >= ${earliestSendHour} and < ${config.sendWindowEnd} (current time is ${currentETHour}:00 ET, you cannot send in the past)${earliestSendHour >= config.sendWindowEnd ? '. Today is over — pick an hour for TOMORROW.' : ''}
 
 ${learningData.totalCampaigns < 7 ? 'LEARNING PHASE: Try different hours to gather data. Vary between the lists and products.' : 'OPTIMIZED PHASE: Use your learning data to pick the best performing time and list.'}
 
@@ -293,8 +309,15 @@ Respond ONLY with valid JSON:
         return null;
       }
 
-      if (decision.sendHour < config.sendWindowStart || decision.sendHour >= config.sendWindowEnd) {
-        decision.sendHour = config.getOptimalSendHour();
+      // Validate send hour — must be in the future and within window
+      if (decision.sendHour < earliestSendHour || decision.sendHour >= config.sendWindowEnd) {
+        // If today's window is still open, use earliest available hour
+        if (earliestSendHour < config.sendWindowEnd) {
+          decision.sendHour = earliestSendHour;
+        } else {
+          // Window closed — keep Claude's choice, calculateScheduledAt will push to tomorrow
+          decision.sendHour = Math.max(config.sendWindowStart, Math.min(decision.sendHour, config.sendWindowEnd - 1));
+        }
       }
 
       return decision;
