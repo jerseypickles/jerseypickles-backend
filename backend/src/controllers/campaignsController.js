@@ -272,8 +272,7 @@ class CampaignsController {
       }
       
       const campaigns = await Campaign.find(query)
-        .populate('segment', 'name customerCount')
-        .populate('list', 'name memberCount')
+                .populate('list', 'name memberCount')
         .sort({ createdAt: -1 })
         .limit(limit * 1)
         .skip((page - 1) * limit);
@@ -296,8 +295,7 @@ class CampaignsController {
   async getOne(req, res) {
     try {
       const campaign = await Campaign.findById(req.params.id)
-        .populate('segment')
-        .populate('list');
+                .populate('list');
       
       if (!campaign) {
         return res.status(404).json({ error: 'Campaña no encontrada' });
@@ -525,8 +523,7 @@ class CampaignsController {
   async send(req, res) {
     try {
       const campaign = await Campaign.findById(req.params.id)
-        .populate('segment')
-        .populate('list');
+                .populate('list');
       
       if (!campaign) {
         return res.status(404).json({ error: 'Campaña no encontrada' });
@@ -1045,8 +1042,7 @@ class CampaignsController {
   async getStats(req, res) {
     try {
       const campaign = await Campaign.findById(req.params.id)
-        .populate('segment', 'name')
-        .populate('list', 'name');
+                .populate('list', 'name');
       
       if (!campaign) {
         return res.status(404).json({ error: 'Campaña no encontrada' });

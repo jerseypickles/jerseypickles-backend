@@ -562,7 +562,7 @@ router.get('/top-campaigns', auth, async (req, res) => {
       sentAt: { $gte: start, $lte: end }
     })
     .select('name subject sentAt stats segment')
-    .populate('segment', 'name');
+    ;
     
     console.log(`   Found ${campaigns.length} sent campaigns in period`);
     
@@ -888,7 +888,7 @@ router.get('/compare-campaigns', auth, async (req, res) => {
     
     const campaigns = await Campaign.find({ _id: { $in: campaignIds } })
       .select('name subject sentAt stats segment')
-      .populate('segment', 'name');
+      ;
     
     const comparison = await Promise.all(
       campaigns.map(async (campaign) => {
@@ -1249,7 +1249,7 @@ router.get('/campaign-performance', auth, async (req, res) => {
       .sort({ sentAt: -1 })
       .limit(parseInt(limit))
       .select('name subject stats sentAt segment')
-      .populate('segment', 'name');
+      ;
     
     res.json(campaigns);
     

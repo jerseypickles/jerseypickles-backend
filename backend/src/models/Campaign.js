@@ -20,12 +20,12 @@ const campaignSchema = new mongoose.Schema({
   targetType: {
     type: String,
     enum: ['list', 'segment'],
-    default: 'segment'
+    default: 'list'
   },
-  
+
+  // segment field kept for backward compat with existing data (no longer populated)
   segment: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Segment'
+    type: mongoose.Schema.Types.ObjectId
   },
   
   list: {
@@ -106,8 +106,6 @@ campaignSchema.index({ targetType: 1 });
 campaignSchema.pre('save', function(next) {
   if (this.targetType === 'list' && !this.list) {
     next(new Error('Must specify a list when targetType is "list"'));
-  } else if (this.targetType === 'segment' && !this.segment) {
-    next(new Error('Must specify a segment when targetType is "segment"'));
   } else {
     next();
   }
@@ -198,8 +196,7 @@ campaignSchema.statics.updateStats = async function(campaignId, eventType, reven
  */
 campaignSchema.statics.getDetailedStats = async function(campaignId) {
   const campaign = await this.findById(campaignId)
-    .populate('segment', 'name customerCount')
-    .populate('list', 'name memberCount');
+        .populate('list', 'name memberCount');
   
   if (!campaign) return null;
   
