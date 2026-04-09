@@ -49,9 +49,10 @@ apolloConfigSchema.statics.getConfig = async function () {
   return config;
 };
 
-// Get product by slug
+// Get product by slug (trim to handle trailing spaces in DB)
 apolloConfigSchema.methods.getProduct = function (slug) {
-  return this.products.find(p => p.slug === slug && p.active);
+  const needle = slug.trim().toLowerCase();
+  return this.products.find(p => p.slug.trim().toLowerCase() === needle && p.active);
 };
 
 // Get all active products

@@ -345,17 +345,9 @@ Respond ONLY with valid JSON:
     console.log(`   Discount: ${decision.discountPercent}% OFF`);
     console.log(`   List: ${decision.listName}`);
 
-    // Step 2: Create Shopify discount code
-    console.log('\n🏛️ Maximus: Creating Shopify discount code...');
-    const discountResult = await this.createShopifyDiscount(decision);
-    const discountCreated = discountResult.success;
-    if (!discountCreated) {
-      console.warn('🏛️ Maximus: Discount code not created:', discountResult.error);
-    } else {
-      console.log(`🏛️ Maximus: ✅ Discount code "${decision.discountCode}" created`);
-    }
+    // NOTE: Shopify discount code is created ONLY on approval (approveProposal)
 
-    // Step 3: Generate creative with Apollo
+    // Step 2: Generate creative with Apollo
     let imageUrl = null;
     let htmlContent = null;
 
@@ -405,7 +397,7 @@ Respond ONLY with valid JSON:
       },
       imageUrl,
       htmlContent,
-      discountCreated
+      discountCreated: false
     };
     await config.save();
 
@@ -430,6 +422,15 @@ Respond ONLY with valid JSON:
     const { decision, htmlContent, imageUrl } = config.pendingProposal;
 
     console.log('🏛️ Maximus: Proposal APPROVED — scheduling campaign');
+
+    // Create Shopify discount code now
+    console.log('🏛️ Maximus: Creating Shopify discount code...');
+    const discountResult = await this.createShopifyDiscount(decision);
+    if (!discountResult.success) {
+      console.error('🏛️ Maximus: Failed to create discount code:', discountResult.error);
+      return { success: false, reason: 'discount_creation_failed', error: discountResult.error };
+    }
+    console.log(`🏛️ Maximus: ✅ Discount code "${decision.discountCode}" created`);
 
     // Create and schedule the campaign
     const result = await this.scheduleCampaign(config, decision, htmlContent);
