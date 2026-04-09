@@ -329,9 +329,24 @@ Respond ONLY with valid JSON:
       return { success: false, reason: 'no_lists' };
     }
 
+    // Check weekly limit
+    const campaignsThisWeek = await MaximusCampaignLog.getCampaignsThisWeek();
+    if (campaignsThisWeek.length >= config.maxCampaignsPerWeek) {
+      console.log(`🏛️ Maximus: Weekly limit reached (${campaignsThisWeek.length}/${config.maxCampaignsPerWeek})`);
+      return { success: false, reason: 'weekly_limit_reached', detail: `${campaignsThisWeek.length}/${config.maxCampaignsPerWeek} campaigns this week` };
+    }
+
+    // Check if already sent today
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const sentToday = campaignsThisWeek.find(c => new Date(c.sentAt) >= todayStart);
+    if (sentToday) {
+      console.log('🏛️ Maximus: Already sent a campaign today');
+      return { success: false, reason: 'already_sent_today' };
+    }
+
     // Gather learning data
     const learningData = await this.gatherLearningData();
-    const campaignsThisWeek = await MaximusCampaignLog.getCampaignsThisWeek();
 
     // Step 1: Ask Claude for decision
     const decision = await this.makeDecision(config, learningData, campaignsThisWeek);
@@ -475,10 +490,24 @@ Respond ONLY with valid JSON:
    */
   async getProposal() {
     const config = await MaximusConfig.getConfig();
+    const campaignsThisWeek = await MaximusCampaignLog.getCampaignsThisWeek();
+
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const sentToday = campaignsThisWeek.some(c => new Date(c.sentAt) >= todayStart);
+
+    const availability = {
+      canGenerate: !config.pendingProposal?.active && !sentToday && campaignsThisWeek.length < config.maxCampaignsPerWeek,
+      sentToday,
+      thisWeek: campaignsThisWeek.length,
+      maxPerWeek: config.maxCampaignsPerWeek,
+      remaining: config.maxCampaignsPerWeek - campaignsThisWeek.length
+    };
+
     if (!config.pendingProposal?.active) {
-      return { exists: false };
+      return { exists: false, availability };
     }
-    return { exists: true, proposal: config.pendingProposal };
+    return { exists: true, proposal: config.pendingProposal, availability };
   }
 
   // ==================== SCHEDULING HELPERS ====================
