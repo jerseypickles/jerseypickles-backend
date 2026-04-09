@@ -16,7 +16,7 @@ class ClaudeService {
   constructor() {
     this.client = null;
     this.initialized = false;
-    this.model = 'claude-sonnet-4-20250514';
+    this.model = 'claude-haiku-4-5-20251001';
   }
 
   init() {
@@ -86,7 +86,7 @@ class ClaudeService {
 
       const apiPromise = this.client.messages.create({
         model: this.model,
-        max_tokens: 3500,
+        max_tokens: 1500,
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }]
       });
@@ -531,7 +531,7 @@ IMPORTANTE:
 
       const apiPromise = this.client.messages.create({
         model: this.model,
-        max_tokens: 4000,
+        max_tokens: 1500,
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }]
       });
@@ -1214,7 +1214,7 @@ Responde SOLO con JSON válido:
 
       const apiPromise = this.client.messages.create({
         model: this.model,
-        max_tokens: 3500, // 🆕 Aumentado para incluir análisis de productos
+        max_tokens: 1500,
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }]
       });

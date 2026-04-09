@@ -29,7 +29,7 @@ class AIAnalyticsJob {
    * Inicializar el job con schedule
    * Por defecto: cada 6 horas
    */
-  init(cronExpression = '0 */6 * * *') {
+  init(cronExpression = '0 6 * * *') {
     console.log('🧠 AI Analytics Job (SMS) inicializado');
     console.log(`   Schedule: ${cronExpression}`);
 
@@ -70,7 +70,7 @@ class AIAnalyticsJob {
       } else {
         // Verificar si está desactualizado (más de 6 horas)
         const ageHours = (Date.now() - new Date(smsHealth.createdAt).getTime()) / (1000 * 60 * 60);
-        if (ageHours > 6) {
+        if (ageHours > 24) {
           console.log(`\n🔄 Análisis SMS desactualizado (${ageHours.toFixed(1)}h), recalculando...`);
           await this.runAllAnalyses();
         } else {
@@ -153,9 +153,9 @@ class AIAnalyticsJob {
         results
       );
 
-      // ==================== FASE 2: GENERAR INSIGHTS CON CLAUDE ====================
+      // ==================== FASE 2: INSIGHTS CON FALLBACK (sin Claude) ====================
 
-      await this.generateClaudeSmsInsights(analysisResults, results);
+      await this.generateFallbackSmsInsights(analysisResults, results);
 
       // ==================== FASE 3: COMPREHENSIVE REPORT ====================
 
@@ -201,47 +201,28 @@ class AIAnalyticsJob {
   }
 
   /**
-   * Generar insights de SMS usando Claude API
+   * Generar insights de SMS usando fallback (sin Claude API)
    */
-  async generateClaudeSmsInsights(analysisResults, results) {
-    console.log('\n   🤖 Generando insights SMS con Claude...');
+  async generateFallbackSmsInsights(analysisResults, results) {
+    console.log('\n   📊 Generando insights SMS con fallback...');
 
     try {
-      // Preparar datos para Claude
       const dataForClaude = await smsCalculator.prepareDataForClaude(analysisResults);
+      const fallbackResponse = claudeService.getSmsFallbackInsights(dataForClaude);
 
-      console.log(`      📦 Datos preparados: ${JSON.stringify(dataForClaude).length} bytes`);
-
-      // Llamar a Claude con el nuevo método SMS
-      const claudeResponse = await claudeService.generateSmsInsights(dataForClaude);
-
-      // Guardar en MongoDB (persistente)
-      await AIInsight.saveAnalysis('sms_ai_insights', 30, claudeResponse, {
-        recalculateHours: 6
+      await AIInsight.saveAnalysis('sms_ai_insights', 30, fallbackResponse, {
+        recalculateHours: 24
       });
 
-      // Guardar en cache en memoria de smsAnalyticsService
-      // Esto alimenta el tab Resumen de SMS Studio sin necesidad de llamar a Claude otra vez
-      smsAnalyticsService.saveAiInsights(claudeResponse);
+      smsAnalyticsService.saveAiInsights(fallbackResponse);
 
-      if (claudeResponse.success) {
-        results.success.push('sms_ai_insights (Claude)');
-        console.log(`      ✅ Claude generó análisis SMS completo`);
-        console.log(`      📊 Tokens: ${claudeResponse.tokensUsed?.input || 0} in / ${claudeResponse.tokensUsed?.output || 0} out`);
-        console.log(`      📝 Action plan items: ${claudeResponse.actionPlan?.length || 0}`);
-        console.log(`      ⚡ Quick wins: ${claudeResponse.quickWins?.length || 0}`);
-        console.log(`      ⚠️ Warnings: ${claudeResponse.warnings?.length || 0}`);
-
-        if (claudeResponse.executiveSummary) {
-          console.log(`      📋 Executive Summary: ${claudeResponse.executiveSummary.substring(0, 80)}...`);
-        }
-      } else {
-        console.log('      ⚠️  Claude no disponible, usando insights básicos');
-        results.success.push('sms_ai_insights (fallback)');
-      }
+      results.success.push('sms_ai_insights (fallback)');
+      console.log(`      ✅ Insights SMS generados con fallback`);
+      console.log(`      📝 Action plan items: ${fallbackResponse.actionPlan?.length || 0}`);
+      console.log(`      ⚠️ Warnings: ${fallbackResponse.warnings?.length || 0}`);
 
     } catch (error) {
-      console.error(`      ❌ Error generando insights con Claude: ${error.message}`);
+      console.error(`      ❌ Error generando insights fallback: ${error.message}`);
       results.failed.push('sms_ai_insights');
     }
   }
@@ -258,17 +239,17 @@ class AIAnalyticsJob {
 
       // Guardar snapshot
       await AIInsight.saveAnalysis('business_daily_snapshot', 1, snapshot, {
-        recalculateHours: 6
+        recalculateHours: 24
       });
       results.success.push('business_daily_snapshot');
       console.log(`      Snapshot generado: ${snapshot.sources.join(' + ')}`);
 
-      // 2. Generar reporte IA con Claude
-      console.log('      Generando reporte IA Business con Claude...');
-      const report = await claudeService.generateDailyBusinessReport(snapshot);
+      // 2. Generar reporte con fallback (sin Claude)
+      console.log('      Generando reporte Business con fallback...');
+      const report = claudeService.getBusinessReportFallback(snapshot);
 
       await AIInsight.saveAnalysis('business_daily_report', 1, report, {
-        recalculateHours: 6
+        recalculateHours: 24
       });
 
       if (report.success) {
@@ -303,7 +284,7 @@ class AIAnalyticsJob {
       if (analysisResult && analysisResult.success !== false) {
         await AIInsight.saveAnalysis(type, periodDays, analysisResult, {
           calculationStartTime: startTime,
-          recalculateHours: type === 'sms_health_check' ? 1 : 6
+          recalculateHours: 24
         });
 
         results.success.push(label);
@@ -406,7 +387,7 @@ class AIAnalyticsJob {
       isRunning: this.isRunning,
       lastRun: this.lastRun,
       nextScheduledRun: this.getNextRun(),
-      schedule: '0 */6 * * *',
+      schedule: '0 6 * * *',
       claudeEnabled: this.claudeEnabled,
       claudeModel: claudeService.model,
       focusMode: 'sms'
@@ -418,15 +399,12 @@ class AIAnalyticsJob {
    */
   getNextRun() {
     const now = new Date();
-    const nextHour = Math.ceil(now.getHours() / 6) * 6;
     const next = new Date(now);
 
-    if (nextHour >= 24) {
+    if (now.getHours() >= 6) {
       next.setDate(next.getDate() + 1);
-      next.setHours(0, 0, 0, 0);
-    } else {
-      next.setHours(nextHour, 0, 0, 0);
     }
+    next.setHours(6, 0, 0, 0);
 
     return next;
   }

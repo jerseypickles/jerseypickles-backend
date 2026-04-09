@@ -114,25 +114,9 @@ router.get('/claude', authorize('admin', 'manager'), async (req, res) => {
 
     const claudeData = insight.data || {};
 
-    // Verificar si los datos están desactualizados (más de 12 horas)
     const ageHours = Math.round((Date.now() - new Date(insight.createdAt).getTime()) / (1000 * 60 * 60));
-    const isOutdated = ageHours > 12;
-
-    let recalculationStarted = false;
-
-    if (isOutdated) {
-      const aiAnalyticsJob = require('../jobs/aiAnalyticsJob');
-      if (!aiAnalyticsJob.isRunning) {
-        recalculationStarted = true;
-        setImmediate(async () => {
-          try {
-            await aiAnalyticsJob.forceRecalculateType('sms_ai_insights');
-          } catch (e) {
-            console.error('Error en recálculo automático:', e.message);
-          }
-        });
-      }
-    }
+    const isOutdated = ageHours > 24;
+    const recalculationStarted = false;
 
     res.json({
       success: true,

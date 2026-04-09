@@ -7,8 +7,8 @@ let job = null;
 let isRunning = false;
 
 // Configuration
-const MAX_PER_RUN = 500; // Maximum SMS per job run (safety limit)
-const BATCH_SIZE = 50;   // Process in batches of 50
+const MAX_PER_RUN = 100; // Maximum SMS per job run (safety limit)
+const BATCH_SIZE = 25;   // Process in batches of 25
 
 /**
  * Process ALL pending second chance SMS
@@ -109,14 +109,14 @@ const runSecondChanceJob = async () => {
  * Initialize the cron job
  * @param {string} schedule - Cron schedule (default: every 5 minutes)
  */
-const init = (schedule = '*/5 * * * *') => {
+const init = (schedule = '*/15 * * * *') => {
   if (job) {
     console.log('⚠️ Second Chance SMS job already initialized');
     return;
   }
 
   console.log(`📱 Initializing Second Chance SMS Job...`);
-  console.log(`   Schedule: ${schedule} (every 5 minutes)`);
+  console.log(`   Schedule: ${schedule} (every 15 minutes)`);
   console.log(`   Sending hours: 9:00 AM - 9:00 PM (Eastern)`);
   console.log(`   Delay: 6-24 hours after first SMS (strike while hot!)`);
   console.log(`   Discount: 25-30% OFF (A/B testing), expires in 4 hours`);

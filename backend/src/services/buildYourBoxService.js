@@ -1411,7 +1411,7 @@ Responde SOLO con JSON válido (sin markdown, sin backticks):
 
       const response = await claudeService.client.messages.create({
         model: claudeService.model,
-        max_tokens: 2500,
+        max_tokens: 1000,
         messages: [{ role: 'user', content: prompt }]
       });
 

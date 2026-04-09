@@ -9,7 +9,7 @@ const Campaign = require('../models/Campaign');
 class AIFlowService {
   constructor() {
     this.client = null;
-    this.model = 'claude-sonnet-4-20250514';
+    this.model = 'claude-haiku-4-5-20251001';
     this.initialized = false;
     
     // 🥒 Jersey Pickles Brand Guidelines
@@ -707,7 +707,7 @@ Respond ONLY with valid JSON:
     try {
       const response = await this.client.messages.create({
         model: this.model,
-        max_tokens: 4500,
+        max_tokens: 1000,
         messages: [{ role: 'user', content: prompt }]
       });
       
@@ -1190,7 +1190,7 @@ Respond ONLY with valid JSON:
     try {
       const response = await this.client.messages.create({
         model: this.model,
-        max_tokens: 3500,
+        max_tokens: 1500,
         messages: [{ role: 'user', content: prompt }]
       });
       
@@ -1333,7 +1333,7 @@ Respond ONLY with JSON:
 
       const response = await this.client.messages.create({
         model: this.model,
-        max_tokens: 2000,
+        max_tokens: 1000,
         messages: [{ role: 'user', content: prompt }]
       });
       

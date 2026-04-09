@@ -401,35 +401,21 @@ const smsAnalyticsController = {
         }
       }
 
-      // 3. Solo si se pide forceRefresh Y Claude está disponible, generar nuevos
-      if (!claudeService || !claudeService.isAvailable()) {
-        return res.json({
-          success: true,
-          insights: cached.insights || null,
-          generatedAt: cached.generatedAt,
-          message: 'Claude AI not available. Waiting for next scheduled analysis.',
-          aiAvailable: false
-        });
-      }
-
-      // Generar nuevos insights bajo demanda (solo forceRefresh)
+      // 3. Generar con fallback (sin Claude) bajo demanda
       const data = await smsAnalyticsService.prepareAiInsightsData();
-      const insights = await claudeService.generateSmsInsights(data);
+      const insights = claudeService.getSmsFallbackInsights(data);
 
-      if (insights.success) {
-        smsAnalyticsService.saveAiInsights(insights);
-        // También guardar en MongoDB para persistencia
-        await AIInsight.saveAnalysis('sms_ai_insights', 30, insights, {
-          recalculateHours: 6
-        });
-      }
+      smsAnalyticsService.saveAiInsights(insights);
+      await AIInsight.saveAnalysis('sms_ai_insights', 30, insights, {
+        recalculateHours: 24
+      });
 
       res.json({
         success: true,
         insights,
         generatedAt: new Date().toISOString(),
         fromCache: false,
-        source: 'claude_on_demand'
+        source: 'fallback_analysis'
       });
 
     } catch (error) {
@@ -447,22 +433,13 @@ const smsAnalyticsController = {
    */
   async generateInsights(req, res) {
     try {
-      if (!claudeService || !claudeService.isAvailable()) {
-        return res.status(503).json({
-          success: false,
-          error: 'Claude AI service not available'
-        });
-      }
-
-      console.log('🧠 Generating new SMS AI insights...');
+      console.log('📊 Generating new SMS insights with fallback...');
 
       const data = await smsAnalyticsService.prepareAiInsightsData();
-      const insights = await claudeService.generateSmsInsights(data);
+      const insights = claudeService.getSmsFallbackInsights(data);
 
-      if (insights.success) {
-        smsAnalyticsService.saveAiInsights(insights);
-        console.log('✅ SMS AI insights generated and cached');
-      }
+      smsAnalyticsService.saveAiInsights(insights);
+      console.log('✅ SMS insights generated and cached');
 
       res.json({
         success: true,

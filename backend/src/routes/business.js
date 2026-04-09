@@ -170,15 +170,14 @@ router.post('/generate', authorize('admin', 'manager'), async (req, res) => {
     const snapshot = await dailyBusinessSnapshot.generateSnapshot();
 
     await AIInsight.saveAnalysis('business_daily_snapshot', 1, snapshot, {
-      recalculateHours: 6
+      recalculateHours: 24
     });
 
-    // 2. Generar reporte IA
-    claudeService.init();
-    const report = await claudeService.generateDailyBusinessReport(snapshot);
+    // 2. Generar reporte con fallback (sin Claude)
+    const report = claudeService.getBusinessReportFallback(snapshot);
 
     await AIInsight.saveAnalysis('business_daily_report', 1, report, {
-      recalculateHours: 6
+      recalculateHours: 24
     });
 
     res.json({

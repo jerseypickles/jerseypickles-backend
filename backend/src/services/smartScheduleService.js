@@ -212,33 +212,8 @@ class SmartScheduleService {
       ? (report.performance.revenue - globalAvgs.avgRevenue).toFixed(0)
       : '0';
 
-    if (anthropicClient) {
-      try {
-        const prompt = this._buildAnalysisPrompt(report, globalAvgs);
-        const response = await anthropicClient.messages.create({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1000,
-          system: prompt.system,
-          messages: [{ role: 'user', content: prompt.user }]
-        });
-
-        const content = response.content?.[0]?.text || '';
-        const parsed = this._parseAIResponse(content);
-        report.aiAnalysis = {
-          ...parsed,
-          comparedToAvg: {
-            clickRateVsAvg: `${clickDiff > 0 ? '+' : ''}${clickDiff}%`,
-            conversionRateVsAvg: `${convDiff > 0 ? '+' : ''}${convDiff}%`,
-            revenueVsAvg: `${revDiff > 0 ? '+$' : '-$'}${Math.abs(revDiff)}`
-          }
-        };
-      } catch (err) {
-        console.error('SmartSchedule AI analysis error:', err.message);
-        report.aiAnalysis = this._buildFallbackAnalysis(report, globalAvgs, clickDiff, convDiff, revDiff);
-      }
-    } else {
-      report.aiAnalysis = this._buildFallbackAnalysis(report, globalAvgs, clickDiff, convDiff, revDiff);
-    }
+    // Usar fallback (sin Claude) para análisis de campaña
+    report.aiAnalysis = this._buildFallbackAnalysis(report, globalAvgs, clickDiff, convDiff, revDiff);
 
     report.status = 'analyzed';
     report.analyzedAt = new Date();
@@ -314,25 +289,9 @@ class SmartScheduleService {
     const primarySlot = slots[0] || null;
     const alternatives = slots.slice(1, 4);
 
-    // AI recommendation text
+    // Usar fallback para recomendación (sin Claude)
     let aiRecommendation = null;
-    if (anthropicClient && totalCampaigns >= 3) {
-      try {
-        const prompt = this._buildRecommendationPrompt(byHour, byDay, heatmap, globalAvgs);
-        const response = await anthropicClient.messages.create({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 500,
-          system: prompt.system,
-          messages: [{ role: 'user', content: prompt.user }]
-        });
-        aiRecommendation = response.content?.[0]?.text || null;
-      } catch (err) {
-        console.error('SmartSchedule recommendation error:', err.message);
-      }
-    }
-
-    // Fallback text
-    if (!aiRecommendation && primarySlot) {
+    if (primarySlot) {
       const dayLabel = DAY_LABELS[primarySlot.day] || primarySlot.day;
       const hourLabel = this._formatHour(primarySlot.hour);
       aiRecommendation = `Basado en ${totalCampaigns} campañas analizadas, tu mejor ventana de envío es ${dayLabel} a las ${hourLabel} ET. Conversión promedio: ${primarySlot.conversionRate?.toFixed(1)}%.`;

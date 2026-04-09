@@ -212,7 +212,7 @@ const runDelayedShipmentJob = async () => {
  * Initialize the cron job
  * @param {string} schedule - Cron schedule (default: every 6 hours)
  */
-const init = (schedule = '0 */6 * * *') => {
+const init = (schedule = '0 9 * * *') => {
   if (job) {
     console.log('⚠️ Delayed Shipment job already initialized');
     return;

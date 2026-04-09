@@ -24,7 +24,7 @@ class CompileTimeReportJob {
    * Initialize the job
    * Default: Every 6 hours - checks for campaigns completed 48+ hours ago
    */
-  init(cronExpression = '0 */6 * * *') {
+  init(cronExpression = '0 7 * * *') {
     console.log('🧠 Compile Time Report Job initialized');
     console.log(`   Schedule: ${cronExpression}`);
 
@@ -190,8 +190,8 @@ class CompileTimeReportJob {
       isRunning: this.isRunning,
       lastRun: this.lastRun,
       lastResult: this.lastResult,
-      schedule: '0 */6 * * *',
-      scheduleDescription: 'Every 6 hours'
+      schedule: '0 7 * * *',
+      scheduleDescription: 'Once daily at 7 AM'
     };
   }
 

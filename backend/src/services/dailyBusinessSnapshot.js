@@ -1,8 +1,7 @@
 // backend/src/services/dailyBusinessSnapshot.js
-// Daily Business Snapshot - Agrega datos de MongoDB + Shopify API para IA Business
+// Daily Business Snapshot - Shopify API (source of truth) + MongoDB (SMS data)
 
 const SmsSubscriber = require('../models/SmsSubscriber');
-const Order = require('../models/Order');
 const SmsCampaign = require('../models/SmsCampaign');
 const Customer = require('../models/Customer');
 
@@ -17,106 +16,116 @@ class DailyBusinessSnapshot {
 
   /**
    * Generar snapshot completo del negocio
-   * Combina MongoDB (historico) + Shopify API (tiempo real)
+   * Shopify API = source of truth para metricas de negocio (ordenes, revenue, productos, descuentos)
+   * MongoDB = datos de SMS (subscribers, funnel, campaigns, unsubs) + customers
    */
   async generateSnapshot() {
     console.log('Generating daily business snapshot...');
     const startTime = Date.now();
 
-    const [
-      mongoData,
-      shopifyData
-    ] = await Promise.all([
-      this.getMongoData(),
-      this.getShopifyData()
-    ]);
-
-    const snapshot = {
-      generatedAt: new Date().toISOString(),
-      period: 'daily',
-      sources: ['mongodb', ...(shopifyData ? ['shopify'] : [])],
-      business: {
-        today: mongoData.todayMetrics,
-        last7d: mongoData.last7dMetrics,
-        last30d: mongoData.last30dMetrics,
-        shopifyRealtime: shopifyData
-      },
-      sms: mongoData.sms,
-      products: {
-        topSelling: mongoData.topProducts,
-        shopifyCatalog: shopifyData?.catalog || null,
-        discountUsage: mongoData.discountUsage
-      },
-      customers: mongoData.customers
-    };
-
-    const duration = Date.now() - startTime;
-    console.log(`Snapshot generated in ${duration}ms`);
-    snapshot.generationDuration = duration;
-
-    return snapshot;
-  }
-
-  // ==================== MONGODB DATA ====================
-
-  async getMongoData() {
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const last7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const last30d = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
+    // Fetch Shopify orders (30d) and MongoDB SMS data in parallel
     const [
-      todayMetrics,
-      last7dMetrics,
-      last30dMetrics,
-      sms,
-      topProducts,
-      discountUsage,
-      customers
+      shopifyOrders,
+      smsData,
+      customerData,
+      unfulfilled
     ] = await Promise.all([
-      this.getOrderMetrics(todayStart, now),
-      this.getOrderMetrics(last7d, now),
-      this.getOrderMetrics(last30d, now),
+      this.fetchShopifyOrders30d(last30d),
       this.getSmsData(last30d, now),
-      this.getTopProducts(last30d),
-      this.getDiscountUsage(last30d),
-      this.getCustomerData(last30d, todayStart)
+      this.getCustomerData(last30d, todayStart),
+      this.getShopifyUnfulfilled()
     ]);
 
-    return { todayMetrics, last7dMetrics, last30dMetrics, sms, topProducts, discountUsage, customers };
+    // Compute business metrics from Shopify orders (in-memory filtering)
+    const todayMetrics = this.computeOrderMetrics(shopifyOrders, todayStart, now);
+    const last7dMetrics = this.computeOrderMetrics(shopifyOrders, last7d, now);
+    const last30dMetrics = this.computeOrderMetrics(shopifyOrders, last30d, now);
+    const topProducts = this.computeTopProducts(shopifyOrders, last30d);
+    const discountUsage = this.computeDiscountUsage(shopifyOrders, last30d);
+
+    const snapshot = {
+      generatedAt: new Date().toISOString(),
+      period: 'daily',
+      sources: shopifyOrders ? ['shopify'] : ['shopify_failed'],
+      business: {
+        today: todayMetrics,
+        last7d: last7dMetrics,
+        last30d: last30dMetrics,
+        shopifyRealtime: {
+          unfulfilled,
+          catalog: null
+        }
+      },
+      sms: smsData,
+      products: {
+        topSelling: topProducts,
+        shopifyCatalog: null,
+        discountUsage
+      },
+      customers: customerData
+    };
+
+    const duration = Date.now() - startTime;
+    console.log(`Snapshot generated in ${duration}ms (${shopifyOrders ? shopifyOrders.length : 0} Shopify orders fetched)`);
+    snapshot.generationDuration = duration;
+
+    return snapshot;
   }
 
-  async getOrderMetrics(startDate, endDate) {
-    try {
-      const pipeline = [
-        {
-          $match: {
-            createdAt: { $gte: startDate, $lte: endDate },
-            financialStatus: { $in: ['paid', 'partially_refunded'] }
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            totalOrders: { $sum: 1 },
-            totalRevenue: { $sum: { $toDouble: '$totalPrice' } },
-            avgOrderValue: { $avg: { $toDouble: '$totalPrice' } }
-          }
-        }
-      ];
+  // ==================== SHOPIFY ORDERS (SOURCE OF TRUTH) ====================
 
-      const result = await Order.aggregate(pipeline);
-      const data = result[0] || { totalOrders: 0, totalRevenue: 0, avgOrderValue: 0 };
-
-      return {
-        orders: data.totalOrders,
-        revenue: Math.round(data.totalRevenue * 100) / 100,
-        avgTicket: Math.round(data.avgOrderValue * 100) / 100
-      };
-    } catch (error) {
-      console.error('Error getting order metrics:', error.message);
-      return { orders: 0, revenue: 0, avgTicket: 0 };
+  /**
+   * Fetch all paid orders from last 30 days from Shopify API
+   * Single paginated call, then filter in-memory for different periods
+   */
+  async fetchShopifyOrders30d(since30d) {
+    if (!shopifyService) {
+      console.error('Shopify service not available - business metrics will be empty');
+      return null;
     }
+
+    try {
+      console.log('Fetching 30d orders from Shopify API...');
+      const orders = await shopifyService.getAllOrders({
+        created_at_min: since30d.toISOString(),
+        financial_status: 'paid',
+        status: 'any'
+      });
+
+      console.log(`Fetched ${orders.length} paid orders from Shopify (last 30d)`);
+      return orders;
+    } catch (error) {
+      console.error('Error fetching Shopify orders:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Compute order metrics (revenue, count, avgTicket) from Shopify orders array
+   * Filters by date range in-memory
+   */
+  computeOrderMetrics(orders, startDate, endDate) {
+    if (!orders) return { orders: 0, revenue: 0, avgTicket: 0 };
+
+    const filtered = orders.filter(o => {
+      const created = new Date(o.created_at);
+      return created >= startDate && created <= endDate;
+    });
+
+    const totalRevenue = filtered.reduce((sum, o) => sum + parseFloat(o.total_price || 0), 0);
+
+    return {
+      orders: filtered.length,
+      revenue: Math.round(totalRevenue * 100) / 100,
+      avgTicket: filtered.length > 0
+        ? Math.round((totalRevenue / filtered.length) * 100) / 100
+        : 0
+    };
   }
 
   async getSmsData(startDate, endDate) {
@@ -291,88 +300,67 @@ class DailyBusinessSnapshot {
     }
   }
 
-  async getTopProducts(startDate) {
-    try {
-      const topProducts = await Order.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: startDate },
-            financialStatus: { $in: ['paid', 'partially_refunded'] }
-          }
-        },
-        { $unwind: '$lineItems' },
-        {
-          $group: {
-            _id: '$lineItems.title',
-            totalRevenue: { $sum: { $multiply: [{ $toDouble: '$lineItems.price' }, '$lineItems.quantity'] } },
-            totalUnits: { $sum: '$lineItems.quantity' },
-            orderCount: { $sum: 1 }
-          }
-        },
-        { $sort: { totalRevenue: -1 } },
-        { $limit: 10 }
-      ]);
+  /**
+   * Compute top selling products from Shopify orders (in-memory)
+   * Shopify line_items: { title, price, quantity, ... }
+   */
+  computeTopProducts(orders, since) {
+    if (!orders) return [];
 
-      return topProducts.map(p => ({
-        name: p._id,
-        revenue: Math.round(p.totalRevenue * 100) / 100,
-        unitsSold: p.totalUnits,
-        orders: p.orderCount
-      }));
-    } catch (error) {
-      console.error('Error getting top products:', error.message);
-      return [];
+    const filtered = orders.filter(o => new Date(o.created_at) >= since);
+    const products = {};
+
+    for (const order of filtered) {
+      for (const item of (order.line_items || [])) {
+        const title = item.title || 'Unknown';
+        if (!products[title]) {
+          products[title] = { revenue: 0, units: 0, orders: 0 };
+        }
+        products[title].revenue += parseFloat(item.price || 0) * (item.quantity || 1);
+        products[title].units += item.quantity || 1;
+        products[title].orders += 1;
+      }
     }
+
+    return Object.entries(products)
+      .sort((a, b) => b[1].revenue - a[1].revenue)
+      .slice(0, 10)
+      .map(([name, data]) => ({
+        name,
+        revenue: Math.round(data.revenue * 100) / 100,
+        unitsSold: data.units,
+        orders: data.orders
+      }));
   }
 
-  async getDiscountUsage(startDate) {
-    try {
-      // discountCodes is [String] (e.g. ['JP-ABC', 'SC-DEF']), not [Object]
-      const discounts = await Order.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: startDate },
-            'discountCodes.0': { $exists: true }
-          }
-        },
-        { $unwind: '$discountCodes' },
-        {
-          $group: {
-            _id: {
-              $cond: [
-                { $regexMatch: { input: '$discountCodes', regex: /^JPC/i } },
-                'dynamic',
-                {
-                  $cond: [
-                    { $regexMatch: { input: '$discountCodes', regex: /^JP/i } },
-                    'welcome',
-                    {
-                      $cond: [
-                        { $regexMatch: { input: '$discountCodes', regex: /^SC/i } },
-                        'secondChance',
-                        'other'
-                      ]
-                    }
-                  ]
-                }
-              ]
-            },
-            count: { $sum: 1 }
-          }
+  /**
+   * Compute discount usage from Shopify orders (in-memory)
+   * Shopify discount_codes: [{ code, amount, type }]
+   */
+  computeDiscountUsage(orders, since) {
+    if (!orders) return { welcome: 0, secondChance: 0, dynamic: 0, other: 0, totalRedeemed: 0 };
+
+    const filtered = orders.filter(o => new Date(o.created_at) >= since);
+    const result = { welcome: 0, secondChance: 0, dynamic: 0, other: 0, totalRedeemed: 0 };
+
+    for (const order of filtered) {
+      for (const dc of (order.discount_codes || [])) {
+        const code = (dc.code || '').toUpperCase();
+        result.totalRedeemed += 1;
+
+        if (code.startsWith('JPC')) {
+          result.dynamic += 1;
+        } else if (code.startsWith('JP')) {
+          result.welcome += 1;
+        } else if (code.startsWith('SC')) {
+          result.secondChance += 1;
+        } else {
+          result.other += 1;
         }
-      ]);
-
-      const result = { welcome: 0, secondChance: 0, dynamic: 0, other: 0, totalRedeemed: 0 };
-      for (const d of discounts) {
-        result[d._id] = d.count;
-        result.totalRedeemed += d.count;
       }
-
-      return result;
-    } catch (error) {
-      console.error('Error getting discount usage:', error.message);
-      return { welcome: 0, secondChance: 0, dynamic: 0, other: 0, totalRedeemed: 0 };
     }
+
+    return result;
   }
 
   async getCustomerData(last30d, todayStart) {
@@ -396,72 +384,11 @@ class DailyBusinessSnapshot {
     }
   }
 
-  // ==================== SHOPIFY API DATA ====================
-
-  async getShopifyData() {
-    if (!shopifyService) {
-      console.log('Shopify service not available for snapshot');
-      return null;
-    }
-
-    try {
-      const [recentOrders, unfulfilled] = await Promise.all([
-        this.getShopifyRecentOrders(),
-        this.getShopifyUnfulfilled()
-      ]);
-
-      return {
-        recentOrders,
-        unfulfilled,
-        catalog: null // Se puede expandir si es necesario
-      };
-    } catch (error) {
-      console.error('Error getting Shopify data:', error.message);
-      return null;
-    }
-  }
-
-  async getShopifyRecentOrders() {
-    try {
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-
-      const orders = await shopifyService.getAllOrders({
-        created_at_min: yesterday.toISOString(),
-        status: 'any',
-        financial_status: 'paid'
-      }, 1); // Solo 1 pagina (max 250 orders)
-
-      const revenue = orders.reduce((sum, o) => sum + parseFloat(o.total_price || 0), 0);
-      const products = {};
-
-      for (const order of orders) {
-        for (const item of (order.line_items || [])) {
-          if (!products[item.title]) {
-            products[item.title] = { units: 0, revenue: 0 };
-          }
-          products[item.title].units += item.quantity;
-          products[item.title].revenue += parseFloat(item.price) * item.quantity;
-        }
-      }
-
-      const topToday = Object.entries(products)
-        .sort((a, b) => b[1].revenue - a[1].revenue)
-        .slice(0, 5)
-        .map(([name, data]) => ({ name, ...data }));
-
-      return {
-        count: orders.length,
-        revenue: Math.round(revenue * 100) / 100,
-        topProducts: topToday
-      };
-    } catch (error) {
-      console.error('Error getting Shopify recent orders:', error.message);
-      return null;
-    }
-  }
+  // ==================== SHOPIFY UNFULFILLED ====================
 
   async getShopifyUnfulfilled() {
+    if (!shopifyService) return { count: 0, oldestHours: 0 };
+
     try {
       const orders = await shopifyService.getUnfulfilledOrders(24, 50);
       return {
