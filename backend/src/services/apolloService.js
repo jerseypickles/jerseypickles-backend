@@ -79,12 +79,27 @@ class ApolloService {
 
     try {
       // 2. Build the mega-prompt
-      const prompt = this.buildPrompt(brief, product);
-      console.log(`   Prompt length: ${prompt.length} chars`);
+      const promptText = this.buildPrompt(brief, product);
+      console.log(`   Prompt length: ${promptText.length} chars`);
 
-      // 3. Call Gemini 3 Pro
+      // 3. Download bank image to send as reference
+      let bankImageData = null;
+      if (product.bankImageUrl) {
+        try {
+          console.log(`   Downloading bank image: ${product.bankImageUrl}`);
+          const imgResponse = await axios.get(product.bankImageUrl, { responseType: 'arraybuffer', timeout: 15000 });
+          bankImageData = Buffer.from(imgResponse.data).toString('base64');
+          const mimeType = imgResponse.headers['content-type'] || 'image/jpeg';
+          bankImageData = { base64: bankImageData, mimeType };
+          console.log(`   Bank image downloaded (${Math.round(imgResponse.data.length / 1024)}KB)`);
+        } catch (imgErr) {
+          console.warn(`   Could not download bank image: ${imgErr.message}`);
+        }
+      }
+
+      // 4. Call Gemini 3 Pro with text + reference image
       console.log(`   Calling Gemini (${config.geminiModel})...`);
-      const imageBase64 = await this.callGemini(prompt, config.geminiModel);
+      const imageBase64 = await this.callGemini(promptText, config.geminiModel, bankImageData);
 
       if (!imageBase64) {
         return { success: false, error: 'Gemini returned no image' };
@@ -128,12 +143,32 @@ class ApolloService {
   // ==================== GEMINI API CALL ====================
 
   /**
-   * Call Gemini 3 Pro to generate image from prompt
+   * Call Gemini 3 Pro to generate image from prompt + optional reference image
+   * @param {string} prompt - Text prompt
+   * @param {string} model - Gemini model
+   * @param {object|null} bankImage - { base64, mimeType } reference product photo
    */
-  async callGemini(prompt, model = 'gemini-3-pro-image-preview') {
+  async callGemini(prompt, model = 'gemini-3-pro-image-preview', bankImage = null) {
+    // Build contents: reference image first, then text prompt
+    const parts = [];
+
+    if (bankImage) {
+      parts.push({
+        inlineData: {
+          mimeType: bankImage.mimeType,
+          data: bankImage.base64
+        }
+      });
+      parts.push({
+        text: `REFERENCE PRODUCT PHOTO: The image above is the EXACT product jar you must reproduce in the final image. Match its label, shape, color, and proportions precisely. Do NOT invent a different jar.\n\n${prompt}`
+      });
+    } else {
+      parts.push({ text: prompt });
+    }
+
     const response = await this.client.models.generateContent({
       model,
-      contents: prompt,
+      contents: [{ role: 'user', parts }],
       config: {
         responseModalities: ['image', 'text'],
       }
@@ -163,7 +198,9 @@ class ApolloService {
 
     return `ASPECT RATIO: 9:16 vertical portrait, designed for email marketing.
 
-A single Jersey Pickles ${product.name} jar — one jar only, no duplicates — stands upright as the dominant foreground subject on a rustic wooden kitchen counter or weeknight dinner table. Surrounded by complementary fresh ingredients that match the product. Warm amber evening light from a low kitchen window, candle glow suggesting a cozy ${dayOfWeek} night dinner at home. Shallow depth of field with soft bokeh on a blurred warm kitchen interior in the background. The jar is front-lit with label perfectly sharp and readable. Hyper-detailed glass texture with warm candlelight refracting through the brine. Premium lifestyle food photography, hyperrealistic, 8K, 9:16 vertical portrait.
+CRITICAL: You MUST use the reference product photo provided above as the EXACT jar in this image. Reproduce the jar's label, shape, glass color, lid, and proportions with 100% fidelity. Do NOT create a different jar or modify the label design.
+
+Place the EXACT jar from the reference photo upright as the dominant foreground subject on a rustic wooden kitchen counter or weeknight dinner table. Surrounded by complementary fresh ingredients that match the product. Warm amber evening light from a low kitchen window, candle glow suggesting a cozy ${dayOfWeek} night dinner at home. Shallow depth of field with soft bokeh on a blurred warm kitchen interior in the background. The jar is front-lit with label perfectly sharp and readable. Hyper-detailed glass texture with warm candlelight refracting through the brine. Premium lifestyle food photography, hyperrealistic, 8K, 9:16 vertical portrait.
 
 ${product.promptHints || ''}
 
@@ -180,7 +217,7 @@ Bright green rounded pill button: "SHOP NOW"
 
 FOOTER: Dark green bar. "www.jerseypickles.com" small pickle icons on each side.
 
-RULES: Single jar only, no duplicates, no text outside overlay zones, hyperrealistic premium lifestyle food photography, 8K, 9:16 vertical.`;
+RULES: Single jar only (the EXACT one from the reference photo), no duplicates, no text outside overlay zones, hyperrealistic premium lifestyle food photography, 8K, 9:16 vertical.`;
   }
 
   // ==================== CLOUDINARY UPLOAD ====================
