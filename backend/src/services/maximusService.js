@@ -336,12 +336,20 @@ Respond ONLY with valid JSON:
       return { success: false, reason: 'weekly_limit_reached', detail: `${campaignsThisWeek.length}/${config.maxCampaignsPerWeek} campaigns this week` };
     }
 
-    // Check if already sent today
+    // Check if there's already a campaign SCHEDULED for today
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
-    const sentToday = campaignsThisWeek.find(c => new Date(c.sentAt) >= todayStart);
-    if (sentToday) {
-      console.log('🏛️ Maximus: Already sent a campaign today');
+    const tomorrowStart = new Date(todayStart);
+    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+
+    const scheduledToday = await Campaign.findOne({
+      tags: 'maximus',
+      status: { $in: ['scheduled', 'sending', 'sent', 'preparing'] },
+      scheduledAt: { $gte: todayStart, $lt: tomorrowStart }
+    }).lean();
+
+    if (scheduledToday) {
+      console.log('🏛️ Maximus: Already has a campaign scheduled for today');
       return { success: false, reason: 'already_sent_today' };
     }
 
@@ -492,13 +500,23 @@ Respond ONLY with valid JSON:
     const config = await MaximusConfig.getConfig();
     const campaignsThisWeek = await MaximusCampaignLog.getCampaignsThisWeek();
 
+    // Check if there's a campaign scheduled for today (not just logged today)
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
-    const sentToday = campaignsThisWeek.some(c => new Date(c.sentAt) >= todayStart);
+    const tomorrowStart = new Date(todayStart);
+    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+
+    const scheduledToday = await Campaign.findOne({
+      tags: 'maximus',
+      status: { $in: ['scheduled', 'sending', 'sent', 'preparing'] },
+      scheduledAt: { $gte: todayStart, $lt: tomorrowStart }
+    }).lean();
+
+    const hasScheduledToday = !!scheduledToday;
 
     const availability = {
-      canGenerate: !config.pendingProposal?.active && !sentToday && campaignsThisWeek.length < config.maxCampaignsPerWeek,
-      sentToday,
+      canGenerate: !config.pendingProposal?.active && !hasScheduledToday && campaignsThisWeek.length < config.maxCampaignsPerWeek,
+      sentToday: hasScheduledToday,
       thisWeek: campaignsThisWeek.length,
       maxPerWeek: config.maxCampaignsPerWeek,
       remaining: config.maxCampaignsPerWeek - campaignsThisWeek.length
