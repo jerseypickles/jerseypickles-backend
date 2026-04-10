@@ -364,6 +364,15 @@ try {
   console.log('⚠️  Apollo routes not available:', error.message);
 }
 
+// 🔨 Vulcan Segmentation Agent
+try {
+  const vulcanRoutes = require('./src/routes/vulcan');
+  app.use('/api/vulcan', vulcanRoutes);
+  console.log('✅ Vulcan routes loaded');
+} catch (error) {
+  console.log('⚠️  Vulcan routes not available:', error.message);
+}
+
 app.use('/api/lists', require('./src/routes/lists'));
 app.use('/api/track', require('./src/routes/tracking'));
 app.use('/api/analytics', require('./src/routes/analytics'));
@@ -601,6 +610,21 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     }
   }, 7000);
 
+  // 🔨 Inicializar Vulcan Segmentation Agent
+  let vulcanAvailable = false;
+  setTimeout(() => {
+    console.log('\n🔨 Inicializando Vulcan Agent...');
+    try {
+      const vulcanJob = require('./src/jobs/vulcanJob');
+      vulcanJob.init();
+      vulcanAvailable = true;
+      console.log('✅ Vulcan Agent listo (runs daily 3 AM ET)');
+    } catch (error) {
+      vulcanAvailable = false;
+      console.log('⚠️  Vulcan Agent no disponible:', error.message);
+    }
+  }, 8000);
+
   // Resumen de features
   setTimeout(() => {
     console.log('\n╔════════════════════════════════════════════════╗');
@@ -616,8 +640,9 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`║  Smart Schedule:     ${smartScheduleAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  📅 Scheduler:       ${schedulerAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log(`║  🏛️ Maximus Agent:   ${maximusAvailable ? '✅ Dormant' : '❌ Inactive'}              ║`);
+    console.log(`║  🔨 Vulcan Agent:    ${vulcanAvailable ? '✅ Active' : '❌ Inactive'}              ║`);
     console.log('╚════════════════════════════════════════════════╝');
-  }, 7000);
+  }, 9000);
 });
 
 // ==================== GRACEFUL SHUTDOWN ====================
