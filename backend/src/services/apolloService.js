@@ -197,11 +197,71 @@ class ApolloService {
     const dayOfWeek = new Date().toLocaleDateString('en-US', { weekday: 'long' });
     const type = brief.campaignType || 'promotional';
 
+    // Scene variety — randomize to avoid monotony
+    const scenes = [
+      'rustic wooden kitchen counter with exposed beams above',
+      'marble kitchen countertop with white tile backsplash',
+      'reclaimed barn wood table in a farmhouse kitchen',
+      'butcher block counter with copper cookware hanging nearby',
+      'concrete countertop in a modern industrial kitchen',
+      'vintage enamel table with floral tablecloth',
+      'dark walnut dinner table set for a casual meal',
+      'outdoor wooden picnic table with string lights above',
+      'stone kitchen island with open shelving behind',
+      'antique oak farm table with linen runner'
+    ];
+
+    const lightingMoods = [
+      'warm amber golden-hour sunlight streaming through a window',
+      'soft morning daylight through linen curtains, bright and fresh',
+      'cozy candlelight with dim ambient glow, intimate mood',
+      'cool northern window light, clean and editorial',
+      'dramatic side-light with strong shadows, moody chiaroscuro',
+      'bright overhead natural light, airy and modern',
+      'warm fireplace glow in the background, rustic and cozy',
+      'late afternoon sun with long golden shadows',
+      'diffused overcast daylight, muted and elegant',
+      'twinkling string lights and candles, festive dinner vibes'
+    ];
+
+    const colorPalettes = [
+      'warm earth tones — terracotta, olive green, cream, burnt orange',
+      'fresh garden tones — sage green, ivory, pale yellow, soft pink',
+      'moody deep tones — forest green, burgundy, charcoal, gold accents',
+      'bright farmhouse tones — red gingham, white, fresh greens, natural wood',
+      'minimalist tones — muted greys, white, black, single pop of color from the product',
+      'autumn harvest tones — rust, mustard, cream, deep brown',
+      'coastal tones — soft blues, white, sand, driftwood grey',
+      'Mediterranean tones — terracotta, olive, ochre, stone'
+    ];
+
+    const compositions = [
+      'jar centered in lower third with ingredients fanning out behind',
+      'jar slightly off-center right with props balancing left',
+      'overhead three-quarter angle showing jar and surrounding scene',
+      'jar in sharp foreground with blurred lifestyle scene behind',
+      'jar on a wooden board with fresh ingredients styled around it',
+      'jar with a linen napkin draped casually beside it',
+      'jar next to a small stack of vintage cookbooks and a wooden spoon',
+      'jar with cutting board, knife, and prepped ingredients nearby'
+    ];
+
+    // Pick one of each randomly
+    const scene = scenes[Math.floor(Math.random() * scenes.length)];
+    const lighting = lightingMoods[Math.floor(Math.random() * lightingMoods.length)];
+    const palette = colorPalettes[Math.floor(Math.random() * colorPalettes.length)];
+    const composition = compositions[Math.floor(Math.random() * compositions.length)];
+
     const baseScene = `ASPECT RATIO: 9:16 vertical portrait, designed for email marketing.
 
 CRITICAL: You MUST use the reference product photo provided above as the EXACT jar in this image. Reproduce the jar's label, shape, glass color, lid, and proportions with 100% fidelity. Do NOT create a different jar or modify the label design.
 
-Place the EXACT jar from the reference photo upright as the dominant foreground subject on a rustic wooden kitchen counter or weeknight dinner table. Surrounded by complementary fresh ingredients that match the product. Warm amber evening light from a low kitchen window, candle glow suggesting a cozy ${dayOfWeek} night dinner at home. Shallow depth of field with soft bokeh on a blurred warm kitchen interior in the background. The jar is front-lit with label perfectly sharp and readable. Hyper-detailed glass texture with warm candlelight refracting through the brine. Premium lifestyle food photography, hyperrealistic, 8K, 9:16 vertical portrait.
+SCENE: ${scene}.
+LIGHTING: ${lighting}.
+COLOR PALETTE: ${palette}.
+COMPOSITION: ${composition}.
+
+Place the EXACT jar from the reference photo as described. Surround it with complementary fresh ingredients that match the product. Premium lifestyle food photography, hyperrealistic, 8K, 9:16 vertical portrait.
 
 ${product.promptHints || ''}`;
 
