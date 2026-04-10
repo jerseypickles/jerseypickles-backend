@@ -158,8 +158,8 @@ async function sendCampaign(campaignId) {
 
         // Enqueue chunk
         if (tempRecipients.length >= ENQUEUE_CHUNK_SIZE) {
-          const { enqueueBulkWithRetry } = require('../jobs/emailQueue');
-          await enqueueBulkWithRetry(tempRecipients, campaignIdStr, 100);
+          const { addCampaignToQueue } = require('../jobs/emailQueue');
+          await addCampaignToQueue(tempRecipients, campaignIdStr);
           tempRecipients = [];
           await new Promise(resolve => setTimeout(resolve, config.delayBetweenBatches));
         }
@@ -177,8 +177,8 @@ async function sendCampaign(campaignId) {
 
       // Residual enqueue
       if (tempRecipients.length > 0) {
-        const { enqueueBulkWithRetry } = require('../jobs/emailQueue');
-        await enqueueBulkWithRetry(tempRecipients, campaignIdStr, 100);
+        const { addCampaignToQueue } = require('../jobs/emailQueue');
+        await addCampaignToQueue(tempRecipients, campaignIdStr);
       }
 
       // Adjust and set to sending
