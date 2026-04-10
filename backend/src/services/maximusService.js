@@ -286,7 +286,7 @@ YOUR TASK:
 5. Which product to feature
 6. ONLY if type is "promotional": discount percentage (15-30%) and discount code (ALL CAPS, unique). Do NOT reuse: ${allUsedCodes.join(', ') || 'none yet'}
 7. Which list to send to
-8. What hour to send — MUST be >= ${earliestSendHour} and < ${config.sendWindowEnd} (current time is ${currentETHour}:00 ET)${earliestSendHour >= config.sendWindowEnd ? '. Today is over — pick hour for TOMORROW.' : ''}
+8. What hour to send — ${earliestSendHour >= config.sendWindowEnd ? `Today\\'s window is closed. Pick any hour between ${config.sendWindowStart} and ${config.sendWindowEnd - 1} for TOMORROW.` : `MUST be >= ${earliestSendHour} and < ${config.sendWindowEnd} (current time is ${currentETHour}:00 ET)`}
 
 ${learningData.totalCampaigns < 7 ? 'LEARNING PHASE: Try different types, hours, and lists to gather data.' : 'OPTIMIZED PHASE: Use your learning data to pick the best performing time and list.'}
 
@@ -316,25 +316,38 @@ Respond ONLY with valid JSON:
 }`;
 
     try {
+      console.log('🏛️ Maximus: Asking Claude for decision...');
       const response = await this.client.messages.create({
         model: this.model,
-        max_tokens: 500,
+        max_tokens: 1024,
         messages: [{ role: 'user', content: prompt }]
       });
 
       const content = response.content?.[0]?.text || '';
+      console.log('🏛️ Maximus: Claude response length:', content.length);
+
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
-        console.error('🏛️ Maximus: Could not parse Claude response');
+        console.error('🏛️ Maximus: Could not parse Claude response. Raw:', content.substring(0, 500));
         return null;
       }
 
-      const decision = JSON.parse(jsonMatch[0]);
+      let decision;
+      try {
+        decision = JSON.parse(jsonMatch[0]);
+      } catch (parseErr) {
+        console.error('🏛️ Maximus: JSON parse error:', parseErr.message);
+        console.error('🏛️ Maximus: Raw JSON:', jsonMatch[0].substring(0, 500));
+        return null;
+      }
+
+      console.log('🏛️ Maximus: Decision parsed:', decision.campaignType, decision.subjectLine);
 
       // Validate the decision
       const validList = config.lists.find(l => l.listId.toString() === decision.listId);
       if (!validList) {
-        console.error('🏛️ Maximus: Invalid list selected');
+        console.error('🏛️ Maximus: Invalid list selected:', decision.listId);
+        console.error('🏛️ Maximus: Available lists:', config.lists.map(l => l.listId.toString()));
         return null;
       }
 
