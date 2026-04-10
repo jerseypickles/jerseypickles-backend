@@ -79,6 +79,36 @@ router.post('/products', authorize('admin'), async (req, res) => {
 });
 
 /**
+ * PATCH /api/apollo/products/:slug
+ * Update an existing product in the bank
+ */
+router.patch('/products/:slug', authorize('admin'), async (req, res) => {
+  try {
+    const { name, category, bankImageUrl, bankImageCloudinaryId, promptHints, active } = req.body;
+    const config = await ApolloConfig.getConfig();
+
+    const product = config.products.find(p => p.slug === req.params.slug || p.slug.trim() === req.params.slug);
+    if (!product) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    if (name !== undefined) product.name = name;
+    if (category !== undefined) product.category = category;
+    if (bankImageUrl !== undefined) product.bankImageUrl = bankImageUrl;
+    if (bankImageCloudinaryId !== undefined) product.bankImageCloudinaryId = bankImageCloudinaryId;
+    if (promptHints !== undefined) product.promptHints = promptHints;
+    if (typeof active === 'boolean') product.active = active;
+
+    await config.save();
+    console.log(`🏛️ Apollo: Product updated - ${product.name} (${product.slug})`);
+    res.json({ success: true, product });
+  } catch (error) {
+    console.error('Apollo update product error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * DELETE /api/apollo/products/:slug
  * Remove a product from the bank
  */
