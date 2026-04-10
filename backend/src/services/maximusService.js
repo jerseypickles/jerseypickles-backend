@@ -520,7 +520,7 @@ Respond ONLY with valid JSON:
       return { success: false, reason: 'no_pending_proposal' };
     }
 
-    const { decision, htmlContent, imageUrl } = config.pendingProposal;
+    const { decision, htmlContent, imageUrl, scheduledAt: proposalScheduledAt } = config.pendingProposal;
 
     console.log(`🏛️ Maximus: Proposal APPROVED (${decision.campaignType || 'promotional'}) — scheduling campaign`);
 
@@ -535,8 +535,8 @@ Respond ONLY with valid JSON:
       console.log(`🏛️ Maximus: ✅ Discount code "${decision.discountCode}" created`);
     }
 
-    // Create and schedule the campaign
-    const result = await this.scheduleCampaign(config, decision, htmlContent);
+    // Create and schedule the campaign — use the original scheduledAt from proposal
+    const result = await this.scheduleCampaign(config, decision, htmlContent, proposalScheduledAt);
 
     // Clear the proposal
     config.pendingProposal = { active: false };
@@ -672,12 +672,19 @@ Respond ONLY with valid JSON:
   /**
    * Create the campaign in the system and schedule it
    */
-  async scheduleCampaign(config, decision, htmlContent) {
+  async scheduleCampaign(config, decision, htmlContent, overrideScheduledAt = null) {
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const now = new Date();
 
-    // Calculate scheduledAt based on decision.sendHour (in ET)
-    const scheduledAt = this.calculateScheduledAt(decision.sendHour, config.timezone);
+    // Use override from proposal if provided, otherwise calculate
+    const scheduledAt = overrideScheduledAt ? new Date(overrideScheduledAt) : this.calculateScheduledAt(decision.sendHour, config.timezone);
+
+    // If scheduledAt is in the past (proposal was old), push to next available slot
+    if (scheduledAt <= now) {
+      console.log(`🏛️ Maximus: Scheduled time ${scheduledAt.toISOString()} is in the past, recalculating...`);
+      const recalculated = this.calculateScheduledAt(decision.sendHour, config.timezone);
+      scheduledAt.setTime(recalculated.getTime());
+    }
 
     // Use the SCHEDULED date for the log (not approval date)
     const scheduledDay = dayNames[scheduledAt.getDay()];
