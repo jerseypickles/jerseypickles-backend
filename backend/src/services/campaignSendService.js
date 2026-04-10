@@ -156,13 +156,9 @@ async function sendCampaign(campaignId) {
           bulkOperations = [];
         }
 
-        // Enqueue chunk
-        if (tempRecipients.length >= ENQUEUE_CHUNK_SIZE) {
-          const { addCampaignToQueue } = require('../jobs/emailQueue');
-          await addCampaignToQueue(tempRecipients, campaignIdStr);
-          tempRecipients = [];
-          await new Promise(resolve => setTimeout(resolve, config.delayBetweenBatches));
-        }
+        // NOTE: We accumulate all recipients and enqueue at the end.
+        // Calling addCampaignToQueue progressively causes duplicate jobIds
+        // because chunkIndex restarts at 0 each call → BullMQ rejects silently.
       }
 
       // Residual bulk write
@@ -175,9 +171,10 @@ async function sendCampaign(campaignId) {
         }
       }
 
-      // Residual enqueue
+      // Enqueue ALL recipients in one call (prevents duplicate jobId issue)
       if (tempRecipients.length > 0) {
         const { addCampaignToQueue } = require('../jobs/emailQueue');
+        console.log(`📤 Enqueueing ${tempRecipients.length} recipients in a single call`);
         await addCampaignToQueue(tempRecipients, campaignIdStr);
       }
 
