@@ -86,6 +86,39 @@ const maximusConfigSchema = new mongoose.Schema({
     discountCreated: { type: Boolean, default: false }
   },
 
+  // Pending weekly plan (awaiting human approval)
+  pendingWeeklyPlan: {
+    active: { type: Boolean, default: false },
+    createdAt: { type: Date },
+    weekLabel: String,
+    campaigns: [{
+      day: String,
+      scheduledAt: Date,
+      status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+      campaignType: { type: String, enum: ['promotional', 'content', 'product_spotlight'] },
+      subjectLine: String,
+      previewText: String,
+      headline: String,
+      product: String,
+      productName: String,
+      contentAngle: String,
+      discountPercent: Number,
+      discountCode: String,
+      listId: { type: mongoose.Schema.Types.ObjectId, ref: 'List' },
+      listName: String,
+      sendHour: Number,
+      imageUrl: String,
+      htmlContent: String,
+      reasoning: {
+        whyThisType: String,
+        whyThisSubject: String,
+        whyThisProduct: String,
+        whyThisList: String,
+        whyThisTime: String
+      }
+    }]
+  },
+
   // Stats
   stats: {
     totalCampaignsSent: { type: Number, default: 0 },

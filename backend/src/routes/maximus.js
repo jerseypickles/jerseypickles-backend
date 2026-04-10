@@ -118,6 +118,87 @@ router.put('/lists', authorize('admin'), async (req, res) => {
   }
 });
 
+// ==================== WEEKLY PLAN ====================
+
+/**
+ * GET /api/maximus/weekly-plan
+ * Get current weekly plan
+ */
+router.get('/weekly-plan', authorize('admin'), async (req, res) => {
+  try {
+    const result = await maximusService.getWeeklyPlan();
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/maximus/propose-week
+ * Generate a full week plan
+ */
+router.post('/propose-week', authorize('admin'), async (req, res) => {
+  try {
+    console.log('🏛️ Maximus: Weekly plan requested from API');
+    const result = await maximusService.generateWeeklyPlan();
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/maximus/weekly-plan/approve-all
+ * Approve all pending campaigns in the weekly plan
+ */
+router.post('/weekly-plan/approve-all', authorize('admin'), async (req, res) => {
+  try {
+    const result = await maximusService.approveAllWeekCampaigns();
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/maximus/weekly-plan/:index/approve
+ * Approve a specific campaign by index
+ */
+router.post('/weekly-plan/:index/approve', authorize('admin'), async (req, res) => {
+  try {
+    const result = await maximusService.approveWeekCampaign(parseInt(req.params.index));
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/maximus/weekly-plan/:index/reject
+ * Reject a specific campaign by index
+ */
+router.post('/weekly-plan/:index/reject', authorize('admin'), async (req, res) => {
+  try {
+    const result = await maximusService.rejectWeekCampaign(parseInt(req.params.index));
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/maximus/weekly-plan/discard
+ * Discard the entire weekly plan
+ */
+router.post('/weekly-plan/discard', authorize('admin'), async (req, res) => {
+  try {
+    const result = await maximusService.discardWeeklyPlan();
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // ==================== CAMPAIGN HISTORY ====================
 
 /**

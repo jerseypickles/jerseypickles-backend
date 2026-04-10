@@ -523,6 +523,390 @@ Respond ONLY with valid JSON:
     };
   }
 
+  // ==================== WEEKLY PLAN SYSTEM ====================
+
+  /**
+   * Generate a full week plan (5 campaigns) for human review
+   */
+  async generateWeeklyPlan() {
+    console.log('\n🏛️ ═══════════════════════════════════════');
+    console.log('   MAXIMUS - Generating Weekly Plan');
+    console.log('═══════════════════════════════════════\n');
+
+    const config = await MaximusConfig.getConfig();
+
+    if (config.pendingWeeklyPlan?.active) {
+      return { success: false, reason: 'pending_weekly_plan_exists' };
+    }
+
+    if (!config.lists || config.lists.length === 0) {
+      return { success: false, reason: 'no_lists' };
+    }
+
+    if (!this.isAvailable()) {
+      return { success: false, reason: 'claude_not_available' };
+    }
+
+    // Gather context
+    const learningData = await this.gatherLearningData();
+    const recentInsights = await this._getRecentInsights();
+
+    const ApolloConfig = require('../models/ApolloConfig');
+    const apolloConfig = await ApolloConfig.getConfig();
+    const availableProducts = apolloConfig.getActiveProducts();
+    const productsInfo = availableProducts.length > 0
+      ? availableProducts.map(p => `- "${p.name}" (slug: ${p.slug}, category: ${p.category})`).join('\n')
+      : '- No products configured yet';
+
+    const listsInfo = config.lists.map(l => `- "${l.name}" (ID: ${l.listId})`).join('\n');
+
+    // Collect used discount codes
+    const existingCampaignTags = await Campaign.find({
+      tags: 'maximus',
+      createdAt: { $gte: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000) }
+    }).select('tags').lean();
+    const usedCodes = existingCampaignTags.flatMap(c => (c.tags || []).filter(t => t === t.toUpperCase() && t.length >= 4 && t.length <= 12));
+    const allUsedCodes = [...new Set(usedCodes)];
+
+    let learningSection = 'No historical data yet (initial phase).';
+    if (learningData.totalCampaigns > 0) {
+      learningSection = `Historical data (${learningData.totalCampaigns} campaigns):
+- Average open rate: ${learningData.avgOpenRate?.toFixed(1)}%
+- Average click rate: ${learningData.avgClickRate?.toFixed(1)}%
+- Total revenue: $${learningData.totalRevenue?.toFixed(0)}
+
+Best performing days:
+${learningData.byDay?.map(d => `  ${d._id}: ${d.avgOpenRate?.toFixed(1)}% opens, ${d.avgClickRate?.toFixed(1)}% clicks (${d.campaigns} campaigns)`).join('\n') || '  No data yet'}
+
+Best performing hours:
+${learningData.byHour?.map(h => `  ${h._id}:00: ${h.avgOpenRate?.toFixed(1)}% opens, ${h.avgClickRate?.toFixed(1)}% clicks (${h.campaigns} campaigns)`).join('\n') || '  No data yet'}
+
+Performance by list:
+${learningData.byList?.map(l => `  "${l.listName}": ${l.avgOpenRate?.toFixed(1)}% opens, ${l.avgClickRate?.toFixed(1)}% clicks (${l.campaigns} campaigns)`).join('\n') || '  No data yet'}`;
+    }
+
+    // Determine next Monday
+    const now = new Date();
+    const dayOfWeek = now.getDay(); // 0=Sun
+    const daysUntilMonday = dayOfWeek === 0 ? 1 : (8 - dayOfWeek);
+    const nextMonday = new Date(now);
+    nextMonday.setDate(now.getDate() + daysUntilMonday);
+    nextMonday.setHours(0, 0, 0, 0);
+
+    const weekDays = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(nextMonday);
+      d.setDate(nextMonday.getDate() + i);
+      const dayName = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][d.getDay()];
+      weekDays.push({ date: d.toISOString().split('T')[0], day: dayName });
+    }
+
+    const weekLabel = `${weekDays[0].date} to ${weekDays[6].date}`;
+
+    const prompt = `You are MAXIMUS, an autonomous email campaign agent for Jersey Pickles - an artisanal pickle and gourmet olive shop from New Jersey.
+
+PLAN THE COMPLETE WEEK: ${weekLabel}
+AVAILABLE DAYS: ${weekDays.map(d => `${d.day} (${d.date})`).join(', ')}
+CAMPAIGNS TO PLAN: ${config.maxCampaignsPerWeek} (pick the best ${config.maxCampaignsPerWeek} days, leave others as rest days)
+SEND WINDOW: ${config.sendWindowStart}:00 - ${config.sendWindowEnd}:00 (${config.timezone})
+
+AVAILABLE LISTS:
+${listsInfo}
+
+AVAILABLE PRODUCTS (for creative):
+${productsInfo}
+
+LEARNING DATA:
+${learningSection}
+
+YOUR MEMORY (lessons from past campaigns):
+${config.memory?.insights?.length > 0 ? config.memory.insights.map(i => `- ${i}`).join('\n') : 'No memories yet — this is early stage.'}
+
+RECENT CAMPAIGN INSIGHTS:
+${recentInsights}
+
+BRAND VOICE:
+- Warm, friendly, artisanal, family-oriented
+- Products: Pickles, Olives, Marinated Mushrooms, Pickled Vegetables, Gift Sets
+- NOT overly commercial - focus on craft and quality
+- Use emojis sparingly (max 1-2 per subject)
+- Keep subjects under 50 characters
+- Preview text should complement the subject, not repeat it
+
+CAMPAIGN TYPES:
+1. "promotional" — Discount offer (15-30% OFF). Use max 1-2x/week. Include discount code.
+2. "content" — Storytelling, recipes, behind the scenes. NO discount. Build brand love.
+3. "product_spotlight" — Feature a product without discount. Highlight quality, craft.
+
+STRATEGY RULES:
+- Balance the week: 1-2 promotional + rest content/spotlight
+- Rotate products — don't feature the same product 2 days in a row
+- Rotate lists — alternate between them
+- Vary send hours to gather learning data
+- Each discount code MUST be unique. Do NOT reuse: ${allUsedCodes.join(', ') || 'none yet'}
+- Pick 2 rest days (no email) — typically the weakest days
+
+Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campaigns:
+[
+  {
+    "day": "<day name>",
+    "date": "<YYYY-MM-DD>",
+    "campaignType": "promotional|content|product_spotlight",
+    "subjectLine": "...",
+    "previewText": "...",
+    "headline": "...",
+    "product": "<product slug>",
+    "productName": "<product full name>",
+    "discountPercent": <number or null>,
+    "discountCode": "<CODE or null>",
+    "contentAngle": "<story angle or null>",
+    "listId": "...",
+    "listName": "...",
+    "sendHour": <number>,
+    "reasoning": {
+      "whyThisType": "...",
+      "whyThisSubject": "...",
+      "whyThisProduct": "...",
+      "whyThisList": "...",
+      "whyThisTime": "..."
+    }
+  }
+]`;
+
+    try {
+      console.log('🏛️ Maximus: Asking Claude for weekly plan...');
+      const response = await this.client.messages.create({
+        model: this.model,
+        max_tokens: 4096,
+        messages: [{ role: 'user', content: prompt }]
+      });
+
+      const content = response.content?.[0]?.text || '';
+      console.log('🏛️ Maximus: Claude response length:', content.length);
+
+      const jsonMatch = content.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) {
+        console.error('🏛️ Maximus: Could not parse weekly plan. Raw:', content.substring(0, 500));
+        return { success: false, reason: 'decision_failed' };
+      }
+
+      let campaigns;
+      try {
+        campaigns = JSON.parse(jsonMatch[0]);
+      } catch (parseErr) {
+        console.error('🏛️ Maximus: JSON parse error:', parseErr.message);
+        return { success: false, reason: 'decision_failed' };
+      }
+
+      if (!Array.isArray(campaigns) || campaigns.length === 0) {
+        console.error('🏛️ Maximus: No campaigns in plan');
+        return { success: false, reason: 'decision_failed' };
+      }
+
+      console.log(`🏛️ Maximus: ${campaigns.length} campaigns planned`);
+
+      // Generate Apollo creatives for each campaign
+      apolloService.init();
+      for (let i = 0; i < campaigns.length; i++) {
+        const c = campaigns[i];
+        console.log(`🏛️ Maximus: [${i + 1}/${campaigns.length}] ${c.day} — ${c.campaignType} — "${c.subjectLine}"`);
+
+        // Calculate scheduledAt
+        const campDate = new Date(c.date + 'T00:00:00');
+        const scheduledAt = new Date(campDate);
+        // Convert sendHour ET to UTC approximately (+4 or +5 depending on DST)
+        const etOffset = 4; // EDT
+        scheduledAt.setUTCHours(c.sendHour + etOffset, 0, 0, 0);
+        campaigns[i].scheduledAt = scheduledAt;
+
+        // Validate list
+        const validList = config.lists.find(l => l.listId.toString() === c.listId);
+        if (!validList) {
+          console.warn(`🏛️ Maximus: Invalid list for ${c.day}, using first list`);
+          campaigns[i].listId = config.lists[0].listId;
+          campaigns[i].listName = config.lists[0].name;
+        }
+
+        // Default type
+        if (!c.campaignType) campaigns[i].campaignType = 'content';
+
+        // Generate creative with Apollo
+        if (apolloService.isAvailable()) {
+          const apolloBrief = {
+            product: c.product,
+            headline: c.headline || c.subjectLine,
+            productName: c.productName,
+            campaignType: c.campaignType
+          };
+          if (c.campaignType === 'promotional') {
+            apolloBrief.discount = `${c.discountPercent}% OFF TODAY ONLY`;
+            apolloBrief.code = c.discountCode;
+          } else {
+            apolloBrief.discount = null;
+            apolloBrief.code = null;
+            apolloBrief.contentAngle = c.contentAngle;
+          }
+
+          const creative = await apolloService.generateCreative(apolloBrief);
+          if (creative.success) {
+            campaigns[i].imageUrl = creative.imageUrl;
+            campaigns[i].htmlContent = apolloService.buildEmailHtml(creative.imageUrl, {
+              headline: c.headline || c.subjectLine,
+              product: c.product,
+              discount: c.campaignType === 'promotional' ? `${c.discountPercent}% OFF` : null,
+              code: c.campaignType === 'promotional' ? c.discountCode : null,
+              campaignType: c.campaignType,
+              contentAngle: c.contentAngle
+            });
+            console.log(`   ✅ Creative generated`);
+          } else {
+            console.warn(`   ⚠️ Apollo failed: ${creative.error}`);
+          }
+        }
+      }
+
+      // Save weekly plan
+      config.pendingWeeklyPlan = {
+        active: true,
+        createdAt: new Date(),
+        weekLabel,
+        campaigns: campaigns.map(c => ({
+          day: c.day,
+          scheduledAt: c.scheduledAt,
+          status: 'pending',
+          campaignType: c.campaignType,
+          subjectLine: c.subjectLine,
+          previewText: c.previewText,
+          headline: c.headline,
+          product: c.product,
+          productName: c.productName,
+          contentAngle: c.contentAngle,
+          discountPercent: c.campaignType === 'promotional' ? c.discountPercent : null,
+          discountCode: c.campaignType === 'promotional' ? c.discountCode : null,
+          listId: c.listId,
+          listName: c.listName,
+          sendHour: c.sendHour,
+          imageUrl: c.imageUrl || null,
+          htmlContent: c.htmlContent || null,
+          reasoning: c.reasoning
+        }))
+      };
+      await config.save();
+
+      console.log(`🏛️ Maximus: ✅ Weekly plan saved (${campaigns.length} campaigns)`);
+
+      return { success: true, plan: config.pendingWeeklyPlan };
+
+    } catch (error) {
+      console.error('🏛️ Maximus: Weekly plan error:', error.message);
+      return { success: false, reason: 'decision_failed', error: error.message };
+    }
+  }
+
+  /**
+   * Get current weekly plan
+   */
+  async getWeeklyPlan() {
+    const config = await MaximusConfig.getConfig();
+    if (!config.pendingWeeklyPlan?.active) {
+      return { exists: false };
+    }
+    return { exists: true, plan: config.pendingWeeklyPlan };
+  }
+
+  /**
+   * Approve a specific campaign in the weekly plan (by index)
+   */
+  async approveWeekCampaign(index) {
+    const config = await MaximusConfig.getConfig();
+    if (!config.pendingWeeklyPlan?.active) {
+      return { success: false, reason: 'no_pending_plan' };
+    }
+
+    const campaign = config.pendingWeeklyPlan.campaigns[index];
+    if (!campaign) {
+      return { success: false, reason: 'invalid_index' };
+    }
+    if (campaign.status !== 'pending') {
+      return { success: false, reason: `already_${campaign.status}` };
+    }
+
+    // Create Shopify discount for promotional
+    if (campaign.campaignType === 'promotional' && campaign.discountCode) {
+      const discountResult = await this.createShopifyDiscount(campaign);
+      if (!discountResult.success) {
+        console.warn(`🏛️ Maximus: Discount failed for ${campaign.day}: ${discountResult.error}`);
+      }
+    }
+
+    // Schedule the campaign
+    await this.scheduleCampaign(config, campaign, campaign.htmlContent, campaign.scheduledAt);
+
+    config.pendingWeeklyPlan.campaigns[index].status = 'approved';
+    await config.save();
+
+    console.log(`🏛️ Maximus: ✅ ${campaign.day} approved — "${campaign.subjectLine}"`);
+    return { success: true, day: campaign.day, subjectLine: campaign.subjectLine };
+  }
+
+  /**
+   * Reject a specific campaign in the weekly plan
+   */
+  async rejectWeekCampaign(index) {
+    const config = await MaximusConfig.getConfig();
+    if (!config.pendingWeeklyPlan?.active) {
+      return { success: false, reason: 'no_pending_plan' };
+    }
+
+    const campaign = config.pendingWeeklyPlan.campaigns[index];
+    if (!campaign) return { success: false, reason: 'invalid_index' };
+
+    config.pendingWeeklyPlan.campaigns[index].status = 'rejected';
+    await config.save();
+
+    console.log(`🏛️ Maximus: ❌ ${campaign.day} rejected — "${campaign.subjectLine}"`);
+    return { success: true, day: campaign.day };
+  }
+
+  /**
+   * Approve ALL pending campaigns in the weekly plan
+   */
+  async approveAllWeekCampaigns() {
+    const config = await MaximusConfig.getConfig();
+    if (!config.pendingWeeklyPlan?.active) {
+      return { success: false, reason: 'no_pending_plan' };
+    }
+
+    const results = [];
+    for (let i = 0; i < config.pendingWeeklyPlan.campaigns.length; i++) {
+      if (config.pendingWeeklyPlan.campaigns[i].status === 'pending') {
+        const result = await this.approveWeekCampaign(i);
+        results.push(result);
+        // Reload config after each save
+        const freshConfig = await MaximusConfig.getConfig();
+        config.pendingWeeklyPlan = freshConfig.pendingWeeklyPlan;
+      }
+    }
+
+    // Clear plan after all processed
+    config.pendingWeeklyPlan = { active: false };
+    await config.save();
+
+    console.log(`🏛️ Maximus: ✅ All campaigns approved (${results.length})`);
+    return { success: true, approved: results.length, results };
+  }
+
+  /**
+   * Discard the entire weekly plan
+   */
+  async discardWeeklyPlan() {
+    const config = await MaximusConfig.getConfig();
+    config.pendingWeeklyPlan = { active: false };
+    await config.save();
+    console.log('🏛️ Maximus: Weekly plan discarded');
+    return { success: true };
+  }
+
   /**
    * Approve the pending proposal → create and schedule the campaign
    */
