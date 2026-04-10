@@ -77,7 +77,8 @@ function generateJobId(campaignId, email) {
 }
 
 function generateBatchJobId(campaignId, chunkIndex) {
-  return `batch_${campaignId}_${chunkIndex}`;
+  // Include timestamp so re-runs don't collide with previous runs
+  return `batch_${campaignId}_${Date.now()}_${chunkIndex}`;
 }
 
 // ========== INICIALIZACIÓN ==========
