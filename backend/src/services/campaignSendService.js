@@ -89,6 +89,16 @@ async function sendCampaign(campaignId) {
       const list = await List.findById(listId).select('members');
       const memberIds = list?.members || [];
 
+      // Load emails already sent or in-flight to skip duplicates on re-runs
+      const alreadyProcessed = await EmailSend.find({
+        campaignId: campaignIdStr,
+        status: { $in: ['sent', 'delivered', 'skipped', 'bounced', 'processing', 'sending'] }
+      }).select('recipientEmail').lean();
+      const alreadyProcessedSet = new Set(alreadyProcessed.map(e => e.recipientEmail.toLowerCase().trim()));
+      if (alreadyProcessedSet.size > 0) {
+        console.log(`⏭️  Skipping ${alreadyProcessedSet.size} recipients already processed (re-run)`);
+      }
+
       const cursor = Customer
         .find({ _id: { $in: memberIds } })
         .select('email firstName lastName _id')
@@ -105,6 +115,12 @@ async function sendCampaign(campaignId) {
           continue;
         }
         seenEmails.add(emailKey);
+
+        // Skip if already processed in a previous run
+        if (alreadyProcessedSet.has(normalizedEmail)) {
+          skippedDuplicates++;
+          continue;
+        }
 
         const jobId = generateJobId(campaignIdStr, normalizedEmail);
 
