@@ -300,6 +300,39 @@ router.post('/proposal/reject', authorize('admin'), async (req, res) => {
 });
 
 /**
+ * POST /api/maximus/campaigns/:id/send-now
+ * Force send a scheduled campaign immediately
+ */
+router.post('/campaigns/:id/send-now', authorize('admin'), async (req, res) => {
+  try {
+    const log = await MaximusCampaignLog.findById(req.params.id);
+    if (!log) {
+      return res.status(404).json({ error: 'Campaign log not found' });
+    }
+
+    const Campaign = require('../models/Campaign');
+    const campaign = await Campaign.findById(log.campaign);
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+
+    if (campaign.status !== 'scheduled') {
+      return res.status(400).json({ error: `Cannot send campaign with status: ${campaign.status}` });
+    }
+
+    // Set scheduledAt to now — schedulerJob picks it up within 1 minute
+    campaign.scheduledAt = new Date();
+    await campaign.save();
+
+    console.log(`🏛️ Maximus: Campaign "${campaign.name}" set to send NOW`);
+    res.json({ success: true, message: 'Campaign will send within 1 minute', campaignId: campaign._id });
+  } catch (error) {
+    console.error('Maximus send-now error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * POST /api/maximus/campaigns/:id/cancel
  * Cancel a Maximus campaign (deletes Campaign + MaximusCampaignLog)
  */
