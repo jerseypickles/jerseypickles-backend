@@ -303,6 +303,23 @@ ${learningData.totalCampaigns < 7 ? 'LEARNING PHASE: Try different types, hours,
 
 DO NOT repeat a subject line used this week.
 
+═══════════════════════════════════════
+CONTENT CAMPAIGNS — EDITORIAL FORMAT
+═══════════════════════════════════════
+If you choose campaignType = "content", you MUST also write:
+- "storyBody": 2-3 paragraphs of REAL story content (200-400 words total). This is the actual story that will appear in the email body — not a teaser. Write it fully, with sensory detail, place, craft, and human moments. Think New Yorker / food magazine, not blog post intro.
+- "pullQuote": One memorable sentence from the story (max 120 chars) that will be displayed as a stylized pull quote.
+- The story must feature ${product?.name || 'the chosen product'} authentically — its ingredients, its making, its taste, its place in a New Jersey home.
+
+Story tone: warm, personal, sensory. Show don't tell. No marketing fluff.
+
+Example storyBody:
+"Every Thursday morning, the kitchen at 12 Pine Street fills with the sharp green scent of fresh dill. My grandmother taught me to listen for the brine — when it sings against the glass, you know the pickles are ready. We've been doing it the same way for three generations now: small batches, hand-packed, never rushed.
+
+The tomatoes come in at the peak of summer, still warm from the field. We slice them thick, salt them gently, and let the magic happen overnight. By morning, what was a humble vegetable has become something else entirely — bold, tangy, alive.
+
+This isn't food made by machines. It's food made by people who care."
+
 Respond ONLY with valid JSON:
 {
   "campaignType": "promotional|content|product_spotlight",
@@ -313,7 +330,9 @@ Respond ONLY with valid JSON:
   "productName": "<product full name>",
   "discountPercent": <number 15-30 or null if not promotional>,
   "discountCode": "<SHORT_CODE or null if not promotional>",
-  "contentAngle": "<only for content/spotlight: what story or angle to use>",
+  "contentAngle": "<short angle description, all types>",
+  "storyBody": "<ONLY for content type: 2-3 paragraphs, 200-400 words, real story>",
+  "pullQuote": "<ONLY for content type: one memorable sentence, max 120 chars>",
   "listId": "...",
   "listName": "...",
   "sendHour": <number>,
@@ -330,7 +349,7 @@ Respond ONLY with valid JSON:
       console.log('🏛️ Maximus: Asking Claude for decision...');
       const response = await this.client.messages.create({
         model: this.model,
-        max_tokens: 1024,
+        max_tokens: 2048,
         messages: [{ role: 'user', content: prompt }]
       });
 
@@ -466,10 +485,13 @@ Respond ONLY with valid JSON:
         htmlContent = apolloService.buildEmailHtml(creative.imageUrl, {
           headline: decision.headline || decision.subjectLine,
           product: decision.product,
+          productName: decision.productName,
           discount: decision.campaignType === 'promotional' ? `${decision.discountPercent}% OFF` : null,
           code: decision.campaignType === 'promotional' ? decision.discountCode : null,
           campaignType: decision.campaignType,
-          contentAngle: decision.contentAngle
+          contentAngle: decision.contentAngle,
+          storyBody: decision.storyBody,
+          pullQuote: decision.pullQuote
         });
         console.log(`🏛️ Maximus: ✅ Creative received from Apollo`);
       } else {
@@ -496,6 +518,8 @@ Respond ONLY with valid JSON:
         product: decision.product,
         productName: decision.productName,
         contentAngle: decision.contentAngle,
+        storyBody: decision.campaignType === 'content' ? decision.storyBody : null,
+        pullQuote: decision.campaignType === 'content' ? decision.pullQuote : null,
         discountPercent: decision.campaignType === 'promotional' ? decision.discountPercent : null,
         discountCode: decision.campaignType === 'promotional' ? decision.discountCode : null,
         listId: decision.listId,
@@ -649,6 +673,11 @@ STRATEGY RULES:
 - Each discount code MUST be unique. Do NOT reuse: ${allUsedCodes.join(', ') || 'none yet'}
 - Pick 2 rest days (no email) — typically the weakest days
 
+CONTENT CAMPAIGNS — EDITORIAL FORMAT:
+For any campaign with campaignType = "content", you MUST include:
+- "storyBody": 2-3 paragraphs of REAL story content (200-400 words). The actual story body for the email — sensory, personal, warm. Show the product through human moments, not marketing speak.
+- "pullQuote": one memorable sentence (max 120 chars) that will be displayed as a stylized pull quote.
+
 Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campaigns:
 [
   {
@@ -662,7 +691,9 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
     "productName": "<product full name>",
     "discountPercent": <number or null>,
     "discountCode": "<CODE or null>",
-    "contentAngle": "<story angle or null>",
+    "contentAngle": "<short angle, all types>",
+    "storyBody": "<REQUIRED for content type, 200-400 words, null otherwise>",
+    "pullQuote": "<REQUIRED for content type, max 120 chars, null otherwise>",
     "listId": "...",
     "listName": "...",
     "sendHour": <number>,
@@ -680,7 +711,7 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
       console.log('🏛️ Maximus: Asking Claude for weekly plan...');
       const response = await this.client.messages.create({
         model: this.model,
-        max_tokens: 4096,
+        max_tokens: 8192,
         messages: [{ role: 'user', content: prompt }]
       });
 
@@ -756,10 +787,13 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
             campaigns[i].htmlContent = apolloService.buildEmailHtml(creative.imageUrl, {
               headline: c.headline || c.subjectLine,
               product: c.product,
+              productName: c.productName,
               discount: c.campaignType === 'promotional' ? `${c.discountPercent}% OFF` : null,
               code: c.campaignType === 'promotional' ? c.discountCode : null,
               campaignType: c.campaignType,
-              contentAngle: c.contentAngle
+              contentAngle: c.contentAngle,
+              storyBody: c.storyBody,
+              pullQuote: c.pullQuote
             });
             console.log(`   ✅ Creative generated`);
           } else {
@@ -784,6 +818,8 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
           product: c.product,
           productName: c.productName,
           contentAngle: c.contentAngle,
+          storyBody: c.campaignType === 'content' ? c.storyBody : null,
+          pullQuote: c.campaignType === 'content' ? c.pullQuote : null,
           discountPercent: c.campaignType === 'promotional' ? c.discountPercent : null,
           discountCode: c.campaignType === 'promotional' ? c.discountCode : null,
           listId: c.listId,

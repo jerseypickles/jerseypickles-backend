@@ -284,21 +284,26 @@ FOOTER: Dark green bar. "www.jerseypickles.com" small pickle icons on each side.
 RULES: Single jar only (the EXACT one from the reference photo), no duplicates, no text outside overlay zones, hyperrealistic premium lifestyle food photography, 8K, 9:16 vertical.`;
 
     } else if (type === 'content') {
-      return `${baseScene}
+      // Editorial content style — TALL 9:21 aspect ratio, NO overlay text, NO buttons
+      // The image is pure editorial photography. The story text lives in the email HTML body.
+      return `ASPECT RATIO: 9:21 ultra-tall vertical portrait, editorial magazine cover style.
 
-TOP OVERLAY TEXT (warm white bold serif):
-"${brief.headline}"
-Below, small italic white text: "Jersey Pickles — ${product.name}"
+CRITICAL: You MUST use the reference product photo provided above as the EXACT jar in this image. Reproduce the jar's label, shape, glass color, lid, and proportions with 100% fidelity. Do NOT create a different jar or modify the label design.
 
-MIDDLE: Let the lifestyle scene breathe. The jar and food setting should tell a story. Warm, inviting, artisanal feel. No discount text, no codes. This is about the experience, not a sale.
+EDITORIAL STORYTELLING SHOT for a food magazine cover. NO text overlays, NO buttons, NO discount labels, NO logos, NO words anywhere on the image. Pure photography only.
 
-BOTTOM: Semi-transparent dark green gradient overlay.
-Small elegant white text: "${brief.contentAngle || 'Handcrafted in New Jersey'}"
-Bright green rounded pill button: "READ MORE"
+SCENE: ${scene}.
+LIGHTING: ${lighting}.
+COLOR PALETTE: ${palette}.
+COMPOSITION: ${composition}, with negative space and breathing room. Vertical scroll-style framing — tall and immersive.
 
-FOOTER: Dark green bar. "www.jerseypickles.com" small pickle icons on each side.
+VISUAL STORY: The EXACT jar from the reference photo as the hero, surrounded by complementary fresh ingredients that suggest the product's story (origin, craft, ingredients, kitchen ritual). Hands of a craftsman or natural human elements may appear subtly. Evoke a sense of place — a New Jersey artisan kitchen, slow food, multi-generational tradition. Premium editorial food photography, magazine-cover quality, hyperrealistic, 8K.
 
-RULES: Single jar only (the EXACT one from the reference photo), no duplicates, warm storytelling mood, NO discount text, NO codes, hyperrealistic premium lifestyle food photography, 8K, 9:16 vertical.`;
+${product.promptHints || ''}
+
+ABSOLUTELY NO TEXT IN THE IMAGE. No headlines, no captions, no logos, no buttons, no overlays. The story will be told in the email body text — your job is to create the visual hero only.
+
+RULES: Single jar only (the EXACT one from the reference photo), no duplicates, no text of any kind anywhere on the canvas, ultra-tall 9:21 editorial format, hyperrealistic premium food magazine photography, 8K.`;
 
     } else {
       // product_spotlight
@@ -348,9 +353,16 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
    */
   buildEmailHtml(imageUrl, brief) {
     const type = brief.campaignType || 'promotional';
-    const ctaText = type === 'content' ? 'READ MORE' : 'SHOP NOW';
-    const ctaUrl = type === 'content'
-      ? 'https://jerseypickles.com/blogs'
+
+    // Content campaigns get an editorial layout with story body + pull quote
+    if (type === 'content') {
+      return this.buildContentEmailHtml(imageUrl, brief);
+    }
+
+    // Promo and spotlight share the simple image + CTA layout
+    const ctaText = 'SHOP NOW';
+    const ctaUrl = brief.product
+      ? `https://jerseypickles.com/products/${brief.product}`
       : 'https://jerseypickles.com';
 
     return `<!DOCTYPE html>
@@ -377,6 +389,103 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
     <tr>
       <td style="padding:16px 24px;text-align:center;background-color:#122016;color:#a2b6aa;font-size:11px;line-height:1.5;">
         <p style="margin:0 0 8px;">Jersey Pickles — Fresh, bold, and stadium-ready</p>
+        <p style="margin:0;">
+          <a href="{{unsubscribeLink}}" style="color:#6eb489;text-decoration:underline;">Unsubscribe</a>
+        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+  }
+
+  /**
+   * Editorial HTML layout for content-type campaigns
+   * Tall image hero + headline + story body + pull quote + soft CTA to product page
+   */
+  buildContentEmailHtml(imageUrl, brief) {
+    const productSlug = brief.product || '';
+    const productName = brief.productName || brief.product || 'our pickles';
+    const ctaUrl = productSlug
+      ? `https://jerseypickles.com/products/${productSlug}`
+      : 'https://jerseypickles.com';
+    const ctaText = `Shop ${productName}`;
+
+    // Format story body — split paragraphs by double newline or single newline
+    const storyParagraphs = (brief.storyBody || '')
+      .split(/\n\n+|\n/)
+      .map(p => p.trim())
+      .filter(p => p.length > 0);
+
+    const storyHtml = storyParagraphs
+      .map(p => `<p style="margin:0 0 18px;font-family:Georgia,'Times New Roman',serif;font-size:17px;line-height:1.7;color:#3a3a3a;">${p}</p>`)
+      .join('\n          ');
+
+    const pullQuoteHtml = brief.pullQuote ? `
+        <tr>
+          <td style="padding:8px 32px 32px;">
+            <blockquote style="margin:0;padding:24px 28px;border-left:4px solid #d4a843;background-color:#fdf8ef;font-family:Georgia,'Times New Roman',serif;font-size:20px;font-style:italic;line-height:1.5;color:#1a3d17;">
+              "${brief.pullQuote}"
+            </blockquote>
+          </td>
+        </tr>` : '';
+
+    return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${brief.headline}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f5f1e8;font-family:Georgia,'Times New Roman',serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:600px;margin:0 auto;background-color:#ffffff;">
+
+    <!-- HERO TALL IMAGE -->
+    <tr>
+      <td style="padding:0;background-color:#0a0e17;">
+        <img src="${imageUrl}" alt="${brief.headline}" width="600" style="display:block;width:100%;height:auto;border:0;" />
+      </td>
+    </tr>
+
+    <!-- HEADLINE -->
+    <tr>
+      <td style="padding:36px 32px 8px;">
+        <h1 style="margin:0;font-family:Georgia,'Times New Roman',serif;font-size:30px;line-height:1.25;font-weight:700;color:#1a3d17;letter-spacing:-0.01em;">
+          ${brief.headline}
+        </h1>
+      </td>
+    </tr>
+
+    <!-- KICKER / DATELINE -->
+    <tr>
+      <td style="padding:0 32px 24px;">
+        <p style="margin:0;font-family:Arial,sans-serif;font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:#a67c1e;font-weight:700;">
+          Jersey Pickles · ${productName}
+        </p>
+      </td>
+    </tr>
+
+    <!-- STORY BODY -->
+    <tr>
+      <td style="padding:0 32px 8px;">
+        ${storyHtml || '<p style="font-family:Georgia,serif;font-size:17px;color:#3a3a3a;">A story worth telling — handcrafted with love in New Jersey.</p>'}
+      </td>
+    </tr>
+    ${pullQuoteHtml}
+
+    <!-- CTA -->
+    <tr>
+      <td style="padding:8px 32px 40px;text-align:center;">
+        <a href="${ctaUrl}" target="_blank" style="display:inline-block;background-color:#1a3d17;color:#ffffff;text-decoration:none;padding:16px 40px;border-radius:4px;font-family:Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;">
+          ${ctaText} →
+        </a>
+      </td>
+    </tr>
+
+    <!-- FOOTER -->
+    <tr>
+      <td style="padding:24px 32px;text-align:center;background-color:#122016;color:#a2b6aa;font-family:Arial,sans-serif;font-size:11px;line-height:1.6;">
+        <p style="margin:0 0 8px;">Jersey Pickles — Handcrafted in New Jersey since 2014</p>
         <p style="margin:0;">
           <a href="{{unsubscribeLink}}" style="color:#6eb489;text-decoration:underline;">Unsubscribe</a>
         </p>
