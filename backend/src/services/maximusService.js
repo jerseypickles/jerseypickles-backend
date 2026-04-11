@@ -264,16 +264,27 @@ BRAND VOICE:
 - Keep subjects under 50 characters
 - Preview text should complement the subject, not repeat it
 
+CRITICAL SUBJECT RULES — DO NOT BREAK THESE:
+- ❌ NEVER use date-specific urgency: "before Sunday", "today only", "ends tonight", "this weekend", "last chance Friday"
+  → Reason: Discount codes are valid for 7 FULL DAYS from creation, NOT until the day you mention.
+  → Saying "before Sunday" creates confusion + false urgency.
+- ❌ NEVER name a specific weekday in subject lines (Monday, Tuesday, etc.)
+  → Reason: Campaigns may be sent on a different day than planned, making the subject stale.
+- ✅ DO use generic urgency: "limited time", "while it lasts", "grab it now", "this week only" (week = 7 days)
+- ✅ DO use product-driven hooks: "Crunchy & addictive", "Made with love", "Bold and tangy"
+- ✅ DO use curiosity: "The story behind...", "Meet our...", "Why our pickles are different"
+
 CAMPAIGN TYPES — you MUST choose one:
 
 1. "promotional" — Discount offer (15-30% OFF). Use max 1-2x/week. Include discount code.
-   Example subjects: "20% OFF Hot Tomatoes today only", "Your weekend pickle deal 🥒"
+   ✅ Good subjects: "20% off our Hot Tomatoes 🌶️", "Crunchy, tangy, on sale", "Bold flavor, sweet deal"
+   ❌ Bad subjects: "20% off before Sunday", "Saturday flash sale", "Today only — pickle deal"
 
 2. "content" — Storytelling, recipes, behind the scenes. NO discount. Build brand love & engagement.
-   Example subjects: "The secret behind our Hot Tomatoes", "3 ways to enjoy pickles this weekend"
+   ✅ Good subjects: "The secret behind our Hot Tomatoes", "3 ways to enjoy pickles", "Inside our New Jersey kitchen"
 
-3. "product_spotlight" — Feature a product without discount. Highlight quality, craft, ingredients. Link to shop.
-   Example subjects: "Meet our Hot Tomatoes 🍅", "Why our olives are different"
+3. "product_spotlight" — Feature a product without discount. Highlight quality, craft, ingredients.
+   ✅ Good subjects: "Meet our Hot Tomatoes 🍅", "Why our olives are different", "Small batch, big flavor"
 
 STRATEGY: Balance your week. Don't send 5 promos — mix it up. Ideal week: 1-2 promotional + 2-3 content/spotlight.
 If you already sent a promo this week, strongly prefer content or spotlight.
@@ -616,8 +627,17 @@ BRAND VOICE:
 - Keep subjects under 50 characters
 - Preview text should complement the subject, not repeat it
 
+CRITICAL SUBJECT RULES — DO NOT BREAK THESE:
+- ❌ NEVER use date-specific urgency: "before Sunday", "today only", "ends tonight", "this weekend", "last chance Friday"
+  → Discount codes are valid for 7 FULL DAYS, NOT until the day you mention.
+- ❌ NEVER name a specific weekday in subject lines (Monday, Tuesday, etc.)
+  → Plans may shift days. Subjects must be evergreen.
+- ✅ DO use: "limited time", "while it lasts", "this week only" (week = 7 days)
+- ✅ DO use product hooks: "Crunchy & addictive", "Bold and tangy", "Made with love"
+- ✅ DO use curiosity: "The story behind...", "Meet our...", "Why our pickles..."
+
 CAMPAIGN TYPES:
-1. "promotional" — Discount offer (15-30% OFF). Use max 1-2x/week. Include discount code.
+1. "promotional" — Discount offer (15-30% OFF). Include discount code. NO date-specific urgency in subject.
 2. "content" — Storytelling, recipes, behind the scenes. NO discount. Build brand love.
 3. "product_spotlight" — Feature a product without discount. Highlight quality, craft.
 
