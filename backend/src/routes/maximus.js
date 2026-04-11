@@ -135,13 +135,56 @@ router.get('/weekly-plan', authorize('admin'), async (req, res) => {
 
 /**
  * POST /api/maximus/propose-week
- * Generate a full week plan
+ * Generate a full week plan (background — Apollo can take 2-3 min)
  */
 router.post('/propose-week', authorize('admin'), async (req, res) => {
   try {
     console.log('🏛️ Maximus: Weekly plan requested from API');
-    const result = await maximusService.generateWeeklyPlan();
-    res.json(result);
+
+    // Quick validation before kicking off background work
+    const config = await MaximusConfig.getConfig();
+    if (config.pendingWeeklyPlan?.active) {
+      return res.json({ success: false, reason: 'pending_weekly_plan_exists' });
+    }
+    if (!config.lists || config.lists.length === 0) {
+      return res.json({ success: false, reason: 'no_lists' });
+    }
+
+    // Mark as "generating" so the frontend can poll
+    config.pendingWeeklyPlan = {
+      active: true,
+      generating: true,
+      createdAt: new Date(),
+      weekLabel: 'Generating...',
+      campaigns: []
+    };
+    await config.save();
+
+    // Respond immediately so HTTP doesn't time out
+    res.json({
+      success: true,
+      generating: true,
+      message: 'Weekly plan generation started. Poll /weekly-plan to see progress.'
+    });
+
+    // Run in background
+    setImmediate(async () => {
+      try {
+        const result = await maximusService.generateWeeklyPlan({ skipPendingCheck: true });
+        if (!result.success) {
+          // Clear the placeholder so user can retry
+          const c = await MaximusConfig.getConfig();
+          c.pendingWeeklyPlan = { active: false };
+          await c.save();
+          console.error('🏛️ Maximus: Weekly plan generation failed:', result.reason, result.detail || '');
+        }
+      } catch (err) {
+        console.error('🏛️ Maximus: Weekly plan background error:', err.message);
+        const c = await MaximusConfig.getConfig();
+        c.pendingWeeklyPlan = { active: false };
+        await c.save();
+      }
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

@@ -91,6 +91,7 @@ const maximusConfigSchema = new mongoose.Schema({
   // Pending weekly plan (awaiting human approval)
   pendingWeeklyPlan: {
     active: { type: Boolean, default: false },
+    generating: { type: Boolean, default: false },
     createdAt: { type: Date },
     weekLabel: String,
     campaigns: [{

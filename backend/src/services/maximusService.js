@@ -546,14 +546,15 @@ Respond ONLY with valid JSON:
   /**
    * Generate a full week plan (5 campaigns) for human review
    */
-  async generateWeeklyPlan() {
+  async generateWeeklyPlan(opts = {}) {
     console.log('\n🏛️ ═══════════════════════════════════════');
     console.log('   MAXIMUS - Generating Weekly Plan');
     console.log('═══════════════════════════════════════\n');
 
     const config = await MaximusConfig.getConfig();
 
-    if (config.pendingWeeklyPlan?.active) {
+    // Skip the pending check if called from background after route already set placeholder
+    if (!opts.skipPendingCheck && config.pendingWeeklyPlan?.active) {
       return { success: false, reason: 'pending_weekly_plan_exists' };
     }
 
@@ -709,19 +710,30 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
 
     try {
       console.log('🏛️ Maximus: Asking Claude for weekly plan...');
+      console.log('🏛️ Maximus: Prompt length:', prompt.length, 'chars');
+      const claudeStart = Date.now();
       const response = await this.client.messages.create({
         model: this.model,
         max_tokens: 8192,
         messages: [{ role: 'user', content: prompt }]
       });
+      console.log(`🏛️ Maximus: Claude responded in ${((Date.now() - claudeStart) / 1000).toFixed(1)}s`);
 
       const content = response.content?.[0]?.text || '';
-      console.log('🏛️ Maximus: Claude response length:', content.length);
+      console.log('🏛️ Maximus: Claude response length:', content.length, 'chars');
+      console.log('🏛️ Maximus: Stop reason:', response.stop_reason);
+      console.log('🏛️ Maximus: Usage:', JSON.stringify(response.usage));
+
+      if (response.stop_reason === 'max_tokens') {
+        console.error('🏛️ Maximus: Response was TRUNCATED (max_tokens hit). Need higher limit or shorter content.');
+      }
 
       const jsonMatch = content.match(/\[[\s\S]*\]/);
       if (!jsonMatch) {
-        console.error('🏛️ Maximus: Could not parse weekly plan. Raw:', content.substring(0, 500));
-        return { success: false, reason: 'decision_failed' };
+        console.error('🏛️ Maximus: Could not find JSON array in response');
+        console.error('🏛️ Maximus: First 1000 chars:', content.substring(0, 1000));
+        console.error('🏛️ Maximus: Last 500 chars:', content.substring(Math.max(0, content.length - 500)));
+        return { success: false, reason: 'decision_failed', detail: 'no_json_array' };
       }
 
       let campaigns;
@@ -729,12 +741,13 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
         campaigns = JSON.parse(jsonMatch[0]);
       } catch (parseErr) {
         console.error('🏛️ Maximus: JSON parse error:', parseErr.message);
-        return { success: false, reason: 'decision_failed' };
+        console.error('🏛️ Maximus: JSON snippet around error (first 1500):', jsonMatch[0].substring(0, 1500));
+        return { success: false, reason: 'decision_failed', detail: 'json_parse_error', error: parseErr.message };
       }
 
       if (!Array.isArray(campaigns) || campaigns.length === 0) {
-        console.error('🏛️ Maximus: No campaigns in plan');
-        return { success: false, reason: 'decision_failed' };
+        console.error('🏛️ Maximus: No campaigns in parsed plan, type:', typeof campaigns, 'length:', campaigns?.length);
+        return { success: false, reason: 'decision_failed', detail: 'empty_plan' };
       }
 
       console.log(`🏛️ Maximus: ${campaigns.length} campaigns planned`);
