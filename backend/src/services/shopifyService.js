@@ -478,7 +478,7 @@ async createSmsDiscount(code, percentOff = 15, expirationDays = 30) {
   try {
     const endsAt = new Date();
     endsAt.setDate(endsAt.getDate() + expirationDays);
-    
+
     // 1. Crear Price Rule
     const priceRule = await this.createPriceRule({
       title: `SMS Welcome - ${code}`,
@@ -493,17 +493,17 @@ async createSmsDiscount(code, percentOff = 15, expirationDays = 30) {
       starts_at: new Date().toISOString(),
       ends_at: endsAt.toISOString()
     });
-    
+
     // 2. Crear Discount Code
     const discountCode = await this.createDiscountCode(priceRule.id, code);
-    
+
     return {
       success: true,
       priceRuleId: priceRule.id.toString(),
       discountCodeId: discountCode.id.toString(),
       code: code
     };
-    
+
   } catch (error) {
     console.error('❌ Error creating SMS discount:', error.message);
     return {
@@ -511,6 +511,49 @@ async createSmsDiscount(code, percentOff = 15, expirationDays = 30) {
       error: error.message
     };
   }
+  }
+
+  /**
+   * Create a campaign discount code (unlimited uses, 1 per customer)
+   * Used by Maximus for email campaigns sent to thousands of people
+   */
+  async createCampaignDiscount(code, percentOff = 20, expirationDays = 7) {
+    try {
+      const endsAt = new Date();
+      endsAt.setDate(endsAt.getDate() + expirationDays);
+
+      // Price rule WITHOUT usage_limit — anyone can use it, but only once per customer
+      const priceRule = await this.createPriceRule({
+        title: `Maximus Campaign - ${code}`,
+        target_type: 'line_item',
+        target_selection: 'all',
+        allocation_method: 'across',
+        value_type: 'percentage',
+        value: `-${percentOff}`,
+        customer_selection: 'all',
+        once_per_customer: true,
+        starts_at: new Date().toISOString(),
+        ends_at: endsAt.toISOString()
+      });
+
+      const discountCode = await this.createDiscountCode(priceRule.id, code);
+
+      console.log(`🏛️ Campaign discount created: ${code} (${percentOff}% OFF, unlimited uses, 1 per customer, expires ${expirationDays} days)`);
+
+      return {
+        success: true,
+        priceRuleId: priceRule.id.toString(),
+        discountCodeId: discountCode.id.toString(),
+        code: code
+      };
+
+    } catch (error) {
+      console.error('❌ Error creating campaign discount:', error.message);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
   }
 
   /**

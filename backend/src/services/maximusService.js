@@ -1093,7 +1093,7 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
         return { success: false, error: 'Shopify service not available' };
       }
 
-      const result = await shopify.createSmsDiscount(
+      const result = await shopify.createCampaignDiscount(
         decision.discountCode,
         decision.discountPercent,
         7 // expires in 7 days
