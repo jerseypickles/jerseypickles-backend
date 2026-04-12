@@ -270,6 +270,8 @@ CRITICAL SUBJECT RULES — DO NOT BREAK THESE:
   → Saying "before Sunday" creates confusion + false urgency.
 - ❌ NEVER name a specific weekday in subject lines (Monday, Tuesday, etc.)
   → Reason: Campaigns may be sent on a different day than planned, making the subject stale.
+- ❌ NEVER put weekday abbreviations in discount codes (SAT, FRI, MON, TUE, etc.)
+  → Codes must be product-based: PICKLE20, HOTTOM25, CRUNCH15 — NOT CRUNCH20SAT
 - ✅ DO use generic urgency: "limited time", "while it lasts", "grab it now", "this week only" (week = 7 days)
 - ✅ DO use product-driven hooks: "Crunchy & addictive", "Made with love", "Bold and tangy"
 - ✅ DO use curiosity: "The story behind...", "Meet our...", "Why our pickles are different"
@@ -657,6 +659,8 @@ CRITICAL SUBJECT RULES — DO NOT BREAK THESE:
   → Discount codes are valid for 7 FULL DAYS, NOT until the day you mention.
 - ❌ NEVER name a specific weekday in subject lines (Monday, Tuesday, etc.)
   → Plans may shift days. Subjects must be evergreen.
+- ❌ NEVER put weekday abbreviations in discount codes (SAT, FRI, MON, etc.)
+  → Codes must be product-based: PICKLE20, HOTTOM25, CRUNCH15 — NOT CRUNCH20SAT
 - ✅ DO use: "limited time", "while it lasts", "this week only" (week = 7 days)
 - ✅ DO use product hooks: "Crunchy & addictive", "Bold and tangy", "Made with love"
 - ✅ DO use curiosity: "The story behind...", "Meet our...", "Why our pickles..."
