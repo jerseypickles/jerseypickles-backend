@@ -180,7 +180,7 @@ class MaximusService {
     const listsInfo = config.lists.map(l => `- "${l.name}" (ID: ${l.listId})`).join('\n');
 
     const recentCampaigns = campaignsThisWeek.map(c =>
-      `- "${c.subjectLine}" → List: ${c.listName}, Day: ${c.sentDay}, Hour: ${c.sentHour}:00, Open: ${c.metrics.openRate}%, Click: ${c.metrics.clickRate}%`
+      `- [${c.campaignType || 'unknown'}] "${c.subjectLine}" → Product: ${c.productName || 'unknown'}, List: ${c.listName}, Day: ${c.sentDay} ${c.sentHour}:00, Archetype: ${c.contentArchetype || 'n/a'}, Headline: "${c.headline || 'n/a'}", Open: ${c.metrics.openRate}%, Click: ${c.metrics.clickRate}%`
     ).join('\n') || 'No campaigns sent this week yet.';
 
     let learningSection = 'No historical data yet (initial phase).';
@@ -280,16 +280,24 @@ CAMPAIGN TYPES — you MUST choose one:
 
 1. "promotional" — Discount offer (15-30% OFF). Use max 1-2x/week. Include discount code.
    ✅ Good subjects: "20% off our Hot Tomatoes 🌶️", "Crunchy, tangy, on sale", "Bold flavor, sweet deal"
-   ❌ Bad subjects: "20% off before Sunday", "Saturday flash sale", "Today only — pickle deal"
 
-2. "content" — Storytelling, recipes, behind the scenes. NO discount. Build brand love & engagement.
-   ✅ Good subjects: "The secret behind our Hot Tomatoes", "3 ways to enjoy pickles", "Inside our New Jersey kitchen"
+2. "content" — Storytelling, recipes, education. NO discount. Build brand love & engagement.
+   You MUST pick a DIFFERENT content archetype each time — NEVER repeat the same archetype used this week:
+     a) RECIPE — "3 ways to enjoy Hot Tomatoes", "The perfect pickle charcuterie board"
+     b) ORIGIN STORY — "How we started in New Jersey", "The secret behind our brine"
+     c) BEHIND THE SCENES — "Inside our kitchen on packing day", "A day in the life at Jersey Pickles"
+     d) TIPS / EDUCATION — "How to store pickles for max crunch", "5 foods that pair with pickles"
+     e) SEASONAL — "Summer grilling with pickles", "Holiday entertaining ideas"
+     f) CUSTOMER LOVE — "Why fans can't stop ordering", "Real reviews, real pickle lovers"
+     g) PAIRING GUIDE — "What to eat with Hot Tomatoes", "Pickle & cheese — the duo you need"
+   Specify your chosen archetype in "contentArchetype" field.
 
 3. "product_spotlight" — Feature a product without discount. Highlight quality, craft, ingredients.
    ✅ Good subjects: "Meet our Hot Tomatoes 🍅", "Why our olives are different", "Small batch, big flavor"
 
 STRATEGY: Balance your week. Don't send 5 promos — mix it up. Ideal week: 1-2 promotional + 2-3 content/spotlight.
 If you already sent a promo this week, strongly prefer content or spotlight.
+NEVER repeat the same content archetype, product, or subject angle used in recent campaigns (see history below).
 
 YOUR TASK:
 1. Choose campaign type (promotional, content, or product_spotlight)
@@ -333,6 +341,7 @@ Respond ONLY with valid JSON:
   "discountPercent": <number 15-30 or null if not promotional>,
   "discountCode": "<SHORT_CODE or null if not promotional>",
   "contentAngle": "<short angle description, all types>",
+  "contentArchetype": "<ONLY for content: recipe|origin_story|behind_the_scenes|tips|seasonal|customer_love|pairing_guide>",
   "storyBody": "<ONLY for content type: 2-3 paragraphs, 200-400 words, real story>",
   "pullQuote": "<ONLY for content type: one memorable sentence, max 120 chars>",
   "listId": "...",
@@ -667,7 +676,15 @@ CRITICAL SUBJECT RULES — DO NOT BREAK THESE:
 
 CAMPAIGN TYPES:
 1. "promotional" — Discount offer (15-30% OFF). Include discount code. NO date-specific urgency in subject.
-2. "content" — Storytelling, recipes, behind the scenes. NO discount. Build brand love.
+2. "content" — NO discount. Build brand love. You MUST pick a DIFFERENT archetype each time:
+   a) RECIPE — "3 ways to enjoy Hot Tomatoes", "The perfect pickle board"
+   b) ORIGIN STORY — "How we started in NJ", "The secret behind our brine"
+   c) BEHIND THE SCENES — "Inside our kitchen on packing day"
+   d) TIPS / EDUCATION — "How to store pickles for max crunch"
+   e) SEASONAL — "Summer grilling with pickles"
+   f) CUSTOMER LOVE — "Why fans can't stop ordering"
+   g) PAIRING GUIDE — "What to eat with Hot Tomatoes"
+   Specify in "contentArchetype" field. NEVER repeat same archetype in the same week.
 3. "product_spotlight" — Feature a product without discount. Highlight quality, craft.
 
 STRATEGY RULES:
@@ -697,6 +714,7 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
     "discountPercent": <number or null>,
     "discountCode": "<CODE or null>",
     "contentAngle": "<short angle, all types>",
+    "contentArchetype": "<ONLY for content: recipe|origin_story|behind_the_scenes|tips|seasonal|customer_love|pairing_guide>",
     "storyBody": "<REQUIRED for content type, 200-400 words, null otherwise>",
     "pullQuote": "<REQUIRED for content type, max 120 chars, null otherwise>",
     "listId": "...",
@@ -1155,6 +1173,9 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
     const log = await MaximusCampaignLog.create({
       campaign: campaign._id,
       campaignType: decision.campaignType || 'promotional',
+      contentArchetype: decision.contentArchetype || null,
+      headline: decision.headline || decision.subjectLine,
+      productName: decision.productName || decision.product,
       subjectLine: decision.subjectLine,
       previewText: decision.previewText,
       list: decision.listId,
