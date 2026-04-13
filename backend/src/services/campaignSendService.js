@@ -73,6 +73,7 @@ async function sendCampaign(campaignId) {
   setImmediate(async () => {
     console.log(`📥 BACKGROUND - Processing campaign ${campaignIdStr}`);
 
+    const { addCampaignToQueue } = require('../jobs/emailQueue');
     const CURSOR_BATCH_SIZE = config.cursorBatch;
     const BULK_WRITE_BATCH = config.bulkWriteBatch;
     const ENQUEUE_CHUNK_SIZE = config.enqueueChunk;
@@ -80,8 +81,10 @@ async function sendCampaign(campaignId) {
     let processedCount = 0;
     let createdEmailSends = 0;
     let skippedDuplicates = 0;
+    let totalEnqueued = 0;
+    let enqueueChunkIndex = 0;
 
-    let tempRecipients = [];
+    let chunkRecipients = [];
     let bulkOperations = [];
     const seenEmails = new Set();
 
@@ -104,6 +107,16 @@ async function sendCampaign(campaignId) {
         .select('email firstName lastName _id')
         .lean()
         .cursor({ batchSize: CURSOR_BATCH_SIZE });
+
+      // Helper: flush current chunk to queue and free memory
+      const flushChunk = async () => {
+        if (chunkRecipients.length === 0) return;
+        console.log(`📤 Enqueueing chunk #${enqueueChunkIndex} (${chunkRecipients.length} recipients)`);
+        await addCampaignToQueue(chunkRecipients, campaignIdStr);
+        totalEnqueued += chunkRecipients.length;
+        enqueueChunkIndex++;
+        chunkRecipients = [];
+      };
 
       for await (const customer of cursor) {
         processedCount++;
@@ -151,7 +164,7 @@ async function sendCampaign(campaignId) {
         html = emailService.injectUnsubscribeLink(html, customer._id.toString(), normalizedEmail, campaignIdStr);
         html = emailService.injectTracking(html, campaignIdStr, customer._id.toString(), normalizedEmail);
 
-        tempRecipients.push({
+        chunkRecipients.push({
           email: normalizedEmail,
           subject,
           html,
@@ -172,9 +185,10 @@ async function sendCampaign(campaignId) {
           bulkOperations = [];
         }
 
-        // NOTE: We accumulate all recipients and enqueue at the end.
-        // Calling addCampaignToQueue progressively causes duplicate jobIds
-        // because chunkIndex restarts at 0 each call → BullMQ rejects silently.
+        // Enqueue in chunks to avoid accumulating all recipients in memory
+        if (chunkRecipients.length >= ENQUEUE_CHUNK_SIZE) {
+          await flushChunk();
+        }
       }
 
       // Residual bulk write
@@ -187,12 +201,8 @@ async function sendCampaign(campaignId) {
         }
       }
 
-      // Enqueue ALL recipients in one call (prevents duplicate jobId issue)
-      if (tempRecipients.length > 0) {
-        const { addCampaignToQueue } = require('../jobs/emailQueue');
-        console.log(`📤 Enqueueing ${tempRecipients.length} recipients in a single call`);
-        await addCampaignToQueue(tempRecipients, campaignIdStr);
-      }
+      // Flush remaining recipients
+      await flushChunk();
 
       // Adjust and set to sending
       const actualRecipients = processedCount - skippedDuplicates;
@@ -202,7 +212,7 @@ async function sendCampaign(campaignId) {
         'stats.totalRecipients': actualRecipients
       });
 
-      console.log(`✅ Campaign ${campaignIdStr} prepared: ${actualRecipients} recipients, ${createdEmailSends} EmailSends`);
+      console.log(`✅ Campaign ${campaignIdStr} prepared: ${actualRecipients} recipients, ${createdEmailSends} EmailSends, ${enqueueChunkIndex} chunks enqueued`);
 
     } catch (error) {
       console.error(`❌ Campaign ${campaignIdStr} send error:`, error.message);
