@@ -689,6 +689,7 @@ CAMPAIGN TYPES:
 
 STRATEGY RULES:
 - Balance the week: 1-2 promotional + rest content/spotlight
+- NEVER schedule two promotional campaigns on consecutive days — always put at least one content or spotlight between promos
 - Rotate products — don't feature the same product 2 days in a row
 - Rotate lists — alternate between them
 - Vary send hours to gather learning data
@@ -773,6 +774,20 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
       }
 
       console.log(`🏛️ Maximus: ${campaigns.length} campaigns planned`);
+
+      // Enforce: no two promos on consecutive days
+      // Sort by date first to ensure correct order
+      campaigns.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      for (let i = 1; i < campaigns.length; i++) {
+        if (campaigns[i].campaignType === 'promotional' && campaigns[i - 1].campaignType === 'promotional') {
+          console.warn(`🏛️ Maximus: Back-to-back promos detected on ${campaigns[i - 1].day} and ${campaigns[i].day}. Switching ${campaigns[i].day} to content.`);
+          campaigns[i].campaignType = 'content';
+          campaigns[i].discountPercent = null;
+          campaigns[i].discountCode = null;
+          if (!campaigns[i].contentArchetype) campaigns[i].contentArchetype = 'tips';
+          if (!campaigns[i].contentAngle) campaigns[i].contentAngle = 'Product quality & craft';
+        }
+      }
 
       // Generate Apollo creatives for each campaign
       apolloService.init();
