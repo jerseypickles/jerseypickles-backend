@@ -140,12 +140,13 @@ class VulcanService {
       }
 
       case 'active': {
-        // Purchased in last 30 days
+        // Purchased in last 30 days, EXCLUDING new customers (created in last 30 days)
         const customers = await Customer
           .find({
             ...baseFilter,
             ordersCount: { $gte: 1 },
-            lastOrderDate: { $gte: days(30) }
+            lastOrderDate: { $gte: days(30) },
+            createdAt: { $lt: days(30) }
           })
           .select('_id')
           .lean();
@@ -179,13 +180,19 @@ class VulcanService {
       }
 
       case 'dormant': {
-        // 1+ order but nothing in 90+ days
+        // 1+ order but nothing in 90+ days, EXCLUDING VIPs (they have their own segment)
+        // Get VIP threshold to exclude them
+        const vipThreshold = await this._getVipSpentThreshold();
+        const dormantFilter = {
+          ...baseFilter,
+          ordersCount: { $gte: 1 },
+          lastOrderDate: { $lt: days(90) }
+        };
+        if (vipThreshold) {
+          dormantFilter.totalSpent = { $lt: vipThreshold };
+        }
         const customers = await Customer
-          .find({
-            ...baseFilter,
-            ordersCount: { $gte: 1 },
-            lastOrderDate: { $lt: days(90) }
-          })
+          .find(dormantFilter)
           .select('_id')
           .lean();
         return customers.map(c => c._id);
@@ -198,7 +205,7 @@ class VulcanService {
             ...baseFilter,
             ordersCount: 0,
             'emailStats.clicked': { $gte: 1 },
-            'emailStats.lastClickedAt': { $gte: days(14) }
+            'emailStats.lastClickedAt': { $exists: true, $gte: days(14) }
           })
           .select('_id')
           .lean();
@@ -206,12 +213,18 @@ class VulcanService {
       }
 
       case 'engaged_no_purchase': {
-        // Opens emails but 0 orders
+        // Opens emails (2+) but 0 orders, EXCLUDING hot_leads (who clicked recently)
         const customers = await Customer
           .find({
             ...baseFilter,
             ordersCount: 0,
-            'emailStats.opened': { $gte: 2 }
+            'emailStats.opened': { $gte: 2 },
+            $or: [
+              { 'emailStats.clicked': { $exists: false } },
+              { 'emailStats.clicked': 0 },
+              { 'emailStats.lastClickedAt': { $exists: false } },
+              { 'emailStats.lastClickedAt': { $lt: days(14) } }
+            ]
           })
           .select('_id')
           .lean();
@@ -221,6 +234,32 @@ class VulcanService {
       default:
         return [];
     }
+  }
+
+  /**
+   * Get the minimum totalSpent to qualify as VIP (top 10% threshold)
+   * Used to exclude VIPs from other segments like dormant
+   */
+  async _getVipSpentThreshold() {
+    const baseFilter = {
+      acceptsMarketing: true,
+      emailStatus: 'active',
+      'bounceInfo.isBounced': { $ne: true }
+    };
+    const totalSpenders = await Customer.countDocuments({
+      ...baseFilter,
+      totalSpent: { $gte: 50 }
+    });
+    if (totalSpenders === 0) return null;
+    const topCount = Math.ceil(totalSpenders * 0.1);
+    const lowestVip = await Customer
+      .find({ ...baseFilter, totalSpent: { $gte: 50 } })
+      .sort({ totalSpent: -1 })
+      .skip(topCount - 1)
+      .limit(1)
+      .select('totalSpent')
+      .lean();
+    return lowestVip[0]?.totalSpent || null;
   }
 
   /**
@@ -263,6 +302,9 @@ class VulcanService {
       })
       .join('\n');
 
+    const config = await VulcanConfig.getConfig();
+    const model = config.model || this.model;
+
     const prompt = `You are VULCAN, the segmentation agent for Jersey Pickles email marketing.
 
 Current segment snapshot:
@@ -274,7 +316,7 @@ Respond with just the insight text, no preamble.`;
 
     try {
       const response = await this.client.messages.create({
-        model: this.model,
+        model,
         max_tokens: 300,
         messages: [{ role: 'user', content: prompt }]
       });
