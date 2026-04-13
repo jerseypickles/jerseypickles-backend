@@ -496,6 +496,31 @@ router.post('/campaigns/:id/cancel', authorize('admin'), async (req, res) => {
   }
 });
 
+/**
+ * GET /api/maximus/campaigns/:id/preview
+ * Get the HTML content of a campaign for preview
+ */
+router.get('/campaigns/:id/preview', authorize('admin'), async (req, res) => {
+  try {
+    const log = await MaximusCampaignLog.findById(req.params.id).populate('campaign', 'htmlContent status');
+    if (!log) {
+      return res.status(404).json({ error: 'Campaign log not found' });
+    }
+    if (!log.campaign?.htmlContent) {
+      return res.status(404).json({ error: 'No HTML content available' });
+    }
+    res.json({
+      success: true,
+      htmlContent: log.campaign.htmlContent,
+      subjectLine: log.subjectLine,
+      status: log.campaign.status
+    });
+  } catch (error) {
+    console.error('Preview error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== MANUAL TRIGGER ====================
 
 /**

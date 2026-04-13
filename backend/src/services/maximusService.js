@@ -1444,7 +1444,7 @@ Respond ONLY with valid JSON:
     const recentLogs = await MaximusCampaignLog.find()
       .sort({ sentAt: -1 })
       .limit(10)
-      .populate('campaign', 'status htmlContent scheduledAt')
+      .populate('campaign', 'status scheduledAt')
       .lean();
 
     return {
