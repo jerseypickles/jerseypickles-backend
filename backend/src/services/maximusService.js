@@ -1273,13 +1273,13 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
       delivered,
       opened: stats.opened || 0,
       clicked: stats.clicked || 0,
-      converted: stats.converted || 0,
+      converted: stats.purchased || 0,
       bounced: stats.bounced || 0,
       unsubscribed: stats.unsubscribed || 0,
-      revenue: stats.revenue || 0,
+      revenue: stats.totalRevenue || 0,
       openRate: delivered > 0 ? parseFloat(((stats.opened || 0) / delivered * 100).toFixed(1)) : 0,
       clickRate: delivered > 0 ? parseFloat(((stats.clicked || 0) / delivered * 100).toFixed(1)) : 0,
-      conversionRate: delivered > 0 ? parseFloat(((stats.converted || 0) / delivered * 100).toFixed(1)) : 0
+      conversionRate: delivered > 0 ? parseFloat(((stats.purchased || 0) / delivered * 100).toFixed(1)) : 0
     };
     log.metricsUpdatedAt = new Date();
     await log.save();
