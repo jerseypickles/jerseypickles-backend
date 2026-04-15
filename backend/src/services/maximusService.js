@@ -1276,7 +1276,7 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
       converted: stats.purchased || 0,
       bounced: stats.bounced || 0,
       unsubscribed: stats.unsubscribed || 0,
-      revenue: stats.totalRevenue || 0,
+      revenue: parseFloat((stats.totalRevenue || 0).toFixed(2)),
       openRate: delivered > 0 ? parseFloat(((stats.opened || 0) / delivered * 100).toFixed(1)) : 0,
       clickRate: delivered > 0 ? parseFloat(((stats.clicked || 0) / delivered * 100).toFixed(1)) : 0,
       conversionRate: delivered > 0 ? parseFloat(((stats.purchased || 0) / delivered * 100).toFixed(1)) : 0
