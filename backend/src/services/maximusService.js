@@ -143,6 +143,35 @@ ${listLine}`;
   }
 
   /**
+   * Validate that a decision carries the required payload for its type
+   */
+  validateTypePayload(c) {
+    const violations = [];
+    const t = c.campaignType;
+    if (t === 'content') {
+      if (!c.storyBody || c.storyBody.length < 150) violations.push('missing_or_short_storyBody');
+      if (!c.pullQuote) violations.push('missing_pullQuote');
+    }
+    if (t === 'recipe') {
+      const r = c.recipe || {};
+      if (!r.dishName) violations.push('recipe.missing_dishName');
+      if (!Array.isArray(r.ingredients) || r.ingredients.length < 3) violations.push('recipe.insufficient_ingredients');
+      if (!Array.isArray(r.steps) || r.steps.length < 3) violations.push('recipe.insufficient_steps');
+    }
+    if (t === 'pairing') {
+      const p = c.pairing || {};
+      if (!p.leftItem?.name || !p.rightItem?.name) violations.push('pairing.missing_items');
+      if (!p.pairingNote) violations.push('pairing.missing_note');
+    }
+    if (t === 'customer_love') {
+      const cl = c.customerLove || {};
+      if (!Array.isArray(cl.quotes) || cl.quotes.length < 2) violations.push('customerLove.needs_2plus_quotes');
+      else if (cl.quotes.some(q => !q.text || !q.author)) violations.push('customerLove.quote_incomplete');
+    }
+    return { valid: violations.length === 0, violations };
+  }
+
+  /**
    * Validate a discount code — must be uppercase, 4-12 chars, no weekday abbreviations
    */
   validateDiscountCode(code) {
@@ -364,28 +393,37 @@ CRITICAL SUBJECT RULES — DO NOT BREAK THESE:
 - ✅ DO use product-driven hooks: "Crunchy & addictive", "Made with love", "Bold and tangy"
 - ✅ DO use curiosity: "The story behind...", "Meet our...", "Why our pickles are different"
 
-CAMPAIGN TYPES — you MUST choose one:
+CAMPAIGN TYPES — you MUST choose ONE of these 6:
 
-1. "promotional" — Discount offer (15-30% OFF). Use max 1-2x/week. Include discount code.
-   ✅ Good subjects: "20% off our Hot Tomatoes 🌶️", "Crunchy, tangy, on sale", "Bold flavor, sweet deal"
+1. "promotional" — Discount offer (15-30% OFF). Include discount code.
+   ✅ "20% off our Hot Tomatoes 🌶️", "Bold flavor, sweet deal"
 
-2. "content" — Storytelling, recipes, education. NO discount. Build brand love & engagement.
-   You MUST pick a DIFFERENT content archetype each time — NEVER repeat the same archetype used this week:
-     a) RECIPE — "3 ways to enjoy Hot Tomatoes", "The perfect pickle charcuterie board"
-     b) ORIGIN STORY — "How we started in New Jersey", "The secret behind our brine"
-     c) BEHIND THE SCENES — "Inside our kitchen on packing day", "A day in the life at Jersey Pickles"
-     d) TIPS / EDUCATION — "How to store pickles for max crunch", "5 foods that pair with pickles"
-     e) SEASONAL — "Summer grilling with pickles", "Holiday entertaining ideas"
-     f) CUSTOMER LOVE — "Why fans can't stop ordering", "Real reviews, real pickle lovers"
-     g) PAIRING GUIDE — "What to eat with Hot Tomatoes", "Pickle & cheese — the duo you need"
-   Specify your chosen archetype in "contentArchetype" field.
+2. "content" — Storytelling, origin, tips (NO recipe or pairing here — those have their own types below). NO discount.
+   Pick a DIFFERENT archetype each time:
+     a) ORIGIN STORY — "How we started in New Jersey", "The secret behind our brine"
+     b) BEHIND THE SCENES — "Inside our kitchen on packing day"
+     c) TIPS / EDUCATION — "How to store pickles for max crunch"
+     d) SEASONAL — "Summer grilling with pickles"
+   Specify archetype in "contentArchetype". Include full storyBody + pullQuote.
 
-3. "product_spotlight" — Feature a product without discount. Highlight quality, craft, ingredients.
-   ✅ Good subjects: "Meet our Hot Tomatoes 🍅", "Why our olives are different", "Small batch, big flavor"
+3. "product_spotlight" — Feature a product, premium craft focus. NO discount.
+   ✅ "Meet our Hot Tomatoes 🍅", "Small batch, big flavor"
 
-STRATEGY: Balance your week. Don't send 5 promos — mix it up. Ideal week: 1-2 promotional + 2-3 content/spotlight.
-If you already sent a promo this week, strongly prefer content or spotlight.
-NEVER repeat the same content archetype, product, or subject angle used in recent campaigns (see history below).
+4. "recipe" — A full recipe built around a product. NO discount.
+   ✅ "Quick pickle tartine in 15 min", "Hot Tomato & ricotta toast"
+   REQUIRES the "recipe" object: { dishName, prepTime, ingredients[4-7], steps[3-5] }
+
+5. "pairing" — A pairing guide — product + complementary item. NO discount.
+   ✅ "Hot Tomatoes × aged gouda", "Pickles meet their match"
+   REQUIRES the "pairing" object: { leftItem{name,description}, rightItem{name,description}, pairingNote }
+
+6. "customer_love" — Real customer testimonials (2-3 quotes). NO discount.
+   ✅ "Why fans can't stop ordering", "Real reviews from real pickle people"
+   REQUIRES the "customerLove" object: { quotes: [{text, author, location, rating}] }
+
+STRATEGY: Balance your week. Mix types widely. Ideal week: 1-2 promo + 4-5 mix of content/spotlight/recipe/pairing/customer_love.
+NEVER repeat the same type 2 days in a row. NEVER repeat same product 2 days in a row.
+NEVER repeat the same content archetype, product, or subject angle used in recent campaigns.
 
 YOUR TASK:
 1. Choose campaign type (promotional, content, or product_spotlight)
@@ -420,7 +458,7 @@ This isn't food made by machines. It's food made by people who care."
 
 Respond ONLY with valid JSON:
 {
-  "campaignType": "promotional|content|product_spotlight",
+  "campaignType": "promotional|content|product_spotlight|recipe|pairing|customer_love",
   "subjectLine": "...",
   "previewText": "...",
   "headline": "...",
@@ -429,9 +467,12 @@ Respond ONLY with valid JSON:
   "discountPercent": <number 15-30 or null if not promotional>,
   "discountCode": "<SHORT_CODE or null if not promotional>",
   "contentAngle": "<short angle description, all types>",
-  "contentArchetype": "<ONLY for content: recipe|origin_story|behind_the_scenes|tips|seasonal|customer_love|pairing_guide>",
+  "contentArchetype": "<ONLY for content: origin_story|behind_the_scenes|tips|seasonal>",
   "storyBody": "<ONLY for content type: 2-3 paragraphs, 200-400 words, real story>",
   "pullQuote": "<ONLY for content type: one memorable sentence, max 120 chars>",
+  "recipe": { "dishName": "...", "prepTime": "15 min", "ingredients": ["...","...","..."], "steps": ["...","...","..."] },
+  "pairing": { "leftItem": {"name":"...","description":"..."}, "rightItem":{"name":"...","description":"..."}, "pairingNote":"..." },
+  "customerLove": { "quotes": [{"text":"...","author":"...","location":"NJ","rating":5}] },
   "listId": "...",
   "listName": "...",
   "sendHour": <number>,
@@ -507,14 +548,15 @@ Respond ONLY with valid JSON:
         }
       }
 
-      // Validate subject and discount code against critical prompt rules
+      // Validate subject, discount code, and type-specific payload
       const subjectCheck = this.validateSubject(decision.subjectLine);
       const codeCheck = decision.campaignType === 'promotional'
         ? this.validateDiscountCode(decision.discountCode)
         : { valid: true, violations: [] };
+      const payloadCheck = this.validateTypePayload(decision);
 
-      if (!subjectCheck.valid || !codeCheck.valid) {
-        const allViolations = [...subjectCheck.violations, ...codeCheck.violations];
+      if (!subjectCheck.valid || !codeCheck.valid || !payloadCheck.valid) {
+        const allViolations = [...subjectCheck.violations, ...codeCheck.violations, ...payloadCheck.violations];
         console.warn(`🏛️ Maximus: Decision failed validation — ${allViolations.join(', ')}. Retrying once...`);
 
         const retryPrompt = `${prompt}
@@ -540,8 +582,9 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
             const rc = retryDecision.campaignType === 'promotional'
               ? this.validateDiscountCode(retryDecision.discountCode)
               : { valid: true, violations: [] };
-            if (rs.valid && rc.valid) {
-              console.log('🏛️ Maximus: Retry produced valid subject/code');
+            const rp = this.validateTypePayload(retryDecision);
+            if (rs.valid && rc.valid && rp.valid) {
+              console.log('🏛️ Maximus: Retry produced valid subject/code/payload');
               // Carry over hour validation result
               if (retryDecision.sendHour < earliestSendHour || retryDecision.sendHour >= config.sendWindowEnd) {
                 retryDecision.sendHour = earliestSendHour < config.sendWindowEnd
@@ -550,7 +593,7 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
               }
               return retryDecision;
             }
-            console.error(`🏛️ Maximus: Retry still invalid — ${[...rs.violations, ...rc.violations].join(', ')}`);
+            console.error(`🏛️ Maximus: Retry still invalid — ${[...rs.violations, ...rc.violations, ...rp.violations].join(', ')}`);
           }
         } catch (retryErr) {
           console.error('🏛️ Maximus: Retry error:', retryErr.message);
@@ -639,16 +682,16 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
         product: decision.product,
         headline: decision.headline || decision.subjectLine,
         productName: decision.productName,
-        campaignType: decision.campaignType
+        campaignType: decision.campaignType,
+        contentAngle: decision.contentAngle,
+        recipe: decision.recipe,
+        pairing: decision.pairing,
+        customerLove: decision.customerLove
       };
 
       if (decision.campaignType === 'promotional') {
         apolloBrief.discount = `${decision.discountPercent}% OFF TODAY ONLY`;
         apolloBrief.code = decision.discountCode;
-      } else {
-        apolloBrief.discount = null;
-        apolloBrief.code = null;
-        apolloBrief.contentAngle = decision.contentAngle;
       }
 
       const creative = await apolloService.generateCreative(apolloBrief);
@@ -664,7 +707,10 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
           campaignType: decision.campaignType,
           contentAngle: decision.contentAngle,
           storyBody: decision.storyBody,
-          pullQuote: decision.pullQuote
+          pullQuote: decision.pullQuote,
+          recipe: decision.recipe,
+          pairing: decision.pairing,
+          customerLove: decision.customerLove
         });
         console.log(`🏛️ Maximus: ✅ Creative received from Apollo`);
       } else {
@@ -695,6 +741,9 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
         pullQuote: decision.campaignType === 'content' ? decision.pullQuote : null,
         discountPercent: decision.campaignType === 'promotional' ? decision.discountPercent : null,
         discountCode: decision.campaignType === 'promotional' ? decision.discountCode : null,
+        recipe: decision.campaignType === 'recipe' ? decision.recipe : null,
+        pairing: decision.campaignType === 'pairing' ? decision.pairing : null,
+        customerLove: decision.campaignType === 'customer_love' ? decision.customerLove : null,
         listId: decision.listId,
         listName: decision.listName,
         sendHour: decision.sendHour,
@@ -814,18 +863,16 @@ CRITICAL SUBJECT RULES — DO NOT BREAK THESE:
 - ✅ DO use product hooks: "Crunchy & addictive", "Bold and tangy", "Made with love"
 - ✅ DO use curiosity: "The story behind...", "Meet our...", "Why our pickles..."
 
-CAMPAIGN TYPES:
-1. "promotional" — Discount offer (15-30% OFF). Include discount code. NO date-specific urgency in subject.
-2. "content" — NO discount. Build brand love. You MUST pick a DIFFERENT archetype each time:
-   a) RECIPE — "3 ways to enjoy Hot Tomatoes", "The perfect pickle board"
-   b) ORIGIN STORY — "How we started in NJ", "The secret behind our brine"
-   c) BEHIND THE SCENES — "Inside our kitchen on packing day"
-   d) TIPS / EDUCATION — "How to store pickles for max crunch"
-   e) SEASONAL — "Summer grilling with pickles"
-   f) CUSTOMER LOVE — "Why fans can't stop ordering"
-   g) PAIRING GUIDE — "What to eat with Hot Tomatoes"
-   Specify in "contentArchetype" field. NEVER repeat same archetype in the same week.
-3. "product_spotlight" — Feature a product without discount. Highlight quality, craft.
+CAMPAIGN TYPES (choose ONE per campaign — mix types widely across the week):
+1. "promotional" — Discount 15-30% OFF. Include discount code. No date-specific urgency.
+2. "content" — Origin/tips/seasonal/behind-the-scenes storytelling. NO discount. Requires storyBody + pullQuote.
+   contentArchetype ∈ {origin_story, behind_the_scenes, tips, seasonal}
+3. "product_spotlight" — Feature a product's craft. NO discount.
+4. "recipe" — A complete recipe built around a product. NO discount. Requires "recipe" object.
+5. "pairing" — Product × complementary item pairing guide. NO discount. Requires "pairing" object.
+6. "customer_love" — 2-3 real testimonials. NO discount. Requires "customerLove" object.
+
+VARIETY RULE: use at least 4 DIFFERENT types across the week. Never repeat same type 2 days in a row.
 
 STRATEGY RULES:
 - Balance the week: ~25-35% promotional, rest content/spotlight/recipe/pairing
@@ -838,17 +885,18 @@ STRATEGY RULES:
 - Each discount code MUST be unique. Do NOT reuse: ${allUsedCodes.join(', ') || 'none yet'}
 - It's OK to leave weak days empty (rest days) — don't force campaigns on low-performing days just to fill slots
 
-CONTENT CAMPAIGNS — EDITORIAL FORMAT:
-For any campaign with campaignType = "content", you MUST include:
-- "storyBody": 2-3 paragraphs of REAL story content (200-400 words). The actual story body for the email — sensory, personal, warm. Show the product through human moments, not marketing speak.
-- "pullQuote": one memorable sentence (max 120 chars) that will be displayed as a stylized pull quote.
+TYPE-SPECIFIC REQUIREMENTS:
+- content  → storyBody (200-400 words, real sensory story) + pullQuote (≤120 chars)
+- recipe   → recipe: { dishName, prepTime: "15 min", ingredients: [4-7 strings], steps: [3-5 numbered strings, each 1-2 sentences] }
+- pairing  → pairing: { leftItem: {name, description≤80 chars}, rightItem: {name, description≤80 chars}, pairingNote (1 memorable sentence, ≤140 chars) }
+- customer_love → customerLove: { quotes: [{text (≤180 chars), author, location: "NJ" or similar, rating: 5}, ...2-3 quotes] }
 
 Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek} campaigns (multiple per day allowed, up to ${config.maxCampaignsPerDay}/day):
 [
   {
     "day": "<day name>",
     "date": "<YYYY-MM-DD>",
-    "campaignType": "promotional|content|product_spotlight",
+    "campaignType": "promotional|content|product_spotlight|recipe|pairing|customer_love",
     "subjectLine": "...",
     "previewText": "...",
     "headline": "...",
@@ -857,9 +905,12 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
     "discountPercent": <number or null>,
     "discountCode": "<CODE or null>",
     "contentAngle": "<short angle, all types>",
-    "contentArchetype": "<ONLY for content: recipe|origin_story|behind_the_scenes|tips|seasonal|customer_love|pairing_guide>",
-    "storyBody": "<REQUIRED for content type, 200-400 words, null otherwise>",
-    "pullQuote": "<REQUIRED for content type, max 120 chars, null otherwise>",
+    "contentArchetype": "<ONLY for content: origin_story|behind_the_scenes|tips|seasonal>",
+    "storyBody": "<REQUIRED for content, 200-400 words, null otherwise>",
+    "pullQuote": "<REQUIRED for content, ≤120 chars, null otherwise>",
+    "recipe": "<REQUIRED for recipe type, null otherwise>",
+    "pairing": "<REQUIRED for pairing type, null otherwise>",
+    "customerLove": "<REQUIRED for customer_love type, null otherwise>",
     "listId": "...",
     "listName": "...",
     "sendHour": <number>,
@@ -977,19 +1028,21 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
         return { success: false, reason: 'validation_failed', violations: structuralViolations };
       }
 
-      // Validate every subject and discount code
+      // Validate every subject, discount code, and type-specific payload
       const violations = [];
       for (const c of campaigns) {
         const sc = this.validateSubject(c.subjectLine);
         const dc = c.campaignType === 'promotional'
           ? this.validateDiscountCode(c.discountCode)
           : { valid: true, violations: [] };
-        if (!sc.valid || !dc.valid) {
+        const pc = this.validateTypePayload(c);
+        if (!sc.valid || !dc.valid || !pc.valid) {
           violations.push({
             day: c.day,
             subject: c.subjectLine,
             code: c.discountCode,
-            issues: [...sc.violations, ...dc.violations]
+            type: c.campaignType,
+            issues: [...sc.violations, ...dc.violations, ...pc.violations]
           });
         }
       }
@@ -1029,15 +1082,15 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
             product: c.product,
             headline: c.headline || c.subjectLine,
             productName: c.productName,
-            campaignType: c.campaignType
+            campaignType: c.campaignType,
+            contentAngle: c.contentAngle,
+            recipe: c.recipe,
+            pairing: c.pairing,
+            customerLove: c.customerLove
           };
           if (c.campaignType === 'promotional') {
             apolloBrief.discount = `${c.discountPercent}% OFF TODAY ONLY`;
             apolloBrief.code = c.discountCode;
-          } else {
-            apolloBrief.discount = null;
-            apolloBrief.code = null;
-            apolloBrief.contentAngle = c.contentAngle;
           }
 
           const creative = await apolloService.generateCreative(apolloBrief);
@@ -1052,7 +1105,10 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
               campaignType: c.campaignType,
               contentAngle: c.contentAngle,
               storyBody: c.storyBody,
-              pullQuote: c.pullQuote
+              pullQuote: c.pullQuote,
+              recipe: c.recipe,
+              pairing: c.pairing,
+              customerLove: c.customerLove
             });
             console.log(`   ✅ Creative generated`);
           } else {
@@ -1081,6 +1137,9 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
           pullQuote: c.campaignType === 'content' ? c.pullQuote : null,
           discountPercent: c.campaignType === 'promotional' ? c.discountPercent : null,
           discountCode: c.campaignType === 'promotional' ? c.discountCode : null,
+          recipe: c.campaignType === 'recipe' ? c.recipe : null,
+          pairing: c.campaignType === 'pairing' ? c.pairing : null,
+          customerLove: c.campaignType === 'customer_love' ? c.customerLove : null,
           listId: c.listId,
           listName: c.listName,
           sendHour: c.sendHour,

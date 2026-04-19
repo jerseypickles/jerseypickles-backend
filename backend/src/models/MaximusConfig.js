@@ -15,7 +15,7 @@ const maximusConfigSchema = new mongoose.Schema({
   }],
 
   // Constraints
-  maxCampaignsPerWeek: { type: Number, default: 5 },
+  maxCampaignsPerWeek: { type: Number, default: 8 },
   maxCampaignsPerDay: { type: Number, default: 2 },
   minHoursBetweenSameDay: { type: Number, default: 3 },
   sendWindowStart: { type: Number, default: 11 }, // 11 AM
@@ -64,7 +64,7 @@ const maximusConfigSchema = new mongoose.Schema({
     createdAt: { type: Date },
     scheduledAt: { type: Date },
     decision: {
-      campaignType: { type: String, enum: ['promotional', 'content', 'product_spotlight'], default: 'promotional' },
+      campaignType: { type: String, enum: ['promotional', 'content', 'product_spotlight', 'recipe', 'pairing', 'customer_love'], default: 'promotional' },
       subjectLine: String,
       previewText: String,
       headline: String,
@@ -75,6 +75,21 @@ const maximusConfigSchema = new mongoose.Schema({
       pullQuote: String,
       discountPercent: Number,
       discountCode: String,
+      // Type-specific payloads
+      recipe: {
+        dishName: String,
+        prepTime: String,
+        ingredients: [String],
+        steps: [String]
+      },
+      pairing: {
+        leftItem: { name: String, description: String, imageUrl: String },
+        rightItem: { name: String, description: String, imageUrl: String },
+        pairingNote: String
+      },
+      customerLove: {
+        quotes: [{ text: String, author: String, location: String, rating: Number }]
+      },
       listId: { type: mongoose.Schema.Types.ObjectId, ref: 'List' },
       listName: String,
       sendHour: Number,
@@ -100,7 +115,7 @@ const maximusConfigSchema = new mongoose.Schema({
       day: String,
       scheduledAt: Date,
       status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
-      campaignType: { type: String, enum: ['promotional', 'content', 'product_spotlight'] },
+      campaignType: { type: String, enum: ['promotional', 'content', 'product_spotlight', 'recipe', 'pairing', 'customer_love'] },
       subjectLine: String,
       previewText: String,
       headline: String,
@@ -111,6 +126,20 @@ const maximusConfigSchema = new mongoose.Schema({
       pullQuote: String,
       discountPercent: Number,
       discountCode: String,
+      recipe: {
+        dishName: String,
+        prepTime: String,
+        ingredients: [String],
+        steps: [String]
+      },
+      pairing: {
+        leftItem: { name: String, description: String, imageUrl: String },
+        rightItem: { name: String, description: String, imageUrl: String },
+        pairingNote: String
+      },
+      customerLove: {
+        quotes: [{ text: String, author: String, location: String, rating: Number }]
+      },
       listId: { type: mongoose.Schema.Types.ObjectId, ref: 'List' },
       listName: String,
       sendHour: Number,

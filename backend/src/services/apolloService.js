@@ -265,6 +265,69 @@ Place the EXACT jar from the reference photo as described. Surround it with comp
 
 ${product.promptHints || ''}`;
 
+    if (type === 'recipe') {
+      // Recipe: overhead flat lay of the finished dish + jar of product
+      const recipe = brief.recipe || {};
+      return `ASPECT RATIO: 9:16 vertical portrait for a recipe email hero.
+
+CRITICAL: Use the reference product photo above as the EXACT jar that must appear in the scene. Match label, shape, glass, lid precisely.
+
+SCENE: Overhead flat-lay photograph of a finished dish featuring the product. The dish is "${recipe.dishName || brief.headline}".
+Surround the hero plate with tasteful cooking props: a linen napkin, wooden spoon, a few of the raw ingredients (${(recipe.ingredients || []).slice(0, 3).join(', ') || 'fresh herbs, citrus, olive oil'}), a small ceramic bowl, maybe a sprig of herbs.
+The jar from the reference photo is prominently placed beside the dish, lid slightly loose or a spoon resting on the rim — suggesting "just used in the recipe".
+LIGHTING: ${lighting}.
+COLOR PALETTE: ${palette}.
+SURFACE: ${scene}.
+
+NO OVERLAY TEXT, NO BUTTONS, NO LOGOS. Pure editorial food photography — Bon Appétit / NYT Cooking style. The recipe text lives in the email body.
+
+${product.promptHints || ''}
+
+RULES: Overhead angle (80-90°), shallow depth with everything in focus, hyperrealistic premium food photography, 8K, 9:16 vertical. Single hero jar (the reference one), no duplicates.`;
+    }
+
+    if (type === 'pairing') {
+      // Pairing: two items side by side on a shared surface
+      const pairing = brief.pairing || {};
+      const leftItem = pairing.leftItem?.name || product.name;
+      const rightItem = pairing.rightItem?.name || 'an artisanal cheese';
+      return `ASPECT RATIO: 9:16 vertical portrait for a pairing guide email hero.
+
+CRITICAL: Use the reference product photo above as the EXACT jar that must appear in the scene. Match label, shape, glass, lid precisely.
+
+SCENE: Two artisanal items photographed side by side on a shared surface — a wooden charcuterie board or slate serving platter.
+LEFT: the EXACT jar from the reference photo (${leftItem}) with some of its contents spilled on the board.
+RIGHT: ${rightItem}, styled beautifully — if cheese, a wedge with a knife; if bread, a torn rustic chunk; if meat, thin slices fanned; if another product, its own presentation.
+Between them: a small sprig of fresh herbs, a few crackers or slices, suggesting the pairing in action.
+LIGHTING: ${lighting}.
+COLOR PALETTE: ${palette}.
+SURFACE: ${scene}.
+
+NO OVERLAY TEXT, NO BUTTONS, NO LOGOS. Pure editorial pairing photography — think wine magazine, gourmet guide.
+
+${product.promptHints || ''}
+
+RULES: Slightly elevated angle (30-45°), both items equally prominent, premium food photography, hyperrealistic, 8K, 9:16 vertical. Single jar only from reference, no duplicates.`;
+    }
+
+    if (type === 'customer_love') {
+      // Customer love: lifestyle scene suggesting the product is being enjoyed
+      return `ASPECT RATIO: 9:16 vertical portrait for a customer testimonials email hero.
+
+CRITICAL: Use the reference product photo above as the EXACT jar that must appear in the scene. Match label, shape, glass, lid precisely.
+
+SCENE: A warm lived-in kitchen moment — the jar from the reference photo is open on a wooden cutting board, a slice of bread with the product on it in the foreground, a small bowl of the product nearby, a coffee cup or glass of wine off to the side. Maybe a hand reaching for it (partial, tasteful). A "mid-meal, mid-family" feeling — not staged, lived-in.
+LIGHTING: ${lighting}, with a golden hour feel suggesting "everyday joy".
+COLOR PALETTE: ${palette}.
+SURFACE: ${scene}.
+
+NO OVERLAY TEXT, NO BUTTONS, NO LOGOS. Pure lifestyle photography — the testimonials will render in the email body.
+
+${product.promptHints || ''}
+
+RULES: Candid lifestyle feel, warm and inviting, hyperrealistic premium editorial photography, 8K, 9:16 vertical. Single jar (reference), no duplicates.`;
+    }
+
     if (type === 'promotional') {
       return `${baseScene}
 
@@ -354,10 +417,10 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
   buildEmailHtml(imageUrl, brief) {
     const type = brief.campaignType || 'promotional';
 
-    // Content campaigns get an editorial layout with story body + pull quote
-    if (type === 'content') {
-      return this.buildContentEmailHtml(imageUrl, brief);
-    }
+    if (type === 'content') return this.buildContentEmailHtml(imageUrl, brief);
+    if (type === 'recipe') return this.buildRecipeEmailHtml(imageUrl, brief);
+    if (type === 'pairing') return this.buildPairingEmailHtml(imageUrl, brief);
+    if (type === 'customer_love') return this.buildCustomerLoveEmailHtml(imageUrl, brief);
 
     // Promo and spotlight share the simple image + CTA layout
     const ctaText = 'SHOP NOW';
@@ -494,6 +557,156 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
   </table>
 </body>
 </html>`;
+  }
+
+  // ==================== RECIPE EMAIL ====================
+
+  buildRecipeEmailHtml(imageUrl, brief) {
+    const recipe = brief.recipe || {};
+    const productSlug = brief.product || '';
+    const productName = brief.productName || brief.product || 'our pickles';
+    const ctaUrl = productSlug ? `https://jerseypickles.com/products/${productSlug}` : 'https://jerseypickles.com';
+    const dishName = recipe.dishName || brief.headline;
+    const ingredients = Array.isArray(recipe.ingredients) ? recipe.ingredients : [];
+    const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
+    const prepTime = recipe.prepTime || '';
+
+    const ingredientsHtml = ingredients.length > 0
+      ? ingredients.map(i => `<li style="margin:0 0 8px;font-family:Georgia,serif;font-size:16px;color:#3a3a3a;line-height:1.5;">${i}</li>`).join('\n          ')
+      : '<li style="color:#999;font-style:italic;">Ingredients coming soon</li>';
+
+    const stepsHtml = steps.length > 0
+      ? steps.map((s, i) => `<li style="margin:0 0 14px;font-family:Georgia,serif;font-size:16px;color:#3a3a3a;line-height:1.6;"><strong style="color:#1a3d17;">${i + 1}.</strong> ${s}</li>`).join('\n          ')
+      : '<li style="color:#999;font-style:italic;">Steps coming soon</li>';
+
+    return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${dishName}</title></head>
+<body style="margin:0;padding:0;background-color:#f5f1e8;font-family:Georgia,serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:600px;margin:0 auto;background-color:#ffffff;">
+    <tr><td style="padding:0;background-color:#0a0e17;">
+      <img src="${imageUrl}" alt="${dishName}" width="600" style="display:block;width:100%;height:auto;border:0;" />
+    </td></tr>
+    <tr><td style="padding:36px 32px 8px;">
+      <p style="margin:0 0 8px;font-family:Arial,sans-serif;font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:#a67c1e;font-weight:700;">Recipe · ${productName}${prepTime ? ' · ⏱ ' + prepTime : ''}</p>
+      <h1 style="margin:0;font-family:Georgia,serif;font-size:30px;line-height:1.25;font-weight:700;color:#1a3d17;">${dishName}</h1>
+    </td></tr>
+    <tr><td style="padding:24px 32px 8px;">
+      <h3 style="margin:0 0 12px;font-family:Arial,sans-serif;font-size:12px;letter-spacing:0.15em;text-transform:uppercase;color:#1a3d17;font-weight:700;">Ingredients</h3>
+      <ul style="margin:0;padding-left:20px;">
+          ${ingredientsHtml}
+      </ul>
+    </td></tr>
+    <tr><td style="padding:24px 32px 8px;">
+      <h3 style="margin:0 0 14px;font-family:Arial,sans-serif;font-size:12px;letter-spacing:0.15em;text-transform:uppercase;color:#1a3d17;font-weight:700;">Method</h3>
+      <ol style="margin:0;padding:0;list-style:none;">
+          ${stepsHtml}
+      </ol>
+    </td></tr>
+    <tr><td style="padding:24px 32px 40px;text-align:center;">
+      <a href="${ctaUrl}" target="_blank" style="display:inline-block;background-color:#1a3d17;color:#ffffff;text-decoration:none;padding:16px 40px;border-radius:4px;font-family:Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;">Shop ${productName} →</a>
+    </td></tr>
+    <tr><td style="padding:24px 32px;text-align:center;background-color:#122016;color:#a2b6aa;font-family:Arial,sans-serif;font-size:11px;line-height:1.6;">
+      <p style="margin:0 0 8px;">Jersey Pickles — Handcrafted in New Jersey since 2014</p>
+      <p style="margin:0;"><a href="{{unsubscribeLink}}" style="color:#6eb489;text-decoration:underline;">Unsubscribe</a></p>
+    </td></tr>
+  </table>
+</body></html>`;
+  }
+
+  // ==================== PAIRING EMAIL ====================
+
+  buildPairingEmailHtml(imageUrl, brief) {
+    const pairing = brief.pairing || {};
+    const productSlug = brief.product || '';
+    const productName = brief.productName || brief.product || 'our pickles';
+    const ctaUrl = productSlug ? `https://jerseypickles.com/products/${productSlug}` : 'https://jerseypickles.com';
+    const left = pairing.leftItem || { name: productName, description: 'Bold, bright, handcrafted' };
+    const right = pairing.rightItem || { name: 'A classic pairing', description: 'Balance and contrast' };
+    const note = pairing.pairingNote || 'A perfect match.';
+
+    return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${brief.headline}</title></head>
+<body style="margin:0;padding:0;background-color:#f5f1e8;font-family:Georgia,serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:600px;margin:0 auto;background-color:#ffffff;">
+    <tr><td style="padding:0;background-color:#0a0e17;">
+      <img src="${imageUrl}" alt="${brief.headline}" width="600" style="display:block;width:100%;height:auto;border:0;" />
+    </td></tr>
+    <tr><td style="padding:36px 32px 8px;">
+      <p style="margin:0 0 8px;font-family:Arial,sans-serif;font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:#a67c1e;font-weight:700;">Pairing Guide</p>
+      <h1 style="margin:0;font-family:Georgia,serif;font-size:30px;line-height:1.25;font-weight:700;color:#1a3d17;">${brief.headline}</h1>
+    </td></tr>
+    <tr><td style="padding:28px 32px 8px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+        <tr>
+          <td width="48%" valign="top" style="padding:16px;background-color:#fdf8ef;border-radius:8px;border-left:4px solid #1a3d17;">
+            <p style="margin:0 0 6px;font-family:Arial,sans-serif;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#1a3d17;font-weight:700;">This</p>
+            <h3 style="margin:0 0 8px;font-family:Georgia,serif;font-size:20px;color:#1a3d17;">${left.name}</h3>
+            <p style="margin:0;font-family:Georgia,serif;font-size:14px;line-height:1.5;color:#3a3a3a;">${left.description}</p>
+          </td>
+          <td width="4%"></td>
+          <td width="48%" valign="top" style="padding:16px;background-color:#fdf8ef;border-radius:8px;border-left:4px solid #a67c1e;">
+            <p style="margin:0 0 6px;font-family:Arial,sans-serif;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#a67c1e;font-weight:700;">Meets</p>
+            <h3 style="margin:0 0 8px;font-family:Georgia,serif;font-size:20px;color:#1a3d17;">${right.name}</h3>
+            <p style="margin:0;font-family:Georgia,serif;font-size:14px;line-height:1.5;color:#3a3a3a;">${right.description}</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+    <tr><td style="padding:24px 32px 8px;text-align:center;">
+      <blockquote style="margin:0;padding:20px 28px;font-family:Georgia,serif;font-size:22px;font-style:italic;line-height:1.4;color:#1a3d17;">"${note}"</blockquote>
+    </td></tr>
+    <tr><td style="padding:16px 32px 40px;text-align:center;">
+      <a href="${ctaUrl}" target="_blank" style="display:inline-block;background-color:#1a3d17;color:#ffffff;text-decoration:none;padding:16px 40px;border-radius:4px;font-family:Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;">Build Your Board →</a>
+    </td></tr>
+    <tr><td style="padding:24px 32px;text-align:center;background-color:#122016;color:#a2b6aa;font-family:Arial,sans-serif;font-size:11px;line-height:1.6;">
+      <p style="margin:0 0 8px;">Jersey Pickles — Handcrafted in New Jersey since 2014</p>
+      <p style="margin:0;"><a href="{{unsubscribeLink}}" style="color:#6eb489;text-decoration:underline;">Unsubscribe</a></p>
+    </td></tr>
+  </table>
+</body></html>`;
+  }
+
+  // ==================== CUSTOMER LOVE EMAIL ====================
+
+  buildCustomerLoveEmailHtml(imageUrl, brief) {
+    const cl = brief.customerLove || {};
+    const quotes = Array.isArray(cl.quotes) ? cl.quotes.slice(0, 3) : [];
+    const productSlug = brief.product || '';
+    const productName = brief.productName || brief.product || 'our pickles';
+    const ctaUrl = productSlug ? `https://jerseypickles.com/products/${productSlug}` : 'https://jerseypickles.com';
+
+    const stars = (n) => '★'.repeat(Math.max(1, Math.min(5, n || 5)));
+
+    const quotesHtml = quotes.length > 0 ? quotes.map(q => `
+      <tr><td style="padding:20px 32px;border-top:1px solid #eee7d4;">
+        <p style="margin:0 0 10px;color:#d4a843;font-size:18px;letter-spacing:2px;">${stars(q.rating || 5)}</p>
+        <p style="margin:0 0 12px;font-family:Georgia,serif;font-size:18px;line-height:1.55;color:#1a3d17;font-style:italic;">"${(q.text || '').replace(/"/g, '&quot;')}"</p>
+        <p style="margin:0;font-family:Arial,sans-serif;font-size:13px;color:#6b6b6b;">— ${q.author || 'A happy fan'}${q.location ? ', ' + q.location : ''}</p>
+      </td></tr>
+    `).join('\n') : `
+      <tr><td style="padding:20px 32px;text-align:center;color:#999;font-style:italic;">Reviews loading...</td></tr>`;
+
+    return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${brief.headline}</title></head>
+<body style="margin:0;padding:0;background-color:#f5f1e8;font-family:Georgia,serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:600px;margin:0 auto;background-color:#ffffff;">
+    <tr><td style="padding:0;background-color:#0a0e17;">
+      <img src="${imageUrl}" alt="${brief.headline}" width="600" style="display:block;width:100%;height:auto;border:0;" />
+    </td></tr>
+    <tr><td style="padding:36px 32px 8px;text-align:center;">
+      <p style="margin:0 0 8px;font-family:Arial,sans-serif;font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:#a67c1e;font-weight:700;">What Our Fans Say</p>
+      <h1 style="margin:0;font-family:Georgia,serif;font-size:30px;line-height:1.25;font-weight:700;color:#1a3d17;">${brief.headline}</h1>
+    </td></tr>
+    ${quotesHtml}
+    <tr><td style="padding:32px;text-align:center;border-top:1px solid #eee7d4;">
+      <a href="${ctaUrl}" target="_blank" style="display:inline-block;background-color:#1a3d17;color:#ffffff;text-decoration:none;padding:16px 40px;border-radius:4px;font-family:Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;">Join the fans →</a>
+    </td></tr>
+    <tr><td style="padding:24px 32px;text-align:center;background-color:#122016;color:#a2b6aa;font-family:Arial,sans-serif;font-size:11px;line-height:1.6;">
+      <p style="margin:0 0 8px;">Jersey Pickles — Handcrafted in New Jersey since 2014</p>
+      <p style="margin:0;"><a href="{{unsubscribeLink}}" style="color:#6eb489;text-decoration:underline;">Unsubscribe</a></p>
+    </td></tr>
+  </table>
+</body></html>`;
   }
 
   // ==================== STATUS ====================
