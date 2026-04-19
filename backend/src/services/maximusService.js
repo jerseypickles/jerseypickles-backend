@@ -186,16 +186,17 @@ ${listLine}`;
       return { executed: false, reason: 'weekly_limit_reached' };
     }
 
-    // Check if already sent today
+    // Check day limit — allow up to maxCampaignsPerDay (default 2) with distinct lists
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const sentToday = campaignsThisWeek.find(c =>
-      new Date(c.sentAt) >= today
-    );
-    if (sentToday) {
-      console.log('🏛️ Maximus: Already sent today');
-      return { executed: false, reason: 'already_sent_today' };
+    const sentToday = campaignsThisWeek.filter(c => new Date(c.sentAt) >= today);
+    const maxPerDay = config.maxCampaignsPerDay || 2;
+    if (sentToday.length >= maxPerDay) {
+      console.log(`🏛️ Maximus: Day limit reached (${sentToday.length}/${maxPerDay})`);
+      return { executed: false, reason: 'day_limit_reached' };
     }
+    const usedListsToday = sentToday.map(c => c.list.toString());
+    const usedHoursToday = sentToday.map(c => c.sentHour);
 
     // Check if today is a rest day
     if (!config.canSendToday()) {
@@ -213,7 +214,7 @@ ${listLine}`;
     const learningData = await this.gatherLearningData();
 
     // Ask Claude to make decisions
-    const decision = await this.makeDecision(config, learningData, campaignsThisWeek);
+    const decision = await this.makeDecision(config, learningData, campaignsThisWeek, { usedListsToday, usedHoursToday });
     if (!decision) {
       console.log('🏛️ Maximus: Could not make decision');
       return { executed: false, reason: 'decision_failed' };
@@ -273,17 +274,22 @@ ${listLine}`;
   /**
    * Ask Claude Sonnet 4.6 to decide subject, preview text, list, and timing
    */
-  async makeDecision(config, learningData, campaignsThisWeek) {
+  async makeDecision(config, learningData, campaignsThisWeek, opts = {}) {
     if (!this.isAvailable()) {
       console.log('🏛️ Maximus: Claude not available');
       return null;
     }
 
+    const { usedListsToday = [], usedHoursToday = [] } = opts;
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const now = new Date();
     const today = dayNames[now.getDay()];
 
     const listsInfo = config.lists.map(l => `- "${l.name}" (ID: ${l.listId})`).join('\n');
+
+    // Lists still available today (the rest must wait until tomorrow)
+    const availableListsToday = config.lists.filter(l => !usedListsToday.includes(l.listId.toString()));
+    const minGap = config.minHoursBetweenSameDay || 3;
 
     const recentCampaigns = campaignsThisWeek.map(c =>
       `- [${c.campaignType || 'unknown'}] "${c.subjectLine}" → Product: ${c.productName || 'unknown'}, List: ${c.listName}, Day: ${c.sentDay} ${c.sentHour}:00, Archetype: ${c.contentArchetype || 'n/a'}, Headline: "${c.headline || 'n/a'}", Open: ${c.metrics.openRate}%, Click: ${c.metrics.clickRate}%`
@@ -314,6 +320,10 @@ SEND WINDOW: ${config.sendWindowStart}:00 - ${config.sendWindowEnd}:00 (${config
 EARLIEST POSSIBLE SEND HOUR TODAY: ${earliestSendHour}:00 (must be AFTER current time)
 ${earliestSendHour >= config.sendWindowEnd ? 'NOTE: Today\'s send window has closed. Schedule for tomorrow — pick any hour in the send window.' : ''}
 CAMPAIGNS LEFT THIS WEEK: ${config.maxCampaignsPerWeek - campaignsThisWeek.length}
+
+TODAY'S CAPACITY: ${config.maxCampaignsPerDay - usedListsToday.length} slot(s) remaining (max ${config.maxCampaignsPerDay}/day)
+${usedListsToday.length > 0 ? `ALREADY SENT TODAY to lists: [${usedListsToday.map(id => config.lists.find(l => l.listId.toString() === id)?.name || id).join(', ')}] at hour(s) ${usedHoursToday.join(', ')}h. NEVER repeat the same list same day. NEW send must be at least ${minGap}h apart.` : ''}
+${usedListsToday.length > 0 ? `ALLOWED LISTS TODAY (you MUST pick one of these): ${availableListsToday.map(l => `"${l.name}" (${l.listId})`).join(', ') || 'NONE — schedule for tomorrow'}` : ''}
 
 AVAILABLE LISTS:
 ${listsInfo}
@@ -470,6 +480,22 @@ Respond ONLY with valid JSON:
         return null;
       }
 
+      // Reject if list already used today (only when scheduling same day)
+      const isSameDay = decision.sendHour >= earliestSendHour && decision.sendHour < config.sendWindowEnd;
+      if (isSameDay && usedListsToday.includes(decision.listId.toString())) {
+        console.error(`🏛️ Maximus: List "${validList.name}" already used today — rejecting`);
+        return null;
+      }
+
+      // Enforce minimum hour gap with other same-day campaigns
+      if (isSameDay) {
+        const tooClose = usedHoursToday.find(h => Math.abs(decision.sendHour - h) < minGap);
+        if (tooClose !== undefined) {
+          console.error(`🏛️ Maximus: Chosen hour ${decision.sendHour}:00 too close to ${tooClose}:00 (min gap ${minGap}h)`);
+          return null;
+        }
+      }
+
       // Validate send hour — must be in the future and within window
       if (decision.sendHour < earliestSendHour || decision.sendHour >= config.sendWindowEnd) {
         // If today's window is still open, use earliest available hour
@@ -571,11 +597,18 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
       return { success: false, reason: 'weekly_limit_reached', detail: `${campaignsThisWeek.length}/${config.maxCampaignsPerWeek} campaigns this week` };
     }
 
+    // Same-day awareness (for the proposal flow too)
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const sentToday = campaignsThisWeek.filter(c => new Date(c.sentAt) >= todayStart);
+    const usedListsToday = sentToday.map(c => c.list.toString());
+    const usedHoursToday = sentToday.map(c => c.sentHour);
+
     // Gather learning data
     const learningData = await this.gatherLearningData();
 
     // Step 1: Ask Claude for decision
-    const decision = await this.makeDecision(config, learningData, campaignsThisWeek);
+    const decision = await this.makeDecision(config, learningData, campaignsThisWeek, { usedListsToday, usedHoursToday });
     if (!decision) {
       return { success: false, reason: 'decision_failed' };
     }
@@ -736,11 +769,19 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
 
 PLAN THE COMPLETE WEEK: ${weekLabel}
 AVAILABLE DAYS: ${weekDays.map(d => `${d.day} (${d.date})`).join(', ')}
-CAMPAIGNS TO PLAN: ${config.maxCampaignsPerWeek} (pick the best ${config.maxCampaignsPerWeek} days, leave others as rest days)
+CAMPAIGNS TO PLAN: up to ${config.maxCampaignsPerWeek} total this week, up to ${config.maxCampaignsPerDay} per day
 SEND WINDOW: ${config.sendWindowStart}:00 - ${config.sendWindowEnd}:00 (${config.timezone})
+MIN HOURS BETWEEN SAME-DAY SENDS: ${config.minHoursBetweenSameDay}h
 
-AVAILABLE LISTS:
+AVAILABLE LISTS (${config.lists.length} total):
 ${listsInfo}
+
+MULTI-SEND STRATEGY — when to double up on one day:
+- A strong day (based on learning data) can host 2 campaigns in different time slots
+- The 2 campaigns MUST go to DIFFERENT lists (never same list twice same day)
+- The 2 campaigns MUST be spaced at least ${config.minHoursBetweenSameDay}h apart (e.g. 11am + 3pm)
+- On a double-day, mix types: if one is promotional, the other should be content/spotlight (never 2 promos same day)
+- Prefer doubling on your best-performing day(s) to maximize impressions on strong slots
 
 AVAILABLE PRODUCTS (for creative):
 ${productsInfo}
@@ -787,20 +828,22 @@ CAMPAIGN TYPES:
 3. "product_spotlight" — Feature a product without discount. Highlight quality, craft.
 
 STRATEGY RULES:
-- Balance the week: 1-2 promotional + rest content/spotlight
+- Balance the week: ~25-35% promotional, rest content/spotlight/recipe/pairing
 - NEVER schedule two promotional campaigns on consecutive days — always put at least one content or spotlight between promos
+- NEVER send two promos on the SAME day (even with different lists)
 - Rotate products — don't feature the same product 2 days in a row
-- Rotate lists — alternate between them
+- Rotate lists — avoid hitting the same list on consecutive days if possible
+- SAME DAY RULE: if you schedule 2 campaigns on one day, they MUST go to different lists, with ≥${config.minHoursBetweenSameDay}h between them, and at least one must be non-promotional
 - Vary send hours to gather learning data
 - Each discount code MUST be unique. Do NOT reuse: ${allUsedCodes.join(', ') || 'none yet'}
-- Pick 2 rest days (no email) — typically the weakest days
+- It's OK to leave weak days empty (rest days) — don't force campaigns on low-performing days just to fill slots
 
 CONTENT CAMPAIGNS — EDITORIAL FORMAT:
 For any campaign with campaignType = "content", you MUST include:
 - "storyBody": 2-3 paragraphs of REAL story content (200-400 words). The actual story body for the email — sensory, personal, warm. Show the product through human moments, not marketing speak.
 - "pullQuote": one memorable sentence (max 120 chars) that will be displayed as a stylized pull quote.
 
-Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campaigns:
+Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek} campaigns (multiple per day allowed, up to ${config.maxCampaignsPerDay}/day):
 [
   {
     "day": "<day name>",
@@ -874,18 +917,64 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
 
       console.log(`🏛️ Maximus: ${campaigns.length} campaigns planned`);
 
-      // Enforce: no two promos on consecutive days
-      // Sort by date first to ensure correct order
-      campaigns.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-      for (let i = 1; i < campaigns.length; i++) {
-        if (campaigns[i].campaignType === 'promotional' && campaigns[i - 1].campaignType === 'promotional') {
-          console.warn(`🏛️ Maximus: Back-to-back promos detected on ${campaigns[i - 1].day} and ${campaigns[i].day}. Switching ${campaigns[i].day} to content.`);
-          campaigns[i].campaignType = 'content';
-          campaigns[i].discountPercent = null;
-          campaigns[i].discountCode = null;
-          if (!campaigns[i].contentArchetype) campaigns[i].contentArchetype = 'tips';
-          if (!campaigns[i].contentAngle) campaigns[i].contentAngle = 'Product quality & craft';
+      // Sort by date + hour to reason about same-day pairs and consecutive days
+      campaigns.sort((a, b) => {
+        const d = (a.date || '').localeCompare(b.date || '');
+        return d !== 0 ? d : (a.sendHour || 0) - (b.sendHour || 0);
+      });
+
+      // Group by date for same-day validation
+      const byDate = {};
+      for (const c of campaigns) {
+        if (!byDate[c.date]) byDate[c.date] = [];
+        byDate[c.date].push(c);
+      }
+
+      // Same-day rules: max per day, distinct lists, min hour gap, no 2 promos
+      const structuralViolations = [];
+      for (const [date, dayCamps] of Object.entries(byDate)) {
+        if (dayCamps.length > config.maxCampaignsPerDay) {
+          structuralViolations.push(`${date}: ${dayCamps.length} campaigns exceeds maxCampaignsPerDay=${config.maxCampaignsPerDay}`);
         }
+        const listIds = dayCamps.map(c => c.listId);
+        if (new Set(listIds).size !== listIds.length) {
+          structuralViolations.push(`${date}: duplicate list on same day`);
+        }
+        const promoCount = dayCamps.filter(c => c.campaignType === 'promotional').length;
+        if (promoCount > 1) {
+          structuralViolations.push(`${date}: ${promoCount} promos on same day (max 1)`);
+        }
+        // min hour gap
+        for (let i = 1; i < dayCamps.length; i++) {
+          const gap = Math.abs(dayCamps[i].sendHour - dayCamps[i - 1].sendHour);
+          if (gap < config.minHoursBetweenSameDay) {
+            structuralViolations.push(`${date}: hours ${dayCamps[i - 1].sendHour}h and ${dayCamps[i].sendHour}h too close (min ${config.minHoursBetweenSameDay}h gap)`);
+          }
+        }
+      }
+
+      // Back-to-back promos across consecutive DATES (regardless of same/different day grouping)
+      const promoDates = [...new Set(campaigns.filter(c => c.campaignType === 'promotional').map(c => c.date))].sort();
+      for (let i = 1; i < promoDates.length; i++) {
+        const diffDays = (new Date(promoDates[i]) - new Date(promoDates[i - 1])) / 86400000;
+        if (diffDays === 1) {
+          // auto-demote the second day's promo(s) to content
+          const toFlip = campaigns.filter(c => c.date === promoDates[i] && c.campaignType === 'promotional');
+          toFlip.forEach(c => {
+            console.warn(`🏛️ Maximus: Back-to-back promo demoted (${promoDates[i - 1]} → ${promoDates[i]}): "${c.subjectLine}" → content`);
+            c.campaignType = 'content';
+            c.discountPercent = null;
+            c.discountCode = null;
+            if (!c.contentArchetype) c.contentArchetype = 'tips';
+            if (!c.contentAngle) c.contentAngle = 'Product quality & craft';
+          });
+        }
+      }
+
+      if (structuralViolations.length > 0) {
+        console.error('🏛️ Maximus: Weekly plan rejected — structural violations:');
+        structuralViolations.forEach(v => console.error(`   ${v}`));
+        return { success: false, reason: 'validation_failed', violations: structuralViolations };
       }
 
       // Validate every subject and discount code

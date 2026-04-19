@@ -16,6 +16,8 @@ const maximusConfigSchema = new mongoose.Schema({
 
   // Constraints
   maxCampaignsPerWeek: { type: Number, default: 5 },
+  maxCampaignsPerDay: { type: Number, default: 2 },
+  minHoursBetweenSameDay: { type: Number, default: 3 },
   sendWindowStart: { type: Number, default: 11 }, // 11 AM
   sendWindowEnd: { type: Number, default: 19 },   // 7 PM
   timezone: { type: String, default: 'America/New_York' },
