@@ -246,11 +246,14 @@ class ApolloService {
       'jar with cutting board, knife, and prepped ingredients nearby'
     ];
 
-    // Pick one of each randomly
-    const scene = scenes[Math.floor(Math.random() * scenes.length)];
-    const lighting = lightingMoods[Math.floor(Math.random() * lightingMoods.length)];
-    const palette = colorPalettes[Math.floor(Math.random() * colorPalettes.length)];
-    const composition = compositions[Math.floor(Math.random() * compositions.length)];
+    // Use Director brief (from Opus via Maximus) when available; fall back to random pools.
+    const d = brief.director || {};
+    const scene = d.scene || scenes[Math.floor(Math.random() * scenes.length)];
+    const lighting = d.lighting || lightingMoods[Math.floor(Math.random() * lightingMoods.length)];
+    const palette = d.palette || colorPalettes[Math.floor(Math.random() * colorPalettes.length)];
+    const composition = d.composition || compositions[Math.floor(Math.random() * compositions.length)];
+    const directorExtras = d.extras ? `\nEXTRAS: ${d.extras}.` : '';
+    if (brief.director) console.log('   🎬 Using Director brief (bespoke)');
 
     const baseScene = `ASPECT RATIO: 9:16 vertical portrait, designed for email marketing.
 
@@ -259,7 +262,7 @@ CRITICAL: You MUST use the reference product photo provided above as the EXACT j
 SCENE: ${scene}.
 LIGHTING: ${lighting}.
 COLOR PALETTE: ${palette}.
-COMPOSITION: ${composition}.
+COMPOSITION: ${composition}.${directorExtras}
 
 Place the EXACT jar from the reference photo as described. Surround it with complementary fresh ingredients that match the product. Premium lifestyle food photography, hyperrealistic, 8K, 9:16 vertical portrait.
 

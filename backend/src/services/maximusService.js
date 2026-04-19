@@ -679,8 +679,10 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
 
     apolloService.init();
     if (apolloService.isAvailable()) {
-      console.log('\n🏛️ Maximus: Requesting creative from Apollo...');
+      console.log('\n🏛️ Maximus: Directing creative brief...');
+      const director = await this.directCreative(decision);
 
+      console.log('\n🏛️ Maximus: Requesting creative from Apollo...');
       const apolloBrief = {
         product: decision.product,
         headline: decision.headline || decision.subjectLine,
@@ -689,7 +691,8 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
         contentAngle: decision.contentAngle,
         recipe: decision.recipe,
         pairing: decision.pairing,
-        customerLove: decision.customerLove
+        customerLove: decision.customerLove,
+        director
       };
 
       if (decision.campaignType === 'promotional') {
@@ -1080,8 +1083,9 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
         // Default type
         if (!c.campaignType) campaigns[i].campaignType = 'content';
 
-        // Generate creative with Apollo
+        // Direct + generate creative with Apollo
         if (apolloService.isAvailable()) {
+          const director = await this.directCreative(c);
           const apolloBrief = {
             product: c.product,
             headline: c.headline || c.subjectLine,
@@ -1090,7 +1094,8 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
             contentAngle: c.contentAngle,
             recipe: c.recipe,
             pairing: c.pairing,
-            customerLove: c.customerLove
+            customerLove: c.customerLove,
+            director
           };
           if (c.campaignType === 'promotional') {
             apolloBrief.discount = `${c.discountPercent}% OFF TODAY ONLY`;
@@ -1576,6 +1581,82 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
    * Ask Claude to analyze a completed campaign and extract learnings
    * Updates the log with insights and accumulates memory in config
    */
+  // ==================== DIRECTOR (creative brief for Apollo/Gemini) ====================
+
+  /**
+   * Given a decision, ask Claude (Opus) to design a bespoke visual brief:
+   * scene, lighting, palette, composition, extras. Beats the random-pool
+   * approach because every field is coherent with type/product/narrative/season.
+   *
+   * Returns null on failure — Apollo will fall back to random pools.
+   */
+  async directCreative(decision) {
+    if (!this.isAvailable()) return null;
+
+    const config = await MaximusConfig.getConfig();
+    const model = config.model || this.defaultModel;
+
+    const typeHints = {
+      promotional: 'urgency-friendly lifestyle — jar hero, props suggesting reward/indulgence',
+      content: 'editorial magazine cover — quiet, narrative, a human presence felt not shown',
+      product_spotlight: 'clean premium product photography — craft-forward, texture close-up',
+      recipe: 'overhead flat-lay of the finished dish with jar beside — Bon Appétit / NYT Cooking',
+      pairing: 'side-by-side on shared surface — two hero items, even visual weight',
+      customer_love: 'lived-in kitchen moment — mid-use, warmth, everyday joy'
+    };
+
+    const narrativeHook = [
+      decision.storyBody?.substring(0, 220),
+      decision.recipe?.dishName,
+      decision.pairing?.pairingNote,
+      decision.customerLove?.quotes?.[0]?.text
+    ].filter(Boolean).join(' | ') || decision.headline || decision.subjectLine;
+
+    const now = new Date();
+    const month = now.toLocaleString('en-US', { month: 'long' });
+    const season = ['December','January','February'].includes(month) ? 'winter'
+                 : ['March','April','May'].includes(month) ? 'spring'
+                 : ['June','July','August'].includes(month) ? 'summer'
+                 : 'autumn';
+
+    const prompt = `You are the creative director for a single Jersey Pickles email poster.
+
+CAMPAIGN CONTEXT:
+- Type: ${decision.campaignType}  (${typeHints[decision.campaignType] || 'premium lifestyle'})
+- Product: ${decision.productName || decision.product}
+- Headline: "${decision.headline || decision.subjectLine}"
+- Narrative hint: ${narrativeHook}
+- Month: ${month} (${season})
+
+YOUR JOB: design a bespoke visual brief that is coherent with type, product, narrative, and season. Avoid clichés. Avoid mismatches (e.g. no "winter candlelight" for a summer grilling recipe).
+
+Respond ONLY with valid JSON (no prose, no markdown):
+{
+  "scene": "<one vivid sentence describing the surface and setting — specific objects, not generic>",
+  "lighting": "<one sentence, specific time of day, quality and color temperature>",
+  "palette": "<4-6 color words anchored to the product + season>",
+  "composition": "<one sentence, camera angle, subject placement, negative space>",
+  "extras": "<optional one sentence of distinctive props/textures that tie to the narrative, or null>"
+}`;
+
+    try {
+      const response = await this.client.messages.create({
+        model,
+        max_tokens: 500,
+        messages: [{ role: 'user', content: prompt }]
+      });
+      const content = response.content?.[0]?.text || '';
+      const match = content.match(/\{[\s\S]*\}/);
+      if (!match) return null;
+      const director = JSON.parse(match[0]);
+      console.log(`🎬 Director (${model}): ${director.scene?.substring(0, 60)}...`);
+      return director;
+    } catch (err) {
+      console.error('🎬 Director error:', err.message);
+      return null;
+    }
+  }
+
   async analyzeCampaignWithClaude(log) {
     if (!this.isAvailable()) return;
 
