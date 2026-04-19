@@ -6,6 +6,7 @@ const router = express.Router();
 const { auth, authorize } = require('../middleware/auth');
 const ApolloConfig = require('../models/ApolloConfig');
 const apolloService = require('../services/apolloService');
+const cloudinary = require('../config/cloudinary');
 
 router.use(auth);
 
@@ -35,6 +36,45 @@ router.get('/products', authorize('admin'), async (req, res) => {
     const config = await ApolloConfig.getConfig();
     res.json({ success: true, products: config.products });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/apollo/products/upload
+ * Upload a bank image (PNG/JPG, full resolution — Gemini needs hi-res reference)
+ * Body: { image: "data:image/png;base64,..." , slug: "optional-slug-for-id" }
+ * Returns: { url, publicId }
+ */
+router.post('/products/upload', authorize('admin'), async (req, res) => {
+  try {
+    const { image, slug } = req.body;
+    if (!image || !image.startsWith('data:image/')) {
+      return res.status(400).json({ error: 'image must be a base64 data URI' });
+    }
+
+    const publicId = slug
+      ? `jerseypickles/apollo-bank/${slug}-${Date.now()}`
+      : `jerseypickles/apollo-bank/${Date.now()}`;
+
+    const result = await cloudinary.uploader.upload(image, {
+      public_id: publicId,
+      resource_type: 'image',
+      // No width cap — Gemini needs the full-res reference jar photo
+      quality: 'auto:best',
+      tags: ['apollo-bank', 'product-reference']
+    });
+
+    console.log(`🏛️ Apollo: Bank image uploaded — ${result.secure_url}`);
+    res.json({
+      success: true,
+      url: result.secure_url,
+      publicId: result.public_id,
+      width: result.width,
+      height: result.height
+    });
+  } catch (error) {
+    console.error('Apollo upload error:', error);
     res.status(500).json({ error: error.message });
   }
 });
