@@ -49,6 +49,112 @@ class MaximusService {
     return this.initialized && this.client !== null;
   }
 
+  // ==================== PROMPT BUILDERS ====================
+
+  _buildLearningSection(learningData) {
+    if (!learningData.totalCampaigns) return 'No historical data yet (initial phase).';
+    const dayLine = learningData.byDay?.map(d => `  ${d._id}: ${d.avgOpenRate?.toFixed(1)}% opens, ${d.avgClickRate?.toFixed(1)}% clicks (${d.campaigns} campaigns)`).join('\n') || '  No data yet';
+    const hourLine = learningData.byHour?.map(h => `  ${h._id}:00: ${h.avgOpenRate?.toFixed(1)}% opens, ${h.avgClickRate?.toFixed(1)}% clicks (${h.campaigns} campaigns)`).join('\n') || '  No data yet';
+    const listLine = learningData.byList?.map(l => `  "${l.listName}": ${l.avgOpenRate?.toFixed(1)}% opens, ${l.avgClickRate?.toFixed(1)}% clicks (${l.campaigns} campaigns)`).join('\n') || '  No data yet';
+    return `Historical data (${learningData.totalCampaigns} campaigns):
+- Average open rate: ${learningData.avgOpenRate?.toFixed(1)}%
+- Average click rate: ${learningData.avgClickRate?.toFixed(1)}%
+- Total revenue: $${learningData.totalRevenue?.toFixed(0)}
+
+Best performing days:
+${dayLine}
+
+Best performing hours:
+${hourLine}
+
+Performance by list:
+${listLine}`;
+  }
+
+  async _buildProductsInfo() {
+    const ApolloConfig = require('../models/ApolloConfig');
+    const apolloConfig = await ApolloConfig.getConfig();
+    const products = apolloConfig.getActiveProducts();
+    return products.length > 0
+      ? products.map(p => `- "${p.name}" (slug: ${p.slug}, category: ${p.category})`).join('\n')
+      : '- No products configured yet';
+  }
+
+  async _collectUsedDiscountCodes(extraCodes = []) {
+    const existingCampaignTags = await Campaign.find({
+      tags: 'maximus',
+      createdAt: { $gte: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000) }
+    }).select('tags').lean();
+    const fromTags = existingCampaignTags.flatMap(c =>
+      (c.tags || []).filter(t => t === t.toUpperCase() && t.length >= 4 && t.length <= 12)
+    );
+    return [...new Set([...extraCodes.filter(Boolean), ...fromTags])];
+  }
+
+  // ==================== TIMEZONE HELPERS ====================
+
+  /**
+   * Get the UTC offset hours for America/New_York on a given date (handles DST).
+   * EDT = UTC-4 (second Sunday of March → first Sunday of November)
+   * EST = UTC-5 (rest of year)
+   */
+  getEtOffsetHours(date = new Date()) {
+    const tzName = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      timeZoneName: 'short'
+    }).formatToParts(date).find(p => p.type === 'timeZoneName')?.value;
+    return tzName === 'EDT' ? 4 : 5;
+  }
+
+  // ==================== SUBJECT VALIDATION ====================
+
+  /**
+   * Validate a subject line against the critical rules the prompt sets:
+   * - no weekday names (monday, tuesday, etc.)
+   * - no date-specific urgency phrases (today only, ends tonight, etc.)
+   * Returns { valid, violations: [reason] }
+   */
+  validateSubject(subject) {
+    if (!subject) return { valid: false, violations: ['empty_subject'] };
+    const s = subject.toLowerCase();
+    const violations = [];
+
+    const weekdayRx = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\b/;
+    const wkMatch = s.match(weekdayRx);
+    if (wkMatch) violations.push(`weekday_name: "${wkMatch[0]}"`);
+
+    const urgencyPhrases = [
+      'today only', 'ends tonight', 'ends today', 'last chance',
+      'this weekend', 'before monday', 'before tuesday', 'before wednesday',
+      'before thursday', 'before friday', 'before saturday', 'before sunday',
+      'by monday', 'by tuesday', 'by wednesday', 'by thursday',
+      'by friday', 'by saturday', 'by sunday',
+      'ends monday', 'ends tuesday', 'ends wednesday', 'ends thursday',
+      'ends friday', 'ends saturday', 'ends sunday'
+    ];
+    for (const phrase of urgencyPhrases) {
+      if (s.includes(phrase)) {
+        violations.push(`date_urgency: "${phrase}"`);
+        break;
+      }
+    }
+
+    return { valid: violations.length === 0, violations };
+  }
+
+  /**
+   * Validate a discount code — must be uppercase, 4-12 chars, no weekday abbreviations
+   */
+  validateDiscountCode(code) {
+    if (!code) return { valid: true, violations: [] };
+    const violations = [];
+    if (!/^[A-Z0-9]{4,12}$/.test(code)) violations.push('format_invalid');
+    if (/^(MON|TUE|WED|THU|FRI|SAT|SUN)/.test(code) || /(MON|TUE|WED|THU|FRI|SAT|SUN)$/.test(code)) {
+      violations.push('weekday_in_code');
+    }
+    return { valid: violations.length === 0, violations };
+  }
+
   // ==================== MAIN EXECUTION ====================
 
   /**
@@ -183,31 +289,8 @@ class MaximusService {
       `- [${c.campaignType || 'unknown'}] "${c.subjectLine}" → Product: ${c.productName || 'unknown'}, List: ${c.listName}, Day: ${c.sentDay} ${c.sentHour}:00, Archetype: ${c.contentArchetype || 'n/a'}, Headline: "${c.headline || 'n/a'}", Open: ${c.metrics.openRate}%, Click: ${c.metrics.clickRate}%`
     ).join('\n') || 'No campaigns sent this week yet.';
 
-    let learningSection = 'No historical data yet (initial phase).';
-    if (learningData.totalCampaigns > 0) {
-      learningSection = `Historical data (${learningData.totalCampaigns} campaigns):
-- Average open rate: ${learningData.avgOpenRate?.toFixed(1)}%
-- Average click rate: ${learningData.avgClickRate?.toFixed(1)}%
-- Total revenue: $${learningData.totalRevenue?.toFixed(0)}
-
-Best performing days:
-${learningData.byDay?.map(d => `  ${d._id}: ${d.avgOpenRate?.toFixed(1)}% opens, ${d.avgClickRate?.toFixed(1)}% clicks (${d.campaigns} campaigns)`).join('\n') || '  No data yet'}
-
-Best performing hours:
-${learningData.byHour?.map(h => `  ${h._id}:00: ${h.avgOpenRate?.toFixed(1)}% opens, ${h.avgClickRate?.toFixed(1)}% clicks (${h.campaigns} campaigns)`).join('\n') || '  No data yet'}
-
-Performance by list:
-${learningData.byList?.map(l => `  "${l.listName}": ${l.avgOpenRate?.toFixed(1)}% opens, ${l.avgClickRate?.toFixed(1)}% clicks (${l.campaigns} campaigns)`).join('\n') || '  No data yet'}`;
-    }
-
-    // Get available products from Apollo bank
-    const ApolloConfig = require('../models/ApolloConfig');
-    const apolloConfig = await ApolloConfig.getConfig();
-    const availableProducts = apolloConfig.getActiveProducts();
-    const productsInfo = availableProducts.length > 0
-      ? availableProducts.map(p => `- "${p.name}" (slug: ${p.slug}, category: ${p.category})`).join('\n')
-      : '- No products configured yet';
-
+    const learningSection = this._buildLearningSection(learningData);
+    const productsInfo = await this._buildProductsInfo();
     const recentInsights = await this._getRecentInsights();
 
     // Calculate current ET hour for the prompt
@@ -215,13 +298,8 @@ ${learningData.byList?.map(l => `  "${l.listName}": ${l.avgOpenRate?.toFixed(1)}
     const earliestSendHour = Math.max(config.sendWindowStart, currentETHour + 1);
 
     // Collect existing discount codes this week to avoid duplicates
-    const usedCodes = campaignsThisWeek.map(c => c.reasoning?.discountCode).filter(Boolean);
-    const existingCampaignTags = await Campaign.find({
-      tags: 'maximus',
-      createdAt: { $gte: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000) }
-    }).select('tags').lean();
-    const usedCodesFromTags = existingCampaignTags.flatMap(c => (c.tags || []).filter(t => t === t.toUpperCase() && t.length >= 4 && t.length <= 12));
-    const allUsedCodes = [...new Set([...usedCodes, ...usedCodesFromTags])];
+    const weekCodes = campaignsThisWeek.map(c => c.reasoning?.discountCode).filter(Boolean);
+    const allUsedCodes = await this._collectUsedDiscountCodes(weekCodes);
 
     // Count campaign types this week
     const promoThisWeek = campaignsThisWeek.filter(c => c.campaignType === 'promotional').length;
@@ -309,7 +387,7 @@ YOUR TASK:
 7. Which list to send to
 8. What hour to send — ${earliestSendHour >= config.sendWindowEnd ? `Today\\'s window is closed. Pick any hour between ${config.sendWindowStart} and ${config.sendWindowEnd - 1} for TOMORROW.` : `MUST be >= ${earliestSendHour} and < ${config.sendWindowEnd} (current time is ${currentETHour}:00 ET)`}
 
-${learningData.totalCampaigns < 7 ? 'LEARNING PHASE: Try different types, hours, and lists to gather data.' : 'OPTIMIZED PHASE: Use your learning data to pick the best performing time and list.'}
+${learningData.totalCampaigns < 15 ? 'LEARNING PHASE: Try different types, hours, and lists to gather data.' : 'OPTIMIZED PHASE: Use your learning data to pick the best performing time and list.'}
 
 DO NOT repeat a subject line used this week.
 
@@ -401,6 +479,57 @@ Respond ONLY with valid JSON:
           // Window closed — keep Claude's choice, calculateScheduledAt will push to tomorrow
           decision.sendHour = Math.max(config.sendWindowStart, Math.min(decision.sendHour, config.sendWindowEnd - 1));
         }
+      }
+
+      // Validate subject and discount code against critical prompt rules
+      const subjectCheck = this.validateSubject(decision.subjectLine);
+      const codeCheck = decision.campaignType === 'promotional'
+        ? this.validateDiscountCode(decision.discountCode)
+        : { valid: true, violations: [] };
+
+      if (!subjectCheck.valid || !codeCheck.valid) {
+        const allViolations = [...subjectCheck.violations, ...codeCheck.violations];
+        console.warn(`🏛️ Maximus: Decision failed validation — ${allViolations.join(', ')}. Retrying once...`);
+
+        const retryPrompt = `${prompt}
+
+⚠️ CRITICAL: Your previous attempt violated the rules:
+- Subject: "${decision.subjectLine}"
+- Discount code: ${decision.discountCode || 'n/a'}
+- Violations: ${allViolations.join(', ')}
+
+Retry with a subject that contains NO weekday names and NO date-specific urgency phrases, and a discount code with NO weekday abbreviations (MON/TUE/etc).`;
+
+        try {
+          const retryResp = await this.client.messages.create({
+            model: this.model,
+            max_tokens: 2048,
+            messages: [{ role: 'user', content: retryPrompt }]
+          });
+          const retryContent = retryResp.content?.[0]?.text || '';
+          const retryMatch = retryContent.match(/\{[\s\S]*\}/);
+          if (retryMatch) {
+            const retryDecision = JSON.parse(retryMatch[0]);
+            const rs = this.validateSubject(retryDecision.subjectLine);
+            const rc = retryDecision.campaignType === 'promotional'
+              ? this.validateDiscountCode(retryDecision.discountCode)
+              : { valid: true, violations: [] };
+            if (rs.valid && rc.valid) {
+              console.log('🏛️ Maximus: Retry produced valid subject/code');
+              // Carry over hour validation result
+              if (retryDecision.sendHour < earliestSendHour || retryDecision.sendHour >= config.sendWindowEnd) {
+                retryDecision.sendHour = earliestSendHour < config.sendWindowEnd
+                  ? earliestSendHour
+                  : Math.max(config.sendWindowStart, Math.min(retryDecision.sendHour, config.sendWindowEnd - 1));
+              }
+              return retryDecision;
+            }
+            console.error(`🏛️ Maximus: Retry still invalid — ${[...rs.violations, ...rc.violations].join(', ')}`);
+          }
+        } catch (retryErr) {
+          console.error('🏛️ Maximus: Retry error:', retryErr.message);
+        }
+        return null;
       }
 
       return decision;
@@ -580,40 +709,10 @@ Respond ONLY with valid JSON:
     // Gather context
     const learningData = await this.gatherLearningData();
     const recentInsights = await this._getRecentInsights();
-
-    const ApolloConfig = require('../models/ApolloConfig');
-    const apolloConfig = await ApolloConfig.getConfig();
-    const availableProducts = apolloConfig.getActiveProducts();
-    const productsInfo = availableProducts.length > 0
-      ? availableProducts.map(p => `- "${p.name}" (slug: ${p.slug}, category: ${p.category})`).join('\n')
-      : '- No products configured yet';
-
+    const productsInfo = await this._buildProductsInfo();
     const listsInfo = config.lists.map(l => `- "${l.name}" (ID: ${l.listId})`).join('\n');
-
-    // Collect used discount codes
-    const existingCampaignTags = await Campaign.find({
-      tags: 'maximus',
-      createdAt: { $gte: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000) }
-    }).select('tags').lean();
-    const usedCodes = existingCampaignTags.flatMap(c => (c.tags || []).filter(t => t === t.toUpperCase() && t.length >= 4 && t.length <= 12));
-    const allUsedCodes = [...new Set(usedCodes)];
-
-    let learningSection = 'No historical data yet (initial phase).';
-    if (learningData.totalCampaigns > 0) {
-      learningSection = `Historical data (${learningData.totalCampaigns} campaigns):
-- Average open rate: ${learningData.avgOpenRate?.toFixed(1)}%
-- Average click rate: ${learningData.avgClickRate?.toFixed(1)}%
-- Total revenue: $${learningData.totalRevenue?.toFixed(0)}
-
-Best performing days:
-${learningData.byDay?.map(d => `  ${d._id}: ${d.avgOpenRate?.toFixed(1)}% opens, ${d.avgClickRate?.toFixed(1)}% clicks (${d.campaigns} campaigns)`).join('\n') || '  No data yet'}
-
-Best performing hours:
-${learningData.byHour?.map(h => `  ${h._id}:00: ${h.avgOpenRate?.toFixed(1)}% opens, ${h.avgClickRate?.toFixed(1)}% clicks (${h.campaigns} campaigns)`).join('\n') || '  No data yet'}
-
-Performance by list:
-${learningData.byList?.map(l => `  "${l.listName}": ${l.avgOpenRate?.toFixed(1)}% opens, ${l.avgClickRate?.toFixed(1)}% clicks (${l.campaigns} campaigns)`).join('\n') || '  No data yet'}`;
-    }
+    const allUsedCodes = await this._collectUsedDiscountCodes();
+    const learningSection = this._buildLearningSection(learningData);
 
     // Determine next Monday
     const now = new Date();
@@ -789,17 +888,38 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
         }
       }
 
+      // Validate every subject and discount code
+      const violations = [];
+      for (const c of campaigns) {
+        const sc = this.validateSubject(c.subjectLine);
+        const dc = c.campaignType === 'promotional'
+          ? this.validateDiscountCode(c.discountCode)
+          : { valid: true, violations: [] };
+        if (!sc.valid || !dc.valid) {
+          violations.push({
+            day: c.day,
+            subject: c.subjectLine,
+            code: c.discountCode,
+            issues: [...sc.violations, ...dc.violations]
+          });
+        }
+      }
+      if (violations.length > 0) {
+        console.error('🏛️ Maximus: Weekly plan rejected — rule violations:');
+        violations.forEach(v => console.error(`   ${v.day}: "${v.subject}" (code: ${v.code || 'n/a'}) → ${v.issues.join(', ')}`));
+        return { success: false, reason: 'validation_failed', violations };
+      }
+
       // Generate Apollo creatives for each campaign
       apolloService.init();
       for (let i = 0; i < campaigns.length; i++) {
         const c = campaigns[i];
         console.log(`🏛️ Maximus: [${i + 1}/${campaigns.length}] ${c.day} — ${c.campaignType} — "${c.subjectLine}"`);
 
-        // Calculate scheduledAt
-        const campDate = new Date(c.date + 'T00:00:00');
-        const scheduledAt = new Date(campDate);
-        // Convert sendHour ET to UTC approximately (+4 or +5 depending on DST)
-        const etOffset = 4; // EDT
+        // Calculate scheduledAt — compute ET offset for this specific date (handles DST)
+        const campDate = new Date(c.date + 'T12:00:00Z'); // mid-day probe to avoid DST edge
+        const etOffset = this.getEtOffsetHours(campDate);
+        const scheduledAt = new Date(c.date + 'T00:00:00Z');
         scheduledAt.setUTCHours(c.sendHour + etOffset, 0, 0, 0);
         campaigns[i].scheduledAt = scheduledAt;
 
@@ -1098,16 +1218,12 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
    */
   calculateScheduledAt(sendHour, timezone = 'America/New_York') {
     const now = new Date();
-    const etString = now.toLocaleString('en-US', { timeZone: timezone, hour12: false });
-    const etNow = new Date(etString);
-    const currentETHour = etNow.getHours();
+    const currentETHour = parseInt(now.toLocaleString('en-US', {
+      timeZone: timezone, hour: 'numeric', hour12: false
+    }));
 
     let hourDiff = sendHour - currentETHour;
-
-    // If the hour has passed today, schedule for tomorrow
-    if (hourDiff <= 0) {
-      hourDiff += 24;
-    }
+    if (hourDiff <= 0) hourDiff += 24;
 
     const scheduledAt = new Date(now.getTime() + hourDiff * 60 * 60 * 1000);
     scheduledAt.setMinutes(0, 0, 0);
@@ -1396,8 +1512,12 @@ Respond ONLY with valid JSON:
 
     if (learningData.totalCampaigns === 0) return;
 
-    // Update phase
-    if (learningData.totalCampaigns >= 7) {
+    // Phase thresholds:
+    //   initial   — 0 campaigns
+    //   learning  — 1 to 14 campaigns (gathering data, exploring)
+    //   optimized — 15+ campaigns (enough samples per day/hour/list for meaningful ranking)
+    const OPTIMIZED_THRESHOLD = 15;
+    if (learningData.totalCampaigns >= OPTIMIZED_THRESHOLD) {
       config.learning.phase = 'optimized';
     } else if (learningData.totalCampaigns >= 1) {
       config.learning.phase = 'learning';
@@ -1414,8 +1534,8 @@ Respond ONLY with valid JSON:
         avgClickRate: d.avgClickRate
       }));
 
-      // Determine rest days (worst 1-2 days if we have enough data)
-      if (learningData.totalCampaigns >= 7) {
+      // Determine rest days only once we have a meaningful sample
+      if (learningData.totalCampaigns >= OPTIMIZED_THRESHOLD) {
         const sorted = [...config.learning.bestDays].sort((a, b) => a.score - b.score);
         config.learning.restDays = sorted.slice(0, 2).map(d => d.day);
       }
