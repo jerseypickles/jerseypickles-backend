@@ -47,9 +47,13 @@ const runMaximus = async () => {
  */
 const updateMetrics = async () => {
   try {
-    // Find logs from the last 7 days that need metrics update
+    // Find logs actually sent in the last 7 days (skip future-scheduled rows)
+    const now = new Date();
     const recentLogs = await MaximusCampaignLog.find({
-      sentAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }
+      sentAt: {
+        $gte: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000),
+        $lte: now
+      }
     }).select('campaign metricsUpdatedAt').lean();
 
     let updated = 0;

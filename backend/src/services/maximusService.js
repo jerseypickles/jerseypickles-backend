@@ -1287,8 +1287,13 @@ Respond ONLY with valid JSON — an array of ${config.maxCampaignsPerWeek} campa
     // Update learning in config
     await this.updateLearning();
 
-    // Analyze with Claude if enough data and not yet analyzed
-    if (delivered >= 50 && !log.claudeInsight?.analyzedAt) {
+    // Analyze with Claude only when metrics are mature:
+    // - delivered >= 100 (statistically meaningful sample)
+    // - at least 48h since send (open rates stabilize)
+    // - not yet analyzed
+    const ageMs = Date.now() - new Date(log.sentAt).getTime();
+    const MIN_AGE_MS = 48 * 60 * 60 * 1000;
+    if (delivered >= 100 && ageMs >= MIN_AGE_MS && !log.claudeInsight?.analyzedAt) {
       try {
         await this.analyzeCampaignWithClaude(log);
       } catch (err) {
