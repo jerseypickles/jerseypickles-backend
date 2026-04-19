@@ -21,8 +21,10 @@ const getShopifyService = () => {
 class MaximusService {
   constructor() {
     this.client = null;
-    this.model = 'claude-sonnet-4-6';
     this.initialized = false;
+    // Fallbacks only — real model comes from MaximusConfig (editable via UI)
+    this.defaultModel = 'claude-opus-4-7';
+    this.defaultAnalysisModel = 'claude-sonnet-4-6';
   }
 
   // ==================== INITIALIZATION ====================
@@ -485,10 +487,11 @@ Respond ONLY with valid JSON:
   }
 }`;
 
+    const decisionModel = config.model || this.defaultModel;
     try {
-      console.log('🏛️ Maximus: Asking Claude for decision...');
+      console.log(`🏛️ Maximus: Asking ${decisionModel} for decision...`);
       const response = await this.client.messages.create({
-        model: this.model,
+        model: decisionModel,
         max_tokens: 2048,
         messages: [{ role: 'user', content: prompt }]
       });
@@ -570,7 +573,7 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
 
         try {
           const retryResp = await this.client.messages.create({
-            model: this.model,
+            model: decisionModel,
             max_tokens: 2048,
             messages: [{ role: 'user', content: retryPrompt }]
           });
@@ -924,16 +927,17 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
   }
 ]`;
 
+    const planModel = config.model || this.defaultModel;
     try {
-      console.log('🏛️ Maximus: Asking Claude for weekly plan...');
+      console.log(`🏛️ Maximus: Asking ${planModel} for weekly plan...`);
       console.log('🏛️ Maximus: Prompt length:', prompt.length, 'chars');
       const claudeStart = Date.now();
       const response = await this.client.messages.create({
-        model: this.model,
+        model: planModel,
         max_tokens: 8192,
         messages: [{ role: 'user', content: prompt }]
       });
-      console.log(`🏛️ Maximus: Claude responded in ${((Date.now() - claudeStart) / 1000).toFixed(1)}s`);
+      console.log(`🏛️ Maximus: ${planModel} responded in ${((Date.now() - claudeStart) / 1000).toFixed(1)}s`);
 
       const content = response.content?.[0]?.text || '';
       console.log('🏛️ Maximus: Claude response length:', content.length, 'chars');
@@ -1610,9 +1614,10 @@ Respond ONLY with valid JSON:
   "newInsight": "A new pattern or learning to add to your memory (max 100 chars, or null if nothing new)"
 }`;
 
+    const analysisModel = config.modelForAnalysis || this.defaultAnalysisModel;
     try {
       const response = await this.client.messages.create({
-        model: this.model,
+        model: analysisModel,
         max_tokens: 300,
         messages: [{ role: 'user', content: prompt }]
       });
@@ -1739,7 +1744,8 @@ Respond ONLY with valid JSON:
       agent: 'Maximus',
       active: config.active,
       creativeAgentReady: config.creativeAgentReady,
-      model: this.model,
+      model: config.model || this.defaultModel,
+      modelForAnalysis: config.modelForAnalysis || this.defaultAnalysisModel,
       claudeAvailable: this.isAvailable(),
       lists: config.lists,
       constraints: {

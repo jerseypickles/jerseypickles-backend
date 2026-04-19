@@ -55,8 +55,10 @@ const maximusConfigSchema = new mongoose.Schema({
     lastUpdated: { type: Date }
   },
 
-  // Model config
-  model: { type: String, default: 'claude-sonnet-4-6' },
+  // Model config — split by task so heavy creative work gets Opus and
+  // cheap metrics-summary work gets Sonnet/Haiku.
+  model: { type: String, default: 'claude-opus-4-7' },              // makeDecision + generateWeeklyPlan
+  modelForAnalysis: { type: String, default: 'claude-sonnet-4-6' }, // analyzeCampaignWithClaude
 
   // Pending proposal (awaiting human approval)
   pendingProposal: {

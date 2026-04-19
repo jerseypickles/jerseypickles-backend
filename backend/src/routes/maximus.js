@@ -36,7 +36,12 @@ router.get('/status', authorize('admin'), async (req, res) => {
 router.put('/config', authorize('admin'), async (req, res) => {
   try {
     const config = await MaximusConfig.getConfig();
-    const { active, creativeAgentReady, lists, maxCampaignsPerWeek, maxCampaignsPerDay, minHoursBetweenSameDay, sendWindowStart, sendWindowEnd } = req.body;
+    const {
+      active, creativeAgentReady, lists,
+      maxCampaignsPerWeek, maxCampaignsPerDay, minHoursBetweenSameDay,
+      sendWindowStart, sendWindowEnd,
+      model, modelForAnalysis
+    } = req.body;
 
     if (typeof active === 'boolean') config.active = active;
     if (typeof creativeAgentReady === 'boolean') config.creativeAgentReady = creativeAgentReady;
@@ -46,6 +51,8 @@ router.put('/config', authorize('admin'), async (req, res) => {
     if (minHoursBetweenSameDay) config.minHoursBetweenSameDay = minHoursBetweenSameDay;
     if (sendWindowStart) config.sendWindowStart = sendWindowStart;
     if (sendWindowEnd) config.sendWindowEnd = sendWindowEnd;
+    if (model) config.model = model;
+    if (modelForAnalysis) config.modelForAnalysis = modelForAnalysis;
 
     await config.save();
 
