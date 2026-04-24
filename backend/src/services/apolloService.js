@@ -1,15 +1,18 @@
 // backend/src/services/apolloService.js
 // 🏛️ APOLLO - Creative Agent for Email Campaign Visuals
-// God of art and beauty - generates promotional images with Gemini
+// God of art and beauty - generates promotional images with Gemini + GPT-Image-2
 
 const { GoogleGenAI } = require('@google/genai');
+const OpenAI = require('openai');
+const { toFile } = require('openai');
 const cloudinary = require('../config/cloudinary');
 const ApolloConfig = require('../models/ApolloConfig');
 const axios = require('axios');
 
 class ApolloService {
   constructor() {
-    this.client = null;
+    this.geminiClient = null;
+    this.openaiClient = null;
     this.initialized = false;
   }
 
@@ -18,126 +21,172 @@ class ApolloService {
   init() {
     if (this.initialized) return;
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (geminiKey) {
+      try {
+        this.geminiClient = new GoogleGenAI({ apiKey: geminiKey });
+        console.log('🏛️ Apollo: Gemini initialized');
+      } catch (error) {
+        console.error('🏛️ Apollo: Gemini init error:', error.message);
+      }
+    } else {
       console.log('🏛️ Apollo: GEMINI_API_KEY not configured');
-      return;
     }
 
-    try {
-      this.client = new GoogleGenAI({ apiKey });
-      this.initialized = true;
-      console.log('🏛️ Apollo: Initialized (Gemini 3 Pro)');
-    } catch (error) {
-      console.error('🏛️ Apollo: Init error:', error.message);
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (openaiKey) {
+      try {
+        this.openaiClient = new OpenAI({ apiKey: openaiKey });
+        console.log('🏛️ Apollo: OpenAI initialized');
+      } catch (error) {
+        console.error('🏛️ Apollo: OpenAI init error:', error.message);
+      }
+    } else {
+      console.log('🏛️ Apollo: OPENAI_API_KEY not configured');
     }
+
+    this.initialized = true;
+  }
+
+  // Available engines right now (based on which keys loaded)
+  availableEngines() {
+    const engines = [];
+    if (this.geminiClient) engines.push('gemini');
+    if (this.openaiClient) engines.push('gpt');
+    return engines;
   }
 
   isAvailable() {
-    return this.initialized && this.client !== null;
+    return this.availableEngines().length > 0;
   }
 
   // ==================== MAIN: GENERATE CREATIVE ====================
 
   /**
-   * Generate a promotional creative image for a campaign
-   * Called by Maximus with a brief
+   * Generate promotional creative image(s) for a campaign.
+   * Runs the requested engines in parallel and returns one creative per engine.
    *
    * @param {object} brief - Campaign brief from Maximus
    * @param {string} brief.product - Product slug (e.g., 'hot-tomatoes')
-   * @param {string} brief.discount - Discount text (e.g., '25% OFF TODAY ONLY')
-   * @param {string} brief.code - Discount code (e.g., 'TOMATO')
-   * @param {string} brief.headline - Campaign headline
-   * @param {string} brief.productName - Full product name (e.g., 'Hot Tomatoes')
-   * @returns {object} { success, imageUrl, cloudinaryId, generationTime }
+   * @param {object} [opts]
+   * @param {string[]} [opts.engines] - Which engines to run. Defaults to config.enabledEngines ∩ availableEngines.
+   * @returns {object} { success, creatives: [{engine, model, imageUrl, cloudinaryId, generationTime, success, error}] }
    */
-  async generateCreative(brief) {
+  async generateCreative(brief, opts = {}) {
     if (!this.isAvailable()) {
-      return { success: false, error: 'Gemini API not available' };
+      return { success: false, error: 'No image engine available', creatives: [] };
     }
 
     const config = await ApolloConfig.getConfig();
-    const startTime = Date.now();
+    const requested = opts.engines || config.enabledEngines || ['gemini', 'gpt'];
+    const available = this.availableEngines();
+    const engines = requested.filter(e => available.includes(e));
+
+    if (engines.length === 0) {
+      return { success: false, error: `None of requested engines [${requested.join(',')}] are configured`, creatives: [] };
+    }
 
     console.log('\n🏛️ ═══════════════════════════════════════');
     console.log('   APOLLO - Generating Creative');
     console.log('═══════════════════════════════════════\n');
     console.log(`   Product: ${brief.product}`);
-    console.log(`   Discount: ${brief.discount}`);
-    console.log(`   Code: ${brief.code}`);
-    console.log(`   Headline: ${brief.headline}`);
+    console.log(`   Engines: ${engines.join(' + ')}`);
 
-    // 1. Get product from bank
-    const allSlugs = config.products.map(p => `"${p.slug}" (active: ${p.active})`);
-    console.log(`   Available products: ${allSlugs.join(', ') || 'NONE'}`);
-    console.log(`   Looking for slug: "${brief.product}"`);
+    // 1. Product lookup
     const product = config.getProduct(brief.product);
     if (!product) {
       console.error(`🏛️ Apollo: Product "${brief.product}" not found in bank`);
-      return { success: false, error: `Product "${brief.product}" not found` };
+      return { success: false, error: `Product "${brief.product}" not found`, creatives: [] };
     }
 
-    try {
-      // 2. Build the mega-prompt
-      const promptText = this.buildPrompt(brief, product);
-      console.log(`   Prompt length: ${promptText.length} chars`);
+    // 2. Build prompt once — same prompt for both engines
+    const promptText = this.buildPrompt(brief, product);
+    console.log(`   Prompt length: ${promptText.length} chars`);
 
-      // 3. Download bank image to send as reference
-      let bankImageData = null;
-      if (product.bankImageUrl) {
-        try {
-          console.log(`   Downloading bank image: ${product.bankImageUrl}`);
-          const imgResponse = await axios.get(product.bankImageUrl, { responseType: 'arraybuffer', timeout: 15000 });
-          bankImageData = Buffer.from(imgResponse.data).toString('base64');
-          const mimeType = imgResponse.headers['content-type'] || 'image/jpeg';
-          bankImageData = { base64: bankImageData, mimeType };
-          console.log(`   Bank image downloaded (${Math.round(imgResponse.data.length / 1024)}KB)`);
-        } catch (imgErr) {
-          console.warn(`   Could not download bank image: ${imgErr.message}`);
-        }
+    // 3. Download bank image once
+    let bankImageData = null;
+    if (product.bankImageUrl) {
+      try {
+        const imgResponse = await axios.get(product.bankImageUrl, { responseType: 'arraybuffer', timeout: 15000 });
+        const base64 = Buffer.from(imgResponse.data).toString('base64');
+        const mimeType = imgResponse.headers['content-type'] || 'image/jpeg';
+        bankImageData = { base64, mimeType, buffer: Buffer.from(imgResponse.data) };
+        console.log(`   Bank image downloaded (${Math.round(imgResponse.data.length / 1024)}KB)`);
+      } catch (imgErr) {
+        console.warn(`   Could not download bank image: ${imgErr.message}`);
       }
+    }
 
-      // 4. Call Gemini 3 Pro with text + reference image
-      console.log(`   Calling Gemini (${config.geminiModel})...`);
-      const imageBase64 = await this.callGemini(promptText, config.geminiModel, bankImageData);
+    // 4. Run requested engines in parallel — one failure does NOT abort the other
+    const results = await Promise.allSettled(
+      engines.map(engine => this._runEngine(engine, promptText, bankImageData, brief, config))
+    );
 
-      if (!imageBase64) {
-        return { success: false, error: 'Gemini returned no image' };
-      }
+    const creatives = results.map((r, idx) => {
+      if (r.status === 'fulfilled') return r.value;
+      return { engine: engines[idx], success: false, error: r.reason?.message || String(r.reason) };
+    });
 
-      console.log(`   Image generated (${Math.round(imageBase64.length / 1024)}KB base64)`);
+    const anySuccess = creatives.some(c => c.success);
 
-      // 4. Upload to Cloudinary
-      console.log('   Uploading to Cloudinary...');
-      const uploadResult = await this.uploadToCloudinary(imageBase64, brief, config.cloudinaryFolder);
-
-      const generationTime = Date.now() - startTime;
-
-      // 5. Update stats
-      config.stats.totalGenerated += 1;
+    // 5. Stats — count only successes
+    const successCount = creatives.filter(c => c.success).length;
+    if (successCount > 0) {
+      const avgTime = creatives.filter(c => c.success).reduce((s, c) => s + c.generationTime, 0) / successCount;
+      config.stats.totalGenerated += successCount;
       config.stats.lastGeneratedAt = new Date();
       config.stats.averageGenerationTime = Math.round(
-        (config.stats.averageGenerationTime * (config.stats.totalGenerated - 1) + generationTime) /
+        (config.stats.averageGenerationTime * (config.stats.totalGenerated - successCount) + avgTime * successCount) /
         config.stats.totalGenerated
       );
       await config.save();
-
-      console.log(`\n🏛️ Apollo: ✅ Creative generated in ${(generationTime / 1000).toFixed(1)}s`);
-      console.log(`   URL: ${uploadResult.secure_url}`);
-
-      return {
-        success: true,
-        imageUrl: uploadResult.secure_url,
-        cloudinaryId: uploadResult.public_id,
-        generationTime,
-        width: uploadResult.width,
-        height: uploadResult.height
-      };
-
-    } catch (error) {
-      console.error('🏛️ Apollo: Generation error:', error.message);
-      return { success: false, error: error.message };
     }
+
+    creatives.forEach(c => {
+      if (c.success) {
+        console.log(`   ✅ ${c.engine} (${(c.generationTime / 1000).toFixed(1)}s) → ${c.imageUrl}`);
+      } else {
+        console.log(`   ❌ ${c.engine}: ${c.error}`);
+      }
+    });
+
+    return { success: anySuccess, creatives };
+  }
+
+  /**
+   * Run one engine end-to-end: generate → upload → return creative record.
+   */
+  async _runEngine(engine, promptText, bankImageData, brief, config) {
+    const startTime = Date.now();
+    let imageBase64 = null;
+    let model = null;
+
+    if (engine === 'gemini') {
+      model = config.geminiModel;
+      imageBase64 = await this.callGemini(promptText, model, bankImageData);
+    } else if (engine === 'gpt') {
+      model = config.openaiModel;
+      imageBase64 = await this.callGpt(promptText, model, bankImageData);
+    } else {
+      throw new Error(`Unknown engine: ${engine}`);
+    }
+
+    if (!imageBase64) {
+      return { engine, model, success: false, error: `${engine} returned no image`, generationTime: Date.now() - startTime };
+    }
+
+    const uploadResult = await this.uploadToCloudinary(imageBase64, brief, config.cloudinaryFolder, engine);
+
+    return {
+      engine,
+      model,
+      success: true,
+      imageUrl: uploadResult.secure_url,
+      cloudinaryId: uploadResult.public_id,
+      generationTime: Date.now() - startTime,
+      width: uploadResult.width,
+      height: uploadResult.height
+    };
   }
 
   // ==================== GEMINI API CALL ====================
@@ -149,7 +198,8 @@ class ApolloService {
    * @param {object|null} bankImage - { base64, mimeType } reference product photo
    */
   async callGemini(prompt, model = 'gemini-3-pro-image-preview', bankImage = null) {
-    // Build contents: reference image first, then text prompt
+    if (!this.geminiClient) throw new Error('Gemini not initialized');
+
     const parts = [];
 
     if (bankImage) {
@@ -166,7 +216,7 @@ class ApolloService {
       parts.push({ text: prompt });
     }
 
-    const response = await this.client.models.generateContent({
+    const response = await this.geminiClient.models.generateContent({
       model,
       contents: [{ role: 'user', parts }],
       config: {
@@ -174,10 +224,9 @@ class ApolloService {
       }
     });
 
-    // Extract image from response
     if (response.candidates && response.candidates.length > 0) {
-      const parts = response.candidates[0].content?.parts || [];
-      for (const part of parts) {
+      const responseParts = response.candidates[0].content?.parts || [];
+      for (const part of responseParts) {
         if (part.inlineData && part.inlineData.mimeType?.startsWith('image/')) {
           return part.inlineData.data;
         }
@@ -185,6 +234,41 @@ class ApolloService {
     }
 
     return null;
+  }
+
+  // ==================== OPENAI (GPT-IMAGE-2) API CALL ====================
+
+  /**
+   * Call GPT-Image-2 via the /v1/images/edits endpoint, using the bank image as reference.
+   * Returns base64 PNG.
+   * @param {string} prompt - Text prompt
+   * @param {string} model - OpenAI image model (default 'gpt-image-2')
+   * @param {object|null} bankImage - { buffer, mimeType } reference product photo
+   */
+  async callGpt(prompt, model = 'gpt-image-2', bankImage = null) {
+    if (!this.openaiClient) throw new Error('OpenAI not initialized');
+
+    const finalPrompt = bankImage
+      ? `REFERENCE PRODUCT PHOTO: The attached image is the EXACT product jar you must reproduce. Match its label, shape, color, and proportions precisely. Do NOT invent a different jar.\n\n${prompt}`
+      : prompt;
+
+    let response;
+    if (bankImage && bankImage.buffer) {
+      const fileExt = (bankImage.mimeType || 'image/jpeg').split('/')[1] || 'jpg';
+      const refFile = await toFile(bankImage.buffer, `reference.${fileExt}`, { type: bankImage.mimeType || 'image/jpeg' });
+      response = await this.openaiClient.images.edit({
+        model,
+        image: [refFile],
+        prompt: finalPrompt
+      });
+    } else {
+      response = await this.openaiClient.images.generate({
+        model,
+        prompt: finalPrompt
+      });
+    }
+
+    return response.data?.[0]?.b64_json || null;
   }
 
   // ==================== PROMPT BUILDER ====================
@@ -394,18 +478,18 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
   // ==================== CLOUDINARY UPLOAD ====================
 
   /**
-   * Upload generated image to Cloudinary
+   * Upload generated image to Cloudinary, tagging by engine so admin can filter.
    */
-  async uploadToCloudinary(base64Image, brief, folder) {
+  async uploadToCloudinary(base64Image, brief, folder, engine = 'gemini') {
     const dataUri = `data:image/png;base64,${base64Image}`;
     const timestamp = Date.now();
-    const publicId = `${folder}/${brief.product}-${brief.code}-${timestamp}`;
+    const publicId = `${folder}/${brief.product}-${brief.code}-${engine}-${timestamp}`;
 
     const result = await cloudinary.uploader.upload(dataUri, {
       public_id: publicId,
       folder: undefined,
       resource_type: 'image',
-      tags: ['apollo', 'agent-generated', brief.product, brief.code]
+      tags: ['apollo', 'agent-generated', engine, brief.product, brief.code]
     });
 
     return result;
@@ -427,9 +511,7 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
 
     // Promo and spotlight share the simple image + CTA layout
     const ctaText = 'SHOP NOW';
-    const ctaUrl = brief.product
-      ? `https://jerseypickles.com/products/${brief.product}`
-      : 'https://jerseypickles.com';
+    const ctaUrl = 'https://jerseypickles.com/';
 
     return `<!DOCTYPE html>
 <html>
@@ -470,11 +552,8 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
    * Tall image hero + headline + story body + pull quote + soft CTA to product page
    */
   buildContentEmailHtml(imageUrl, brief) {
-    const productSlug = brief.product || '';
     const productName = brief.productName || brief.product || 'our pickles';
-    const ctaUrl = productSlug
-      ? `https://jerseypickles.com/products/${productSlug}`
-      : 'https://jerseypickles.com';
+    const ctaUrl = 'https://jerseypickles.com/';
     const ctaText = `Shop ${productName}`;
 
     // Format story body — split paragraphs by double newline or single newline
@@ -566,9 +645,8 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
 
   buildRecipeEmailHtml(imageUrl, brief) {
     const recipe = brief.recipe || {};
-    const productSlug = brief.product || '';
     const productName = brief.productName || brief.product || 'our pickles';
-    const ctaUrl = productSlug ? `https://jerseypickles.com/products/${productSlug}` : 'https://jerseypickles.com';
+    const ctaUrl = 'https://jerseypickles.com/';
     const dishName = recipe.dishName || brief.headline;
     const ingredients = Array.isArray(recipe.ingredients) ? recipe.ingredients : [];
     const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
@@ -620,9 +698,8 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
 
   buildPairingEmailHtml(imageUrl, brief) {
     const pairing = brief.pairing || {};
-    const productSlug = brief.product || '';
     const productName = brief.productName || brief.product || 'our pickles';
-    const ctaUrl = productSlug ? `https://jerseypickles.com/products/${productSlug}` : 'https://jerseypickles.com';
+    const ctaUrl = 'https://jerseypickles.com/';
     const left = pairing.leftItem || { name: productName, description: 'Bold, bright, handcrafted' };
     const right = pairing.rightItem || { name: 'A classic pairing', description: 'Balance and contrast' };
     const note = pairing.pairingNote || 'A perfect match.';
@@ -674,9 +751,8 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
   buildCustomerLoveEmailHtml(imageUrl, brief) {
     const cl = brief.customerLove || {};
     const quotes = Array.isArray(cl.quotes) ? cl.quotes.slice(0, 3) : [];
-    const productSlug = brief.product || '';
     const productName = brief.productName || brief.product || 'our pickles';
-    const ctaUrl = productSlug ? `https://jerseypickles.com/products/${productSlug}` : 'https://jerseypickles.com';
+    const ctaUrl = 'https://jerseypickles.com/';
 
     const stars = (n) => '★'.repeat(Math.max(1, Math.min(5, n || 5)));
 
@@ -717,11 +793,22 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
   async getStatus() {
     const config = await ApolloConfig.getConfig();
 
+    const available = this.availableEngines();
+
     return {
       agent: 'Apollo',
       active: config.active,
-      geminiAvailable: this.isAvailable(),
+      engines: {
+        available,
+        enabled: config.enabledEngines,
+        gemini: { available: available.includes('gemini'), model: config.geminiModel },
+        gpt: { available: available.includes('gpt'), model: config.openaiModel }
+      },
+      // Back-compat fields for older clients
+      geminiAvailable: available.includes('gemini'),
       geminiModel: config.geminiModel,
+      openaiAvailable: available.includes('gpt'),
+      openaiModel: config.openaiModel,
       aspectRatio: config.aspectRatio,
       productBank: {
         total: config.products.length,

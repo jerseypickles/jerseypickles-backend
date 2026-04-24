@@ -272,7 +272,7 @@ ${listLine}`;
     // Step 3: Ask Apollo to generate creative
     console.log('\n🏛️ Maximus: Requesting creative from Apollo...');
     apolloService.init();
-    const creative = await apolloService.generateCreative({
+    const apolloResult = await apolloService.generateCreative({
       product: decision.product,
       discount: `${decision.discountPercent}% OFF TODAY ONLY`,
       code: decision.discountCode,
@@ -280,14 +280,15 @@ ${listLine}`;
       productName: decision.productName
     });
 
-    if (!creative.success) {
-      console.error('🏛️ Maximus: Apollo failed:', creative.error);
-      return { executed: false, reason: 'creative_generation_failed', error: creative.error };
+    const winner = (apolloResult.creatives || []).find(c => c.success);
+    if (!apolloResult.success || !winner) {
+      console.error('🏛️ Maximus: Apollo failed:', apolloResult.error);
+      return { executed: false, reason: 'creative_generation_failed', error: apolloResult.error };
     }
-    console.log(`🏛️ Maximus: ✅ Creative received from Apollo (${(creative.generationTime / 1000).toFixed(1)}s)`);
+    console.log(`🏛️ Maximus: ✅ Creative received from Apollo (${winner.engine}, ${(winner.generationTime / 1000).toFixed(1)}s)`);
 
     // Step 4: Build email HTML
-    const htmlContent = apolloService.buildEmailHtml(creative.imageUrl, {
+    const htmlContent = apolloService.buildEmailHtml(winner.imageUrl, {
       headline: decision.headline || decision.subjectLine,
       product: decision.product,
       discount: `${decision.discountPercent}% OFF`,
@@ -297,7 +298,7 @@ ${listLine}`;
     // Step 5: Schedule campaign
     const result = await this.scheduleCampaign(config, decision, htmlContent);
 
-    return { executed: true, ...result, imageUrl: creative.imageUrl };
+    return { executed: true, ...result, imageUrl: winner.imageUrl };
   }
 
   // ==================== DECISION MAKING ====================
@@ -676,6 +677,7 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
     // Step 2: Generate creative with Apollo
     let imageUrl = null;
     let htmlContent = null;
+    let creatives = [];
 
     apolloService.init();
     if (apolloService.isAvailable()) {
@@ -700,11 +702,14 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
         apolloBrief.code = decision.discountCode;
       }
 
-      const creative = await apolloService.generateCreative(apolloBrief);
+      const apolloResult = await apolloService.generateCreative(apolloBrief);
 
-      if (creative.success) {
-        imageUrl = creative.imageUrl;
-        htmlContent = apolloService.buildEmailHtml(creative.imageUrl, {
+      creatives = (apolloResult.creatives || []).filter(c => c.success);
+      const defaultCreative = creatives[0];
+
+      if (apolloResult.success && defaultCreative) {
+        imageUrl = defaultCreative.imageUrl;
+        htmlContent = apolloService.buildEmailHtml(defaultCreative.imageUrl, {
           headline: decision.headline || decision.subjectLine,
           product: decision.product,
           productName: decision.productName,
@@ -718,9 +723,9 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
           pairing: decision.pairing,
           customerLove: decision.customerLove
         });
-        console.log(`🏛️ Maximus: ✅ Creative received from Apollo`);
+        console.log(`🏛️ Maximus: ✅ ${creatives.length} creative(s) received from Apollo`);
       } else {
-        console.warn('🏛️ Maximus: Apollo failed, proposal will be without image:', creative.error);
+        console.warn('🏛️ Maximus: Apollo failed, proposal will be without image:', apolloResult.error);
       }
     } else {
       console.log('🏛️ Maximus: Apollo not available, proposal without image');
@@ -757,7 +762,15 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
       },
       imageUrl,
       htmlContent,
-      discountCreated: false
+      discountCreated: false,
+      creatives: creatives.map(c => ({
+        engine: c.engine,
+        model: c.model,
+        imageUrl: c.imageUrl,
+        cloudinaryId: c.cloudinaryId,
+        generationTime: c.generationTime
+      })),
+      selectedEngine: creatives[0]?.engine || null
     };
     await config.save();
 
@@ -1102,10 +1115,20 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
             apolloBrief.code = c.discountCode;
           }
 
-          const creative = await apolloService.generateCreative(apolloBrief);
-          if (creative.success) {
-            campaigns[i].imageUrl = creative.imageUrl;
-            campaigns[i].htmlContent = apolloService.buildEmailHtml(creative.imageUrl, {
+          const apolloResult = await apolloService.generateCreative(apolloBrief);
+          const okCreatives = (apolloResult.creatives || []).filter(x => x.success);
+          if (apolloResult.success && okCreatives.length > 0) {
+            const defaultCreative = okCreatives[0];
+            campaigns[i].imageUrl = defaultCreative.imageUrl;
+            campaigns[i].creatives = okCreatives.map(x => ({
+              engine: x.engine,
+              model: x.model,
+              imageUrl: x.imageUrl,
+              cloudinaryId: x.cloudinaryId,
+              generationTime: x.generationTime
+            }));
+            campaigns[i].selectedEngine = defaultCreative.engine;
+            campaigns[i].htmlContent = apolloService.buildEmailHtml(defaultCreative.imageUrl, {
               headline: c.headline || c.subjectLine,
               product: c.product,
               productName: c.productName,
@@ -1119,9 +1142,9 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
               pairing: c.pairing,
               customerLove: c.customerLove
             });
-            console.log(`   ✅ Creative generated`);
+            console.log(`   ✅ ${okCreatives.length} creative(s) generated`);
           } else {
-            console.warn(`   ⚠️ Apollo failed: ${creative.error}`);
+            console.warn(`   ⚠️ Apollo failed: ${apolloResult.error}`);
           }
         }
       }
@@ -1154,6 +1177,8 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
           sendHour: c.sendHour,
           imageUrl: c.imageUrl || null,
           htmlContent: c.htmlContent || null,
+          creatives: c.creatives || [],
+          selectedEngine: c.selectedEngine || null,
           reasoning: c.reasoning
         }))
       };
@@ -1308,6 +1333,79 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
     console.log(`🏛️ Maximus: ✅ Campaign scheduled (${result.campaignId})`);
 
     return { success: true, ...result, imageUrl };
+  }
+
+  // ==================== ENGINE SELECTION (dual-engine creatives) ====================
+
+  /**
+   * Build the email HTML for a decision-like object using a specific image URL.
+   * Shared by proposal + weekly-plan engine-selection updates.
+   */
+  _buildHtmlForDecision(decision, imageUrl) {
+    return apolloService.buildEmailHtml(imageUrl, {
+      headline: decision.headline || decision.subjectLine,
+      product: decision.product,
+      productName: decision.productName,
+      discount: decision.campaignType === 'promotional' ? `${decision.discountPercent}% OFF` : null,
+      code: decision.campaignType === 'promotional' ? decision.discountCode : null,
+      campaignType: decision.campaignType,
+      contentAngle: decision.contentAngle,
+      storyBody: decision.storyBody,
+      pullQuote: decision.pullQuote,
+      recipe: decision.recipe,
+      pairing: decision.pairing,
+      customerLove: decision.customerLove
+    });
+  }
+
+  /**
+   * Select which engine's creative to use for the pending proposal.
+   * Rebuilds imageUrl + htmlContent so test-email and approve pick up the chosen one.
+   */
+  async selectProposalEngine(engine) {
+    const config = await MaximusConfig.getConfig();
+    if (!config.pendingProposal?.active) {
+      return { success: false, reason: 'no_pending_proposal' };
+    }
+    const creatives = config.pendingProposal.creatives || [];
+    const chosen = creatives.find(c => c.engine === engine);
+    if (!chosen) {
+      return { success: false, reason: 'engine_not_available', available: creatives.map(c => c.engine) };
+    }
+
+    config.pendingProposal.selectedEngine = engine;
+    config.pendingProposal.imageUrl = chosen.imageUrl;
+    config.pendingProposal.htmlContent = this._buildHtmlForDecision(config.pendingProposal.decision || {}, chosen.imageUrl);
+    config.markModified('pendingProposal');
+    await config.save();
+
+    return { success: true, selectedEngine: engine, imageUrl: chosen.imageUrl };
+  }
+
+  /**
+   * Select which engine's creative to use for a weekly-plan campaign.
+   */
+  async selectWeekCampaignEngine(index, engine) {
+    const config = await MaximusConfig.getConfig();
+    if (!config.pendingWeeklyPlan?.active) {
+      return { success: false, reason: 'no_pending_plan' };
+    }
+    const camp = config.pendingWeeklyPlan.campaigns[index];
+    if (!camp) return { success: false, reason: 'invalid_index' };
+
+    const creatives = camp.creatives || [];
+    const chosen = creatives.find(c => c.engine === engine);
+    if (!chosen) {
+      return { success: false, reason: 'engine_not_available', available: creatives.map(c => c.engine) };
+    }
+
+    camp.selectedEngine = engine;
+    camp.imageUrl = chosen.imageUrl;
+    camp.htmlContent = this._buildHtmlForDecision(camp, chosen.imageUrl);
+    config.markModified('pendingWeeklyPlan.campaigns');
+    await config.save();
+
+    return { success: true, selectedEngine: engine, imageUrl: chosen.imageUrl };
   }
 
   /**

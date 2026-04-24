@@ -251,6 +251,23 @@ router.post('/weekly-plan/discard', authorize('admin'), async (req, res) => {
   }
 });
 
+/**
+ * PATCH /api/maximus/weekly-plan/:index/select-engine
+ * Pick which engine's creative to use for this campaign (body: { engine: 'gemini' | 'gpt' }).
+ * Rebuilds imageUrl + htmlContent so test-email and approve use the chosen one.
+ */
+router.patch('/weekly-plan/:index/select-engine', authorize('admin'), async (req, res) => {
+  try {
+    const { engine } = req.body;
+    if (!engine) return res.status(400).json({ error: 'engine is required' });
+    const result = await maximusService.selectWeekCampaignEngine(parseInt(req.params.index), engine);
+    if (!result.success) return res.status(400).json(result);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // ==================== CAMPAIGN HISTORY ====================
 
 /**
@@ -413,6 +430,23 @@ router.post('/proposal/approve', authorize('admin'), async (req, res) => {
     res.json(result);
   } catch (error) {
     console.error('Maximus approve error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * PATCH /api/maximus/proposal/select-engine
+ * Pick which engine's creative to use (body: { engine: 'gemini' | 'gpt' }).
+ * Rebuilds imageUrl + htmlContent so test-email and approve use the chosen one.
+ */
+router.patch('/proposal/select-engine', authorize('admin'), async (req, res) => {
+  try {
+    const { engine } = req.body;
+    if (!engine) return res.status(400).json({ error: 'engine is required' });
+    const result = await maximusService.selectProposalEngine(engine);
+    if (!result.success) return res.status(400).json(result);
+    res.json(result);
+  } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });

@@ -200,7 +200,7 @@ router.put('/config', authorize('admin'), async (req, res) => {
  */
 router.post('/generate', authorize('admin'), async (req, res) => {
   try {
-    const { product, discount, code, headline, productName } = req.body;
+    const { product, discount, code, headline, productName, engines } = req.body;
 
     if (!product || !discount || !code || !headline) {
       return res.status(400).json({ error: 'product, discount, code, and headline are required' });
@@ -214,7 +214,7 @@ router.post('/generate', authorize('admin'), async (req, res) => {
       code,
       headline,
       productName: productName || product
-    });
+    }, { engines });
 
     res.json(result);
   } catch (error) {

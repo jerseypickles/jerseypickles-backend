@@ -27,6 +27,7 @@
     "mongoose": "^8.0.3",
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
+    "openai": "^6.1.0",
     "resend": "^3.0.0"
   },
   "devDependencies": {

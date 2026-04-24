@@ -104,7 +104,16 @@ const maximusConfigSchema = new mongoose.Schema({
     },
     imageUrl: String,
     htmlContent: String,
-    discountCreated: { type: Boolean, default: false }
+    discountCreated: { type: Boolean, default: false },
+    // Dual-engine creatives — admin picks one at approval time. imageUrl mirrors the picked one.
+    creatives: [{
+      engine: { type: String, enum: ['gemini', 'gpt'] },
+      model: String,
+      imageUrl: String,
+      cloudinaryId: String,
+      generationTime: Number
+    }],
+    selectedEngine: { type: String, enum: ['gemini', 'gpt', null], default: null }
   },
 
   // Pending weekly plan (awaiting human approval)
@@ -147,6 +156,14 @@ const maximusConfigSchema = new mongoose.Schema({
       sendHour: Number,
       imageUrl: String,
       htmlContent: String,
+      creatives: [{
+        engine: { type: String, enum: ['gemini', 'gpt'] },
+        model: String,
+        imageUrl: String,
+        cloudinaryId: String,
+        generationTime: Number
+      }],
+      selectedEngine: { type: String, enum: ['gemini', 'gpt', null], default: null },
       reasoning: {
         whyThisType: String,
         whyThisSubject: String,
