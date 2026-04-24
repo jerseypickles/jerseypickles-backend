@@ -1043,8 +1043,7 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
       }
 
       if (structuralViolations.length > 0) {
-        console.error(`🏛️ Maximus: Weekly plan rejected — ${structuralViolations.length} structural violation(s):`);
-        console.error(JSON.stringify(structuralViolations, null, 2));
+        console.error(`🏛️ Maximus: Weekly plan rejected — ${structuralViolations.length} structural violation(s): ${JSON.stringify(structuralViolations)}`);
         return { success: false, reason: 'validation_failed', violations: structuralViolations };
       }
 
@@ -1067,8 +1066,7 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
         }
       }
       if (violations.length > 0) {
-        console.error(`🏛️ Maximus: Weekly plan rejected — ${violations.length} rule violation(s):`);
-        console.error(JSON.stringify(violations, null, 2));
+        console.error(`🏛️ Maximus: Weekly plan rejected — ${violations.length} rule violation(s): ${JSON.stringify(violations)}`);
         return { success: false, reason: 'validation_failed', violations };
       }
 

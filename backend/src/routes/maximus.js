@@ -186,7 +186,7 @@ router.post('/propose-week', authorize('admin'), async (req, res) => {
           c.pendingWeeklyPlan = { active: false };
           await c.save();
           const detailLog = result.violations
-            ? `\n${JSON.stringify(result.violations, null, 2)}`
+            ? JSON.stringify(result.violations)
             : (result.detail || result.error || '');
           console.error(`🏛️ Maximus: Weekly plan generation failed: ${result.reason}${detailLog ? ' — ' + detailLog : ''}`);
         }
