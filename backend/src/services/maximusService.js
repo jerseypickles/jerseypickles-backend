@@ -174,12 +174,12 @@ ${listLine}`;
   }
 
   /**
-   * Validate a discount code — must be uppercase, 4-12 chars, no weekday abbreviations
+   * Validate a discount code — must be uppercase A-Z / 0-9, 4-16 chars, no weekday abbreviations
    */
   validateDiscountCode(code) {
     if (!code) return { valid: true, violations: [] };
     const violations = [];
-    if (!/^[A-Z0-9]{4,12}$/.test(code)) violations.push('format_invalid');
+    if (!/^[A-Z0-9]{4,16}$/.test(code)) violations.push('format_invalid');
     if (/^(MON|TUE|WED|THU|FRI|SAT|SUN)/.test(code) || /(MON|TUE|WED|THU|FRI|SAT|SUN)$/.test(code)) {
       violations.push('weekday_in_code');
     }
@@ -392,6 +392,7 @@ CRITICAL SUBJECT RULES — DO NOT BREAK THESE:
   → Reason: Campaigns may be sent on a different day than planned, making the subject stale.
 - ❌ NEVER put weekday abbreviations in discount codes (SAT, FRI, MON, TUE, etc.)
   → Codes must be product-based: PICKLE20, HOTTOM25, CRUNCH15 — NOT CRUNCH20SAT
+- ❌ Discount codes are strictly A-Z and 0-9, 4 to 16 characters. No spaces, no dashes, no lowercase.
 - ✅ DO use generic urgency: "limited time", "while it lasts", "grab it now", "this week only" (week = 7 days)
 - ✅ DO use product-driven hooks: "Crunchy & addictive", "Made with love", "Bold and tangy"
 - ✅ DO use curiosity: "The story behind...", "Meet our...", "Why our pickles are different"
@@ -878,6 +879,7 @@ CRITICAL SUBJECT RULES — DO NOT BREAK THESE:
   → Plans may shift days. Subjects must be evergreen.
 - ❌ NEVER put weekday abbreviations in discount codes (SAT, FRI, MON, etc.)
   → Codes must be product-based: PICKLE20, HOTTOM25, CRUNCH15 — NOT CRUNCH20SAT
+- ❌ Discount codes are strictly A-Z and 0-9, 4 to 16 characters. No spaces, no dashes, no lowercase.
 - ✅ DO use: "limited time", "while it lasts", "this week only" (week = 7 days)
 - ✅ DO use product hooks: "Crunchy & addictive", "Bold and tangy", "Made with love"
 - ✅ DO use curiosity: "The story behind...", "Meet our...", "Why our pickles..."
