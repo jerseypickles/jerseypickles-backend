@@ -60,6 +60,17 @@ class ApolloService {
     return this.availableEngines().length > 0;
   }
 
+  // Per-engine hard cap so a hung provider can't stall the whole weekly plan
+  static ENGINE_TIMEOUT_MS = 90000;
+
+  _withTimeout(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+
   // ==================== MAIN: GENERATE CREATIVE ====================
 
   /**
@@ -129,17 +140,30 @@ class ApolloService {
 
     const anySuccess = creatives.some(c => c.success);
 
-    // 5. Stats — count only successes
+    // 5. Stats — atomic update pipeline so parallel calls don't race on save()
     const successCount = creatives.filter(c => c.success).length;
     if (successCount > 0) {
       const avgTime = creatives.filter(c => c.success).reduce((s, c) => s + c.generationTime, 0) / successCount;
-      config.stats.totalGenerated += successCount;
-      config.stats.lastGeneratedAt = new Date();
-      config.stats.averageGenerationTime = Math.round(
-        (config.stats.averageGenerationTime * (config.stats.totalGenerated - successCount) + avgTime * successCount) /
-        config.stats.totalGenerated
+      await ApolloConfig.updateOne(
+        { _id: config._id },
+        [{
+          $set: {
+            'stats.totalGenerated': { $add: [{ $ifNull: ['$stats.totalGenerated', 0] }, successCount] },
+            'stats.lastGeneratedAt': new Date(),
+            'stats.averageGenerationTime': {
+              $round: [{
+                $divide: [
+                  { $add: [
+                    { $multiply: [{ $ifNull: ['$stats.averageGenerationTime', 0] }, { $ifNull: ['$stats.totalGenerated', 0] }] },
+                    avgTime * successCount
+                  ]},
+                  { $max: [1, { $add: [{ $ifNull: ['$stats.totalGenerated', 0] }, successCount] }] }
+                ]
+              }, 0]
+            }
+          }
+        }]
       );
-      await config.save();
     }
 
     creatives.forEach(c => {
@@ -161,12 +185,14 @@ class ApolloService {
     let imageBase64 = null;
     let model = null;
 
+    const TIMEOUT = ApolloService.ENGINE_TIMEOUT_MS;
+
     if (engine === 'gemini') {
       model = config.geminiModel;
-      imageBase64 = await this.callGemini(promptText, model, bankImageData);
+      imageBase64 = await this._withTimeout(this.callGemini(promptText, model, bankImageData), TIMEOUT, 'gemini');
     } else if (engine === 'gpt') {
       model = config.openaiModel;
-      imageBase64 = await this.callGpt(promptText, model, bankImageData);
+      imageBase64 = await this._withTimeout(this.callGpt(promptText, model, bankImageData), TIMEOUT, 'gpt');
     } else {
       throw new Error(`Unknown engine: ${engine}`);
     }

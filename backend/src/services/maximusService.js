@@ -1071,19 +1071,15 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
       }
 
       // Generate Apollo creatives for each campaign
-      apolloService.init();
+      // Normalize each campaign (dates, lists, defaults) sequentially — cheap, no network
       for (let i = 0; i < campaigns.length; i++) {
         const c = campaigns[i];
-        console.log(`🏛️ Maximus: [${i + 1}/${campaigns.length}] ${c.day} — ${c.campaignType} — "${c.subjectLine}"`);
-
-        // Calculate scheduledAt — compute ET offset for this specific date (handles DST)
         const campDate = new Date(c.date + 'T12:00:00Z'); // mid-day probe to avoid DST edge
         const etOffset = this.getEtOffsetHours(campDate);
         const scheduledAt = new Date(c.date + 'T00:00:00Z');
         scheduledAt.setUTCHours(c.sendHour + etOffset, 0, 0, 0);
         campaigns[i].scheduledAt = scheduledAt;
 
-        // Validate list
         const validList = config.lists.find(l => l.listId.toString() === c.listId);
         if (!validList) {
           console.warn(`🏛️ Maximus: Invalid list for ${c.day}, using first list`);
@@ -1091,60 +1087,73 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
           campaigns[i].listName = config.lists[0].name;
         }
 
-        // Default type
         if (!c.campaignType) campaigns[i].campaignType = 'content';
+      }
 
-        // Direct + generate creative with Apollo
-        if (apolloService.isAvailable()) {
-          const director = await this.directCreative(c);
-          const apolloBrief = {
-            product: c.product,
-            headline: c.headline || c.subjectLine,
-            productName: c.productName,
-            campaignType: c.campaignType,
-            contentAngle: c.contentAngle,
-            recipe: c.recipe,
-            pairing: c.pairing,
-            customerLove: c.customerLove,
-            director
-          };
-          if (c.campaignType === 'promotional') {
-            apolloBrief.discount = `${c.discountPercent}% OFF TODAY ONLY`;
-            apolloBrief.code = c.discountCode;
-          }
+      // Generate creatives in PARALLEL across campaigns (Apollo also fan-outs across engines)
+      apolloService.init();
+      if (apolloService.isAvailable()) {
+        console.log(`🏛️ Maximus: Generating ${campaigns.length} creatives in parallel...`);
+        const generationStart = Date.now();
 
-          const apolloResult = await apolloService.generateCreative(apolloBrief);
-          const okCreatives = (apolloResult.creatives || []).filter(x => x.success);
-          if (apolloResult.success && okCreatives.length > 0) {
-            const defaultCreative = okCreatives[0];
-            campaigns[i].imageUrl = defaultCreative.imageUrl;
-            campaigns[i].creatives = okCreatives.map(x => ({
-              engine: x.engine,
-              model: x.model,
-              imageUrl: x.imageUrl,
-              cloudinaryId: x.cloudinaryId,
-              generationTime: x.generationTime
-            }));
-            campaigns[i].selectedEngine = defaultCreative.engine;
-            campaigns[i].htmlContent = apolloService.buildEmailHtml(defaultCreative.imageUrl, {
-              headline: c.headline || c.subjectLine,
+        await Promise.allSettled(campaigns.map(async (c, i) => {
+          const label = `[${i + 1}/${campaigns.length}] ${c.day} — ${c.campaignType} — "${c.subjectLine}"`;
+          try {
+            const director = await this.directCreative(c);
+            const apolloBrief = {
               product: c.product,
+              headline: c.headline || c.subjectLine,
               productName: c.productName,
-              discount: c.campaignType === 'promotional' ? `${c.discountPercent}% OFF` : null,
-              code: c.campaignType === 'promotional' ? c.discountCode : null,
               campaignType: c.campaignType,
               contentAngle: c.contentAngle,
-              storyBody: c.storyBody,
-              pullQuote: c.pullQuote,
               recipe: c.recipe,
               pairing: c.pairing,
-              customerLove: c.customerLove
-            });
-            console.log(`   ✅ ${okCreatives.length} creative(s) generated`);
-          } else {
-            console.warn(`   ⚠️ Apollo failed: ${apolloResult.error}`);
+              customerLove: c.customerLove,
+              director
+            };
+            if (c.campaignType === 'promotional') {
+              apolloBrief.discount = `${c.discountPercent}% OFF TODAY ONLY`;
+              apolloBrief.code = c.discountCode;
+            }
+
+            const apolloResult = await apolloService.generateCreative(apolloBrief);
+            const okCreatives = (apolloResult.creatives || []).filter(x => x.success);
+
+            if (apolloResult.success && okCreatives.length > 0) {
+              const defaultCreative = okCreatives[0];
+              campaigns[i].imageUrl = defaultCreative.imageUrl;
+              campaigns[i].creatives = okCreatives.map(x => ({
+                engine: x.engine,
+                model: x.model,
+                imageUrl: x.imageUrl,
+                cloudinaryId: x.cloudinaryId,
+                generationTime: x.generationTime
+              }));
+              campaigns[i].selectedEngine = defaultCreative.engine;
+              campaigns[i].htmlContent = apolloService.buildEmailHtml(defaultCreative.imageUrl, {
+                headline: c.headline || c.subjectLine,
+                product: c.product,
+                productName: c.productName,
+                discount: c.campaignType === 'promotional' ? `${c.discountPercent}% OFF` : null,
+                code: c.campaignType === 'promotional' ? c.discountCode : null,
+                campaignType: c.campaignType,
+                contentAngle: c.contentAngle,
+                storyBody: c.storyBody,
+                pullQuote: c.pullQuote,
+                recipe: c.recipe,
+                pairing: c.pairing,
+                customerLove: c.customerLove
+              });
+              console.log(`   ✅ ${label} → ${okCreatives.length} creative(s)`);
+            } else {
+              console.warn(`   ⚠️ ${label} → Apollo failed: ${apolloResult.error || 'no creatives succeeded'}`);
+            }
+          } catch (err) {
+            console.error(`   ❌ ${label} → ${err.message}`);
           }
-        }
+        }));
+
+        console.log(`🏛️ Maximus: Creative generation finished in ${((Date.now() - generationStart) / 1000).toFixed(1)}s`);
       }
 
       // Save weekly plan
