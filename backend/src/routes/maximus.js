@@ -185,7 +185,10 @@ router.post('/propose-week', authorize('admin'), async (req, res) => {
           const c = await MaximusConfig.getConfig();
           c.pendingWeeklyPlan = { active: false };
           await c.save();
-          console.error('🏛️ Maximus: Weekly plan generation failed:', result.reason, result.detail || '');
+          const detailLog = result.violations
+            ? `\n${JSON.stringify(result.violations, null, 2)}`
+            : (result.detail || result.error || '');
+          console.error(`🏛️ Maximus: Weekly plan generation failed: ${result.reason}${detailLog ? ' — ' + detailLog : ''}`);
         }
       } catch (err) {
         console.error('🏛️ Maximus: Weekly plan background error:', err.message);
