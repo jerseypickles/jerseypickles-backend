@@ -307,18 +307,39 @@ class ApolloService {
     const dayOfWeek = new Date().toLocaleDateString('en-US', { weekday: 'long' });
     const type = brief.campaignType || 'promotional';
 
-    // Scene variety — randomize to avoid monotony
+    // Scene variety — randomize across many different settings to avoid monotony
     const scenes = [
+      // Kitchen / counter
       'rustic wooden kitchen counter with exposed beams above',
       'marble kitchen countertop with white tile backsplash',
-      'reclaimed barn wood table in a farmhouse kitchen',
       'butcher block counter with copper cookware hanging nearby',
       'concrete countertop in a modern industrial kitchen',
-      'vintage enamel table with floral tablecloth',
-      'dark walnut dinner table set for a casual meal',
-      'outdoor wooden picnic table with string lights above',
-      'stone kitchen island with open shelving behind',
-      'antique oak farm table with linen runner'
+      // Outdoor / picnic
+      'sunlit backyard picnic table with wildflowers in a mason jar',
+      'beach picnic on driftwood with sand-textured linen and pebbles',
+      'rooftop terrace table at golden hour with city skyline blurred behind',
+      'wooden deck dinner table at dusk with hanging Edison bulbs',
+      'campfire side log with cast iron skillet warming nearby',
+      // Markets / artisan
+      'farmers market stall with chalkboard signs and produce crates',
+      'artisanal pantry shelf with neighboring jars and burlap sacks',
+      'old-world delicatessen counter with brown paper and twine',
+      // Studio / editorial
+      'seamless minimalist studio backdrop with one soft shadow, label-forward',
+      'dark moody backdrop with a single dramatic spotlight on the jar',
+      'high-contrast pure-black backdrop, jar floating with rim-light',
+      // Pantry / domestic
+      'open pantry shelf next to ceramic crocks and folded linen',
+      'kitchen windowsill with potted herbs and morning sun',
+      'dining table mid-meal with napkins and half-eaten plates around it',
+      // Travel / Mediterranean
+      'Tuscan stone wall ledge with terracotta pots and olive branches',
+      'French countryside outdoor table beside a stone farmhouse wall',
+      // Action / process
+      'cutting board mid-prep with a wooden spoon hovering over the open jar',
+      'jar tipped slightly with contents pouring across rustic bread',
+      "craftsman's hands in apron arranging a cheese board around the jar",
+      'spice-stained workbench with the jar mid-recipe and ingredient debris'
     ];
 
     const lightingMoods = [
@@ -331,7 +352,12 @@ class ApolloService {
       'warm fireplace glow in the background, rustic and cozy',
       'late afternoon sun with long golden shadows',
       'diffused overcast daylight, muted and elegant',
-      'twinkling string lights and candles, festive dinner vibes'
+      'twinkling string lights and candles, festive dinner vibes',
+      'hard noon sun with crisp graphic shadows, contemporary feel',
+      'blue-hour twilight with single warm interior light, cinematic',
+      'studio rim-light with falloff into shadow, product-photography precision',
+      'overcast outdoor light filtering through trees, natural and soft',
+      'firelight from below casting flickering warmth, primal and rustic'
     ];
 
     const colorPalettes = [
@@ -342,7 +368,11 @@ class ApolloService {
       'minimalist tones — muted greys, white, black, single pop of color from the product',
       'autumn harvest tones — rust, mustard, cream, deep brown',
       'coastal tones — soft blues, white, sand, driftwood grey',
-      'Mediterranean tones — terracotta, olive, ochre, stone'
+      'Mediterranean tones — terracotta, olive, ochre, stone',
+      'high-contrast tones — pure black, off-white, single bold accent',
+      'jewel tones — emerald, ruby, deep teal, brushed gold',
+      'desaturated film tones — faded olive, dusty pink, tea-stained beige',
+      'fresh produce tones — lime green, cherry red, lemon yellow, leaf green'
     ];
 
     const compositions = [
@@ -353,15 +383,34 @@ class ApolloService {
       'jar on a wooden board with fresh ingredients styled around it',
       'jar with a linen napkin draped casually beside it',
       'jar next to a small stack of vintage cookbooks and a wooden spoon',
-      'jar with cutting board, knife, and prepped ingredients nearby'
+      'jar with cutting board, knife, and prepped ingredients nearby',
+      'jar at the edge of frame with deep negative space on the opposite side',
+      'jar surrounded by spilled product and crumbs, mid-action storytelling',
+      'jar elevated on a small wooden riser with ingredients at base level',
+      'jar framed through out-of-focus foreground props (herbs, glassware)'
     ];
 
-    // Use Director brief (from Opus via Maximus) when available; fall back to random pools.
+    // Camera/framing variety — orthogonal axis to scene/composition
+    const cameraStyles = [
+      'tight macro close-up emphasizing label texture and glass condensation',
+      'wide editorial shot capturing surrounding context and breathing room',
+      'eye-level tabletop POV at the height of the jar itself',
+      'top-down 90-degree flat lay perspective',
+      'three-quarter 30-45 degree lifestyle angle',
+      "dramatic worm's-eye low angle making the jar feel monumental",
+      'documentary candid framing with a partial human element entering frame',
+      'in-motion shutter with a subtle pour or sprinkle blur',
+      'rule-of-thirds asymmetric composition with strong negative space',
+      'over-the-shoulder cooking POV with hands and product in soft focus'
+    ];
+
+    // Use Director brief (from Opus/Sonnet via Maximus) when available; fall back to random pools.
     const d = brief.director || {};
     const scene = d.scene || scenes[Math.floor(Math.random() * scenes.length)];
     const lighting = d.lighting || lightingMoods[Math.floor(Math.random() * lightingMoods.length)];
     const palette = d.palette || colorPalettes[Math.floor(Math.random() * colorPalettes.length)];
     const composition = d.composition || compositions[Math.floor(Math.random() * compositions.length)];
+    const cameraStyle = d.cameraStyle || cameraStyles[Math.floor(Math.random() * cameraStyles.length)];
     const directorExtras = d.extras ? `\nEXTRAS: ${d.extras}.` : '';
     if (brief.director) console.log('   🎬 Using Director brief (bespoke)');
 
@@ -372,7 +421,8 @@ CRITICAL: You MUST use the reference product photo provided above as the EXACT j
 SCENE: ${scene}.
 LIGHTING: ${lighting}.
 COLOR PALETTE: ${palette}.
-COMPOSITION: ${composition}.${directorExtras}
+COMPOSITION: ${composition}.
+CAMERA: ${cameraStyle}.${directorExtras}
 
 Place the EXACT jar from the reference photo as described. Surround it with complementary fresh ingredients that match the product. Premium lifestyle food photography, hyperrealistic, 8K, 9:16 vertical portrait.
 
@@ -391,6 +441,7 @@ The jar from the reference photo is prominently placed beside the dish, lid slig
 LIGHTING: ${lighting}.
 COLOR PALETTE: ${palette}.
 SURFACE: ${scene}.
+CAMERA: ${cameraStyle}.
 
 NO OVERLAY TEXT, NO BUTTONS, NO LOGOS. Pure editorial food photography — Bon Appétit / NYT Cooking style. The recipe text lives in the email body.
 
@@ -415,6 +466,7 @@ Between them: a small sprig of fresh herbs, a few crackers or slices, suggesting
 LIGHTING: ${lighting}.
 COLOR PALETTE: ${palette}.
 SURFACE: ${scene}.
+CAMERA: ${cameraStyle}.
 
 NO OVERLAY TEXT, NO BUTTONS, NO LOGOS. Pure editorial pairing photography — think wine magazine, gourmet guide.
 
@@ -433,6 +485,7 @@ SCENE: A warm lived-in kitchen moment — the jar from the reference photo is op
 LIGHTING: ${lighting}, with a golden hour feel suggesting "everyday joy".
 COLOR PALETTE: ${palette}.
 SURFACE: ${scene}.
+CAMERA: ${cameraStyle}.
 
 NO OVERLAY TEXT, NO BUTTONS, NO LOGOS. Pure lifestyle photography — the testimonials will render in the email body.
 
@@ -472,6 +525,7 @@ SCENE: ${scene}.
 LIGHTING: ${lighting}.
 COLOR PALETTE: ${palette}.
 COMPOSITION: ${composition}, with negative space and breathing room. Vertical scroll-style framing — tall and immersive.
+CAMERA: ${cameraStyle}.
 
 VISUAL STORY: The EXACT jar from the reference photo as the hero, surrounded by complementary fresh ingredients that suggest the product's story (origin, craft, ingredients, kitchen ritual). Hands of a craftsman or natural human elements may appear subtly. Evoke a sense of place — a New Jersey artisan kitchen, slow food, multi-generational tradition. Premium editorial food photography, magazine-cover quality, hyperrealistic, 8K.
 

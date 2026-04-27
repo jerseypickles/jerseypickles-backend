@@ -1092,6 +1092,16 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
         if (!c.campaignType) campaigns[i].campaignType = 'content';
       }
 
+      // Pre-generate director briefs SEQUENTIALLY so each one knows about prior
+      // scenes in the week and picks something distinct. Cheap (~1-3s per call).
+      const directors = [];
+      const priorScenes = [];
+      for (let i = 0; i < campaigns.length; i++) {
+        const director = await this.directCreative(campaigns[i], { priorScenes });
+        directors[i] = director;
+        if (director?.scene) priorScenes.push(director.scene);
+      }
+
       // Generate creatives in PARALLEL across campaigns (Apollo also fan-outs across engines)
       apolloService.init();
       if (apolloService.isAvailable()) {
@@ -1101,7 +1111,7 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
         await Promise.allSettled(campaigns.map(async (c, i) => {
           const label = `[${i + 1}/${campaigns.length}] ${c.day} — ${c.campaignType} — "${c.subjectLine}"`;
           try {
-            const director = await this.directCreative(c);
+            const director = directors[i];
             const apolloBrief = {
               product: c.product,
               headline: c.headline || c.subjectLine,
@@ -1691,17 +1701,21 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
   // ==================== DIRECTOR (creative brief for Apollo/Gemini) ====================
 
   /**
-   * Given a decision, ask Claude (Opus) to design a bespoke visual brief:
-   * scene, lighting, palette, composition, extras. Beats the random-pool
+   * Given a decision, ask Claude to design a bespoke visual brief:
+   * scene, lighting, palette, composition, cameraStyle, extras. Beats the random-pool
    * approach because every field is coherent with type/product/narrative/season.
+   *
+   * Pass `opts.priorScenes` (array of scene strings already used this week) to
+   * force diversity — the prompt instructs Claude to pick something distinct.
    *
    * Returns null on failure — Apollo will fall back to random pools.
    */
-  async directCreative(decision) {
+  async directCreative(decision, opts = {}) {
     if (!this.isAvailable()) return null;
 
     const config = await MaximusConfig.getConfig();
     const model = config.model || this.defaultModel;
+    const priorScenes = opts.priorScenes || [];
 
     const typeHints = {
       promotional: 'urgency-friendly lifestyle — jar hero, props suggesting reward/indulgence',
@@ -1726,6 +1740,10 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
                  : ['June','July','August'].includes(month) ? 'summer'
                  : 'autumn';
 
+    const priorSection = priorScenes.length > 0
+      ? `\nALREADY USED THIS WEEK (DO NOT REPEAT THE SAME SETTING TYPE):\n${priorScenes.map((s, i) => `${i + 1}. ${s}`).join('\n')}\nPick a setting from a clearly different family — outdoor, market, studio, pantry, action shot, travel, etc. Each campaign in a week must feel visually distinct.\n`
+      : '';
+
     const prompt = `You are the creative director for a single Jersey Pickles email poster.
 
 CAMPAIGN CONTEXT:
@@ -1734,15 +1752,24 @@ CAMPAIGN CONTEXT:
 - Headline: "${decision.headline || decision.subjectLine}"
 - Narrative hint: ${narrativeHook}
 - Month: ${month} (${season})
+${priorSection}
+YOUR JOB: design a bespoke visual brief that is coherent with type, product, narrative, and season. AVOID clichés like "rustic kitchen counter" or "marble countertop with herbs" — those are overused. Range freely across:
+- Outdoor settings (picnic, garden, deck, rooftop, beach, campfire, market stall)
+- Studio / editorial (seamless backdrops, dramatic single-light, label-forward macro)
+- Pantry / domestic (shelves, windowsills, mid-meal tables)
+- Action / process (mid-pour, hands prepping, spilled product, on a piece of bread)
+- Travel / regional (Mediterranean stone wall, French farmhouse, Tuscan ledge)
+And vary CAMERA: macro, wide, top-down flat lay, low angle, eye-level POV, motion-blur.
 
-YOUR JOB: design a bespoke visual brief that is coherent with type, product, narrative, and season. Avoid clichés. Avoid mismatches (e.g. no "winter candlelight" for a summer grilling recipe).
+Avoid mismatches (no "winter candlelight" for a summer grilling recipe).
 
 Respond ONLY with valid JSON (no prose, no markdown):
 {
-  "scene": "<one vivid sentence describing the surface and setting — specific objects, not generic>",
+  "scene": "<one vivid sentence describing the surface/setting — specific objects, not generic>",
   "lighting": "<one sentence, specific time of day, quality and color temperature>",
   "palette": "<4-6 color words anchored to the product + season>",
-  "composition": "<one sentence, camera angle, subject placement, negative space>",
+  "composition": "<one sentence, subject placement, negative space, framing>",
+  "cameraStyle": "<one sentence about angle, distance, motion — pick a different style than the prior scenes when possible>",
   "extras": "<optional one sentence of distinctive props/textures that tie to the narrative, or null>"
 }`;
 
