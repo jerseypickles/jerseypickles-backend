@@ -1,8 +1,7 @@
 // backend/src/services/apolloService.js
 // 🏛️ APOLLO - Creative Agent for Email Campaign Visuals
-// God of art and beauty - generates promotional images with Gemini + GPT-Image-2
+// God of art and beauty - generates promotional images with GPT-Image-2
 
-const { GoogleGenAI } = require('@google/genai');
 const OpenAI = require('openai');
 const { toFile } = require('openai');
 const cloudinary = require('../config/cloudinary');
@@ -11,7 +10,6 @@ const axios = require('axios');
 
 class ApolloService {
   constructor() {
-    this.geminiClient = null;
     this.openaiClient = null;
     this.initialized = false;
   }
@@ -20,18 +18,6 @@ class ApolloService {
 
   init() {
     if (this.initialized) return;
-
-    const geminiKey = process.env.GEMINI_API_KEY;
-    if (geminiKey) {
-      try {
-        this.geminiClient = new GoogleGenAI({ apiKey: geminiKey });
-        console.log('🏛️ Apollo: Gemini initialized');
-      } catch (error) {
-        console.error('🏛️ Apollo: Gemini init error:', error.message);
-      }
-    } else {
-      console.log('🏛️ Apollo: GEMINI_API_KEY not configured');
-    }
 
     const openaiKey = process.env.OPENAI_API_KEY;
     if (openaiKey) {
@@ -48,16 +34,8 @@ class ApolloService {
     this.initialized = true;
   }
 
-  // Available engines right now (based on which keys loaded)
-  availableEngines() {
-    const engines = [];
-    if (this.geminiClient) engines.push('gemini');
-    if (this.openaiClient) engines.push('gpt');
-    return engines;
-  }
-
   isAvailable() {
-    return this.availableEngines().length > 0;
+    return this.openaiClient !== null;
   }
 
   // Per-engine hard cap so a hung provider can't stall the whole weekly plan
@@ -74,47 +52,37 @@ class ApolloService {
   // ==================== MAIN: GENERATE CREATIVE ====================
 
   /**
-   * Generate promotional creative image(s) for a campaign.
-   * Runs the requested engines in parallel and returns one creative per engine.
+   * Generate promotional creative image for a campaign with GPT-Image-2.
+   *
+   * Returns the dual-engine shape `{ success, creatives: [...] }` where the
+   * creatives array always has a single entry. The shape is preserved so
+   * Maximus and the frontend keep working unchanged after the Gemini removal.
    *
    * @param {object} brief - Campaign brief from Maximus
    * @param {string} brief.product - Product slug (e.g., 'hot-tomatoes')
-   * @param {object} [opts]
-   * @param {string[]} [opts.engines] - Which engines to run. Defaults to config.enabledEngines ∩ availableEngines.
    * @returns {object} { success, creatives: [{engine, model, imageUrl, cloudinaryId, generationTime, success, error}] }
    */
-  async generateCreative(brief, opts = {}) {
+  async generateCreative(brief) {
     if (!this.isAvailable()) {
-      return { success: false, error: 'No image engine available', creatives: [] };
+      return { success: false, error: 'OpenAI not configured', creatives: [] };
     }
 
     const config = await ApolloConfig.getConfig();
-    const requested = opts.engines || config.enabledEngines || ['gemini', 'gpt'];
-    const available = this.availableEngines();
-    const engines = requested.filter(e => available.includes(e));
-
-    if (engines.length === 0) {
-      return { success: false, error: `None of requested engines [${requested.join(',')}] are configured`, creatives: [] };
-    }
 
     console.log('\n🏛️ ═══════════════════════════════════════');
-    console.log('   APOLLO - Generating Creative');
+    console.log('   APOLLO - Generating Creative (GPT-Image-2)');
     console.log('═══════════════════════════════════════\n');
     console.log(`   Product: ${brief.product}`);
-    console.log(`   Engines: ${engines.join(' + ')}`);
 
-    // 1. Product lookup
     const product = config.getProduct(brief.product);
     if (!product) {
       console.error(`🏛️ Apollo: Product "${brief.product}" not found in bank`);
       return { success: false, error: `Product "${brief.product}" not found`, creatives: [] };
     }
 
-    // 2. Build prompt once — same prompt for both engines
     const promptText = this.buildPrompt(brief, product);
     console.log(`   Prompt length: ${promptText.length} chars`);
 
-    // 3. Download bank image once
     let bankImageData = null;
     if (product.bankImageUrl) {
       try {
@@ -128,138 +96,64 @@ class ApolloService {
       }
     }
 
-    // 4. Run requested engines in parallel — one failure does NOT abort the other
-    const results = await Promise.allSettled(
-      engines.map(engine => this._runEngine(engine, promptText, bankImageData, brief, config))
-    );
+    const startTime = Date.now();
+    const model = config.openaiModel;
+    let creative;
 
-    const creatives = results.map((r, idx) => {
-      if (r.status === 'fulfilled') return r.value;
-      return { engine: engines[idx], success: false, error: r.reason?.message || String(r.reason) };
-    });
+    try {
+      const imageBase64 = await this._withTimeout(
+        this.callGpt(promptText, model, bankImageData),
+        ApolloService.ENGINE_TIMEOUT_MS,
+        'gpt'
+      );
 
-    const anySuccess = creatives.some(c => c.success);
+      if (!imageBase64) {
+        creative = { engine: 'gpt', model, success: false, error: 'gpt returned no image', generationTime: Date.now() - startTime };
+      } else {
+        const uploadResult = await this.uploadToCloudinary(imageBase64, brief, config.cloudinaryFolder, 'gpt');
+        creative = {
+          engine: 'gpt',
+          model,
+          success: true,
+          imageUrl: uploadResult.secure_url,
+          cloudinaryId: uploadResult.public_id,
+          generationTime: Date.now() - startTime,
+          width: uploadResult.width,
+          height: uploadResult.height
+        };
+      }
+    } catch (err) {
+      creative = { engine: 'gpt', model, success: false, error: err.message, generationTime: Date.now() - startTime };
+    }
 
-    // 5. Stats — atomic update pipeline so parallel calls don't race on save()
-    const successCount = creatives.filter(c => c.success).length;
-    if (successCount > 0) {
-      const avgTime = creatives.filter(c => c.success).reduce((s, c) => s + c.generationTime, 0) / successCount;
+    if (creative.success) {
+      // Atomic stats update so concurrent calls don't race on save()
       await ApolloConfig.updateOne(
         { _id: config._id },
         [{
           $set: {
-            'stats.totalGenerated': { $add: [{ $ifNull: ['$stats.totalGenerated', 0] }, successCount] },
+            'stats.totalGenerated': { $add: [{ $ifNull: ['$stats.totalGenerated', 0] }, 1] },
             'stats.lastGeneratedAt': new Date(),
             'stats.averageGenerationTime': {
               $round: [{
                 $divide: [
                   { $add: [
                     { $multiply: [{ $ifNull: ['$stats.averageGenerationTime', 0] }, { $ifNull: ['$stats.totalGenerated', 0] }] },
-                    avgTime * successCount
+                    creative.generationTime
                   ]},
-                  { $max: [1, { $add: [{ $ifNull: ['$stats.totalGenerated', 0] }, successCount] }] }
+                  { $max: [1, { $add: [{ $ifNull: ['$stats.totalGenerated', 0] }, 1] }] }
                 ]
               }, 0]
             }
           }
         }]
       );
-    }
-
-    creatives.forEach(c => {
-      if (c.success) {
-        console.log(`   ✅ ${c.engine} (${(c.generationTime / 1000).toFixed(1)}s) → ${c.imageUrl}`);
-      } else {
-        console.log(`   ❌ ${c.engine}: ${c.error}`);
-      }
-    });
-
-    return { success: anySuccess, creatives };
-  }
-
-  /**
-   * Run one engine end-to-end: generate → upload → return creative record.
-   */
-  async _runEngine(engine, promptText, bankImageData, brief, config) {
-    const startTime = Date.now();
-    let imageBase64 = null;
-    let model = null;
-
-    const TIMEOUT = ApolloService.ENGINE_TIMEOUT_MS;
-
-    if (engine === 'gemini') {
-      model = config.geminiModel;
-      imageBase64 = await this._withTimeout(this.callGemini(promptText, model, bankImageData), TIMEOUT, 'gemini');
-    } else if (engine === 'gpt') {
-      model = config.openaiModel;
-      imageBase64 = await this._withTimeout(this.callGpt(promptText, model, bankImageData), TIMEOUT, 'gpt');
+      console.log(`   ✅ gpt (${(creative.generationTime / 1000).toFixed(1)}s) → ${creative.imageUrl}`);
     } else {
-      throw new Error(`Unknown engine: ${engine}`);
+      console.log(`   ❌ gpt: ${creative.error}`);
     }
 
-    if (!imageBase64) {
-      return { engine, model, success: false, error: `${engine} returned no image`, generationTime: Date.now() - startTime };
-    }
-
-    const uploadResult = await this.uploadToCloudinary(imageBase64, brief, config.cloudinaryFolder, engine);
-
-    return {
-      engine,
-      model,
-      success: true,
-      imageUrl: uploadResult.secure_url,
-      cloudinaryId: uploadResult.public_id,
-      generationTime: Date.now() - startTime,
-      width: uploadResult.width,
-      height: uploadResult.height
-    };
-  }
-
-  // ==================== GEMINI API CALL ====================
-
-  /**
-   * Call Gemini 3 Pro to generate image from prompt + optional reference image
-   * @param {string} prompt - Text prompt
-   * @param {string} model - Gemini model
-   * @param {object|null} bankImage - { base64, mimeType } reference product photo
-   */
-  async callGemini(prompt, model = 'gemini-3-pro-image-preview', bankImage = null) {
-    if (!this.geminiClient) throw new Error('Gemini not initialized');
-
-    const parts = [];
-
-    if (bankImage) {
-      parts.push({
-        inlineData: {
-          mimeType: bankImage.mimeType,
-          data: bankImage.base64
-        }
-      });
-      parts.push({
-        text: `REFERENCE PRODUCT PHOTO: The image above is the EXACT product jar you must reproduce in the final image. Match its label, shape, color, and proportions precisely. Do NOT invent a different jar.\n\n${prompt}`
-      });
-    } else {
-      parts.push({ text: prompt });
-    }
-
-    const response = await this.geminiClient.models.generateContent({
-      model,
-      contents: [{ role: 'user', parts }],
-      config: {
-        responseModalities: ['image', 'text'],
-      }
-    });
-
-    if (response.candidates && response.candidates.length > 0) {
-      const responseParts = response.candidates[0].content?.parts || [];
-      for (const part of responseParts) {
-        if (part.inlineData && part.inlineData.mimeType?.startsWith('image/')) {
-          return part.inlineData.data;
-        }
-      }
-    }
-
-    return null;
+    return { success: creative.success, creatives: [creative] };
   }
 
   // ==================== OPENAI (GPT-IMAGE-2) API CALL ====================
@@ -300,8 +194,8 @@ class ApolloService {
   // ==================== PROMPT BUILDER ====================
 
   /**
-   * Build the mega-prompt for Gemini
-   * Template-based with variable injection from Maximus brief
+   * Build the mega-prompt for GPT-Image-2.
+   * Template-based with variable injection from Maximus brief.
    */
   buildPrompt(brief, product) {
     const dayOfWeek = new Date().toLocaleDateString('en-US', { weekday: 'long' });
@@ -560,7 +454,7 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
   /**
    * Upload generated image to Cloudinary, tagging by engine so admin can filter.
    */
-  async uploadToCloudinary(base64Image, brief, folder, engine = 'gemini') {
+  async uploadToCloudinary(base64Image, brief, folder, engine = 'gpt') {
     const dataUri = `data:image/png;base64,${base64Image}`;
     const timestamp = Date.now();
     const publicId = `${folder}/${brief.product}-${brief.code}-${engine}-${timestamp}`;
@@ -872,22 +766,16 @@ RULES: Single jar only (the EXACT one from the reference photo), no duplicates, 
 
   async getStatus() {
     const config = await ApolloConfig.getConfig();
-
-    const available = this.availableEngines();
+    const gptAvailable = this.isAvailable();
 
     return {
       agent: 'Apollo',
       active: config.active,
       engines: {
-        available,
-        enabled: config.enabledEngines,
-        gemini: { available: available.includes('gemini'), model: config.geminiModel },
-        gpt: { available: available.includes('gpt'), model: config.openaiModel }
+        available: gptAvailable ? ['gpt'] : [],
+        gpt: { available: gptAvailable, model: config.openaiModel }
       },
-      // Back-compat fields for older clients
-      geminiAvailable: available.includes('gemini'),
-      geminiModel: config.geminiModel,
-      openaiAvailable: available.includes('gpt'),
+      openaiAvailable: gptAvailable,
       openaiModel: config.openaiModel,
       aspectRatio: config.aspectRatio,
       productBank: {

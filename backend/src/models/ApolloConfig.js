@@ -20,12 +20,8 @@ const apolloConfigSchema = new mongoose.Schema({
   // Product bank
   products: [productSchema],
 
-  // Gemini config
-  geminiModel: { type: String, default: 'gemini-3-pro-image-preview' },
-  // OpenAI GPT-Image config
+  // OpenAI GPT-Image config (only image engine — Gemini removed 2026-04-27)
   openaiModel: { type: String, default: 'gpt-image-2' },
-  // Engines enabled for dual-generation (frontend picks one after both run)
-  enabledEngines: { type: [String], default: ['gemini', 'gpt'] },
   aspectRatio: { type: String, default: '9:16' },
 
   // Cloudinary folder for generated creatives

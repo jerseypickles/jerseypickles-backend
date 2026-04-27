@@ -42,7 +42,7 @@ router.get('/products', authorize('admin'), async (req, res) => {
 
 /**
  * POST /api/apollo/products/upload
- * Upload a bank image (PNG/JPG, full resolution — Gemini needs hi-res reference)
+ * Upload a bank image (PNG/JPG, full resolution — image engine needs hi-res reference)
  * Body: { image: "data:image/png;base64,..." , slug: "optional-slug-for-id" }
  * Returns: { url, publicId }
  */
@@ -60,7 +60,7 @@ router.post('/products/upload', authorize('admin'), async (req, res) => {
     const result = await cloudinary.uploader.upload(image, {
       public_id: publicId,
       resource_type: 'image',
-      // No width cap — Gemini needs the full-res reference jar photo
+      // No width cap — image engine needs the full-res reference jar photo
       quality: 'auto:best',
       tags: ['apollo-bank', 'product-reference']
     });
@@ -178,10 +178,10 @@ router.delete('/products/:slug', authorize('admin'), async (req, res) => {
 router.put('/config', authorize('admin'), async (req, res) => {
   try {
     const config = await ApolloConfig.getConfig();
-    const { active, geminiModel, aspectRatio, cloudinaryFolder } = req.body;
+    const { active, openaiModel, aspectRatio, cloudinaryFolder } = req.body;
 
     if (typeof active === 'boolean') config.active = active;
-    if (geminiModel) config.geminiModel = geminiModel;
+    if (openaiModel) config.openaiModel = openaiModel;
     if (aspectRatio) config.aspectRatio = aspectRatio;
     if (cloudinaryFolder) config.cloudinaryFolder = cloudinaryFolder;
 

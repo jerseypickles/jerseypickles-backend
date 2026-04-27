@@ -1698,7 +1698,7 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
    * Ask Claude to analyze a completed campaign and extract learnings
    * Updates the log with insights and accumulates memory in config
    */
-  // ==================== DIRECTOR (creative brief for Apollo/Gemini) ====================
+  // ==================== DIRECTOR (creative brief for Apollo/GPT-Image) ====================
 
   /**
    * Given a decision, ask Claude to design a bespoke visual brief:
