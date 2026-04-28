@@ -828,30 +828,37 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
     const allUsedCodes = await this._collectUsedDiscountCodes();
     const learningSection = this._buildLearningSection(learningData);
 
-    // Determine next Monday
+    // Plan starts from TODAY (or tomorrow if today's send window has already closed in ET).
+    // Covers 7 rolling days from the start day — no longer hardcoded to Monday.
     const now = new Date();
-    const dayOfWeek = now.getDay(); // 0=Sun
-    const daysUntilMonday = dayOfWeek === 0 ? 1 : (8 - dayOfWeek);
-    const nextMonday = new Date(now);
-    nextMonday.setDate(now.getDate() + daysUntilMonday);
-    nextMonday.setHours(0, 0, 0, 0);
+    const tz = config.timezone || 'America/New_York';
+    const currentETHourForStart = parseInt(now.toLocaleString('en-US', { timeZone: tz, hour: 'numeric', hour12: false }));
+    const startsTomorrow = currentETHourForStart >= config.sendWindowEnd;
+    const planStart = new Date(now);
+    if (startsTomorrow) planStart.setDate(now.getDate() + 1);
+    planStart.setHours(0, 0, 0, 0);
 
     const weekDays = [];
     for (let i = 0; i < 7; i++) {
-      const d = new Date(nextMonday);
-      d.setDate(nextMonday.getDate() + i);
+      const d = new Date(planStart);
+      d.setDate(planStart.getDate() + i);
       const dayName = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][d.getDay()];
       weekDays.push({ date: d.toISOString().split('T')[0], day: dayName });
     }
 
     const weekLabel = `${weekDays[0].date} to ${weekDays[6].date}`;
+    const todayDateStr = new Date().toISOString().split('T')[0];
+    const firstDayIsToday = weekDays[0].date === todayDateStr;
+    const earliestSendHourFirstDay = firstDayIsToday ? Math.max(config.sendWindowStart, currentETHourForStart + 1) : config.sendWindowStart;
 
     const prompt = `You are MAXIMUS, an autonomous email campaign agent for Jersey Pickles - an artisanal pickle and gourmet olive shop from New Jersey.
 
-PLAN THE COMPLETE WEEK: ${weekLabel}
+PLAN THE NEXT 7 DAYS: ${weekLabel}
 AVAILABLE DAYS: ${weekDays.map(d => `${d.day} (${d.date})`).join(', ')}
-CAMPAIGNS TO PLAN: up to ${config.maxCampaignsPerWeek} total this week, up to ${config.maxCampaignsPerDay} per day
-SEND WINDOW: ${config.sendWindowStart}:00 - ${config.sendWindowEnd}:00 (${config.timezone})
+CURRENT TIME: ${currentETHourForStart}:00 ${tz}${firstDayIsToday ? ` — first day is TODAY` : ''}
+${firstDayIsToday ? `IMPORTANT: For the first day (${weekDays[0].day} ${weekDays[0].date}), sendHour MUST be ≥ ${earliestSendHourFirstDay} (after current time). For all other days, sendHour can be anywhere in the send window.` : `Plan starts ${weekDays[0].day} ${weekDays[0].date} — all 7 days have the full send window available.`}
+CAMPAIGNS TO PLAN: up to ${config.maxCampaignsPerWeek} total, up to ${config.maxCampaignsPerDay} per day
+SEND WINDOW: ${config.sendWindowStart}:00 - ${config.sendWindowEnd}:00 (${tz})
 MIN HOURS BETWEEN SAME-DAY SENDS: ${config.minHoursBetweenSameDay}h
 
 AVAILABLE LISTS (${config.lists.length} total):
@@ -1098,12 +1105,43 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
 
       // Generate Apollo creatives for each campaign
       // Normalize each campaign (dates, lists, defaults) sequentially — cheap, no network
+      const nowMs = Date.now();
       for (let i = 0; i < campaigns.length; i++) {
         const c = campaigns[i];
-        const campDate = new Date(c.date + 'T12:00:00Z'); // mid-day probe to avoid DST edge
-        const etOffset = this.getEtOffsetHours(campDate);
-        const scheduledAt = new Date(c.date + 'T00:00:00Z');
-        scheduledAt.setUTCHours(c.sendHour + etOffset, 0, 0, 0);
+
+        // Compute scheduledAt for this campaign's date + sendHour in ET
+        const computeSlot = (dateStr, sendHour) => {
+          const probe = new Date(dateStr + 'T12:00:00Z');
+          const offset = this.getEtOffsetHours(probe);
+          const slot = new Date(dateStr + 'T00:00:00Z');
+          slot.setUTCHours(sendHour + offset, 0, 0, 0);
+          return slot;
+        };
+
+        let scheduledAt = computeSlot(c.date, c.sendHour);
+
+        // Auto-bump if Claude picked a slot already in the past (only happens
+        // when first day of the plan == today and sendHour <= currentETHour).
+        if (scheduledAt.getTime() < nowMs) {
+          const nextHour = currentETHourForStart + 1;
+          if (nextHour < config.sendWindowEnd) {
+            const bumped = Math.max(config.sendWindowStart, nextHour);
+            console.warn(`🏛️ Maximus: ${c.date} ${c.sendHour}:00 ET is in the past — bumping to ${bumped}:00`);
+            campaigns[i].sendHour = bumped;
+            scheduledAt = computeSlot(c.date, bumped);
+          } else {
+            // Window already closed today — push to tomorrow at sendWindowStart
+            const tomorrow = new Date(c.date + 'T00:00:00Z');
+            tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+            const newDate = tomorrow.toISOString().split('T')[0];
+            console.warn(`🏛️ Maximus: ${c.date} ${c.sendHour}:00 ET window closed — moving to ${newDate} at ${config.sendWindowStart}:00`);
+            campaigns[i].date = newDate;
+            campaigns[i].day = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][tomorrow.getUTCDay()];
+            campaigns[i].sendHour = config.sendWindowStart;
+            scheduledAt = computeSlot(newDate, config.sendWindowStart);
+          }
+        }
+
         campaigns[i].scheduledAt = scheduledAt;
 
         const validList = config.lists.find(l => l.listId.toString() === c.listId);
