@@ -72,6 +72,9 @@ const maximusConfigSchema = new mongoose.Schema({
       headline: String,
       product: String,
       productName: String,
+      // Optional duo — Maximus picks a complementary bank product to feature alongside.
+      secondaryProduct: String,
+      secondaryProductName: String,
       contentAngle: String,
       storyBody: String,
       pullQuote: String,
@@ -132,6 +135,9 @@ const maximusConfigSchema = new mongoose.Schema({
       headline: String,
       product: String,
       productName: String,
+      // Optional duo — Maximus picks a complementary bank product to feature alongside.
+      secondaryProduct: String,
+      secondaryProductName: String,
       contentAngle: String,
       storyBody: String,
       pullQuote: String,

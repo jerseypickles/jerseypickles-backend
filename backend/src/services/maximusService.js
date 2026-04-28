@@ -441,6 +441,12 @@ YOUR TASK:
 
 ${learningData.totalCampaigns < 15 ? 'LEARNING PHASE: Try different types, hours, and lists to gather data.' : 'OPTIMIZED PHASE: Use your learning data to pick the best performing time and list.'}
 
+DUO OPPORTUNITY (optional):
+- You MAY occasionally pair the main product with a SECONDARY one from the bank when the story is stronger as a duo (hot+sweet, savory+spicy, shared recipe ingredient, gift bundle).
+- Set "secondaryProduct" to the slug and "secondaryProductName" to the name; both must be active bank products different from the main one.
+- Leave both null for a solo feature (the default for most campaigns).
+- Best fits: pairing, recipe, promotional bundles, product_spotlight. Avoid duos for content/customer_love unless the story calls for it.
+
 DO NOT repeat a subject line used this week.
 
 ═══════════════════════════════════════
@@ -468,6 +474,8 @@ Respond ONLY with valid JSON:
   "headline": "...",
   "product": "<product slug>",
   "productName": "<product full name>",
+  "secondaryProduct": "<OPTIONAL slug of a SECOND bank product to feature alongside as a duo, or null>",
+  "secondaryProductName": "<OPTIONAL full name of the secondary product, or null>",
   "discountPercent": <number 15-30 or null if not promotional>,
   "discountCode": "<SHORT_CODE or null if not promotional>",
   "contentAngle": "<short angle description, all types>",
@@ -690,6 +698,8 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
         product: decision.product,
         headline: decision.headline || decision.subjectLine,
         productName: decision.productName,
+        secondaryProduct: decision.secondaryProduct || null,
+        secondaryProductName: decision.secondaryProductName || null,
         campaignType: decision.campaignType,
         contentAngle: decision.contentAngle,
         recipe: decision.recipe,
@@ -748,6 +758,8 @@ Retry with a subject that contains NO weekday names and NO date-specific urgency
         headline: decision.headline,
         product: decision.product,
         productName: decision.productName,
+        secondaryProduct: decision.secondaryProduct || null,
+        secondaryProductName: decision.secondaryProductName || null,
         contentAngle: decision.contentAngle,
         storyBody: decision.campaignType === 'content' ? decision.storyBody : null,
         pullQuote: decision.campaignType === 'content' ? decision.pullQuote : null,
@@ -906,6 +918,16 @@ STRATEGY RULES:
 - Each discount code MUST be unique. Do NOT reuse: ${allUsedCodes.join(', ') || 'none yet'}
 - It's OK to leave weak days empty (rest days) — don't force campaigns on low-performing days just to fill slots
 
+DUO OPPORTUNITY (use sparingly, max 1-2 per week):
+- For 1-2 campaigns per week, you MAY pair the main product with a SECONDARY bank product when the story is stronger together than solo:
+  · hot + sweet contrast (e.g. hot tomatoes + sweet horseradish chips)
+  · savory + spicy
+  · two products that share a recipe ingredient
+  · gift-set / bundle vibe
+- Set "secondaryProduct" to the slug of the second bank product and "secondaryProductName" to its full name. Both must come from the available product list.
+- Leave both fields null for solo features (the default — most campaigns).
+- Best fits: pairing, recipe, promotional bundles, product_spotlight on a duo. Avoid duos for content/customer_love unless the story explicitly calls for it.
+
 TYPE-SPECIFIC REQUIREMENTS:
 - content  → storyBody (200-400 words, real sensory story) + pullQuote (≤120 chars)
 - recipe   → recipe: { dishName, prepTime: "15 min", ingredients: [4-7 strings], steps: [3-5 numbered strings, each 1-2 sentences] }
@@ -923,6 +945,8 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
     "headline": "...",
     "product": "<product slug>",
     "productName": "<product full name>",
+    "secondaryProduct": "<OPTIONAL slug of a SECOND bank product for duo feature, or null>",
+    "secondaryProductName": "<OPTIONAL full name of the secondary product, or null>",
     "discountPercent": <number or null>,
     "discountCode": "<CODE or null>",
     "contentAngle": "<short angle, all types>",
@@ -1116,6 +1140,8 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
               product: c.product,
               headline: c.headline || c.subjectLine,
               productName: c.productName,
+              secondaryProduct: c.secondaryProduct || null,
+              secondaryProductName: c.secondaryProductName || null,
               campaignType: c.campaignType,
               contentAngle: c.contentAngle,
               recipe: c.recipe,
@@ -1183,6 +1209,8 @@ Respond ONLY with valid JSON — an array of up to ${config.maxCampaignsPerWeek}
           headline: c.headline,
           product: c.product,
           productName: c.productName,
+          secondaryProduct: c.secondaryProduct || null,
+          secondaryProductName: c.secondaryProductName || null,
           contentAngle: c.contentAngle,
           storyBody: c.campaignType === 'content' ? c.storyBody : null,
           pullQuote: c.campaignType === 'content' ? c.pullQuote : null,

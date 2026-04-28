@@ -80,20 +80,40 @@ class ApolloService {
       return { success: false, error: `Product "${brief.product}" not found`, creatives: [] };
     }
 
-    const promptText = this.buildPrompt(brief, product);
+    // Optional duo — Maximus may pair a secondary bank product
+    let secondary = null;
+    if (brief.secondaryProduct && brief.secondaryProduct !== brief.product) {
+      secondary = config.getProduct(brief.secondaryProduct);
+      if (!secondary) {
+        console.warn(`   ⚠️ Secondary product "${brief.secondaryProduct}" not in bank — falling back to solo`);
+      } else {
+        console.log(`   Secondary: ${secondary.slug} (duo mode)`);
+      }
+    }
+
+    const promptText = this.buildPrompt(brief, product, secondary);
     console.log(`   Prompt length: ${promptText.length} chars`);
 
-    let bankImageData = null;
-    if (product.bankImageUrl) {
+    const refImages = [];
+    const downloadRef = async (p, label) => {
+      if (!p?.bankImageUrl) return null;
       try {
-        const imgResponse = await axios.get(product.bankImageUrl, { responseType: 'arraybuffer', timeout: 15000 });
+        const imgResponse = await axios.get(p.bankImageUrl, { responseType: 'arraybuffer', timeout: 15000 });
         const base64 = Buffer.from(imgResponse.data).toString('base64');
         const mimeType = imgResponse.headers['content-type'] || 'image/jpeg';
-        bankImageData = { base64, mimeType, buffer: Buffer.from(imgResponse.data) };
-        console.log(`   Bank image downloaded (${Math.round(imgResponse.data.length / 1024)}KB)`);
+        console.log(`   ${label} downloaded (${Math.round(imgResponse.data.length / 1024)}KB)`);
+        return { base64, mimeType, buffer: Buffer.from(imgResponse.data) };
       } catch (imgErr) {
-        console.warn(`   Could not download bank image: ${imgErr.message}`);
+        console.warn(`   Could not download ${label}: ${imgErr.message}`);
+        return null;
       }
+    };
+
+    const primaryRef = await downloadRef(product, 'primary bank image');
+    if (primaryRef) refImages.push(primaryRef);
+    if (secondary) {
+      const secondaryRef = await downloadRef(secondary, 'secondary bank image');
+      if (secondaryRef) refImages.push(secondaryRef);
     }
 
     const startTime = Date.now();
@@ -102,7 +122,7 @@ class ApolloService {
 
     try {
       const imageBase64 = await this._withTimeout(
-        this.callGpt(promptText, model, bankImageData),
+        this.callGpt(promptText, model, refImages),
         ApolloService.ENGINE_TIMEOUT_MS,
         'gpt'
       );
@@ -159,26 +179,37 @@ class ApolloService {
   // ==================== OPENAI (GPT-IMAGE-2) API CALL ====================
 
   /**
-   * Call GPT-Image-2 via the /v1/images/edits endpoint, using the bank image as reference.
+   * Call GPT-Image-2 via the /v1/images/edits endpoint, using bank image(s) as references.
+   * Accepts a single ref object (legacy) or an array of refs (duo mode).
    * Returns base64 PNG.
    * @param {string} prompt - Text prompt
    * @param {string} model - OpenAI image model (default 'gpt-image-2')
-   * @param {object|null} bankImage - { buffer, mimeType } reference product photo
+   * @param {object|object[]|null} bankImages - { buffer, mimeType } single ref OR array of refs
    */
-  async callGpt(prompt, model = 'gpt-image-2', bankImage = null) {
+  async callGpt(prompt, model = 'gpt-image-2', bankImages = null) {
     if (!this.openaiClient) throw new Error('OpenAI not initialized');
 
-    const finalPrompt = bankImage
-      ? `REFERENCE PRODUCT PHOTO: The attached image is the EXACT product jar you must reproduce. Match its label, shape, color, and proportions precisely. Do NOT invent a different jar.\n\n${prompt}`
-      : prompt;
+    const refs = Array.isArray(bankImages)
+      ? bankImages.filter(Boolean)
+      : (bankImages ? [bankImages] : []);
+
+    const refLine = refs.length > 1
+      ? `REFERENCE PRODUCT PHOTOS (${refs.length}): The attached images are the EXACT product jars you must reproduce side by side. Match each jar's label, shape, color, and proportions precisely. Do NOT mix labels between jars or invent new ones.`
+      : refs.length === 1
+        ? 'REFERENCE PRODUCT PHOTO: The attached image is the EXACT product jar you must reproduce. Match its label, shape, color, and proportions precisely. Do NOT invent a different jar.'
+        : null;
+
+    const finalPrompt = refLine ? `${refLine}\n\n${prompt}` : prompt;
 
     let response;
-    if (bankImage && bankImage.buffer) {
-      const fileExt = (bankImage.mimeType || 'image/jpeg').split('/')[1] || 'jpg';
-      const refFile = await toFile(bankImage.buffer, `reference.${fileExt}`, { type: bankImage.mimeType || 'image/jpeg' });
+    if (refs.length > 0) {
+      const refFiles = await Promise.all(refs.map(async (ref, idx) => {
+        const fileExt = (ref.mimeType || 'image/jpeg').split('/')[1] || 'jpg';
+        return toFile(ref.buffer, `reference-${idx}.${fileExt}`, { type: ref.mimeType || 'image/jpeg' });
+      }));
       response = await this.openaiClient.images.edit({
         model,
-        image: [refFile],
+        image: refFiles,
         prompt: finalPrompt
       });
     } else {
@@ -197,9 +228,10 @@ class ApolloService {
    * Build the mega-prompt for GPT-Image-2.
    * Template-based with variable injection from Maximus brief.
    */
-  buildPrompt(brief, product) {
+  buildPrompt(brief, product, secondary = null) {
     const dayOfWeek = new Date().toLocaleDateString('en-US', { weekday: 'long' });
     const type = brief.campaignType || 'promotional';
+    const isDuo = !!secondary;
 
     // Scene variety — randomize across many different settings to avoid monotony
     const scenes = [
@@ -308,9 +340,22 @@ class ApolloService {
     const directorExtras = d.extras ? `\nEXTRAS: ${d.extras}.` : '';
     if (brief.director) console.log('   🎬 Using Director brief (bespoke)');
 
+    const duoBlock = isDuo ? `
+
+DUO MODE — TWO REFERENCE JARS:
+You have TWO reference product photos. BOTH jars must appear together in the scene with equal visual weight.
+- LEFT / FOREGROUND-LEFT: ${product.name} (reference photo #1)
+- RIGHT / FOREGROUND-RIGHT: ${secondary.name} (reference photo #2)
+Each jar's label, shape, glass color, lid, and proportions must be reproduced with 100% fidelity to its OWN reference. NEVER mix labels between the two jars or invent a third hybrid jar. They sit side by side or in subtle staggered depth, sharing the surface and styling.
+${secondary.promptHints ? `Secondary product hints: ${secondary.promptHints}` : ''}` : '';
+
+    const placementLine = isDuo
+      ? `Place BOTH EXACT jars from the reference photos side by side as described. Surround them with complementary fresh ingredients that bridge both products' flavors. Premium lifestyle food photography, hyperrealistic, 8K, 9:16 vertical portrait.`
+      : `Place the EXACT jar from the reference photo as described. Surround it with complementary fresh ingredients that match the product. Premium lifestyle food photography, hyperrealistic, 8K, 9:16 vertical portrait.`;
+
     const baseScene = `ASPECT RATIO: 9:16 vertical portrait, designed for email marketing.
 
-CRITICAL: You MUST use the reference product photo provided above as the EXACT jar in this image. Reproduce the jar's label, shape, glass color, lid, and proportions with 100% fidelity. Do NOT create a different jar or modify the label design.
+CRITICAL: You MUST use the reference product photo${isDuo ? 's' : ''} provided above as the EXACT jar${isDuo ? 's' : ''} in this image. Reproduce ${isDuo ? 'each jar\'s' : 'the jar\'s'} label, shape, glass color, lid, and proportions with 100% fidelity. Do NOT create a different jar or modify the label design.${duoBlock}
 
 SCENE: ${scene}.
 LIGHTING: ${lighting}.
@@ -318,7 +363,7 @@ COLOR PALETTE: ${palette}.
 COMPOSITION: ${composition}.
 CAMERA: ${cameraStyle}.${directorExtras}
 
-Place the EXACT jar from the reference photo as described. Surround it with complementary fresh ingredients that match the product. Premium lifestyle food photography, hyperrealistic, 8K, 9:16 vertical portrait.
+${placementLine}
 
 ${product.promptHints || ''}`;
 
@@ -345,17 +390,21 @@ RULES: Overhead angle (80-90°), shallow depth with everything in focus, hyperre
     }
 
     if (type === 'pairing') {
-      // Pairing: two items side by side on a shared surface
+      // Pairing: two items side by side on a shared surface.
+      // If Maximus picked a secondary bank product, use it as the right jar (real label).
       const pairing = brief.pairing || {};
       const leftItem = pairing.leftItem?.name || product.name;
-      const rightItem = pairing.rightItem?.name || 'an artisanal cheese';
+      const rightItem = isDuo ? secondary.name : (pairing.rightItem?.name || 'an artisanal cheese');
+      const rightDescription = isDuo
+        ? `the EXACT second jar from the second reference photo (${secondary.name}) — match its label, shape, glass, and lid precisely. Do NOT mix its label with the first jar.`
+        : `${rightItem}, styled beautifully — if cheese, a wedge with a knife; if bread, a torn rustic chunk; if meat, thin slices fanned; if another product, its own presentation.`;
       return `ASPECT RATIO: 9:16 vertical portrait for a pairing guide email hero.
 
-CRITICAL: Use the reference product photo above as the EXACT jar that must appear in the scene. Match label, shape, glass, lid precisely.
+CRITICAL: Use the reference product photo${isDuo ? 's' : ''} above as the EXACT jar${isDuo ? 's' : ''} that must appear in the scene. Match label, shape, glass, lid precisely${isDuo ? ' for BOTH jars — never blend their labels' : ''}.
 
 SCENE: Two artisanal items photographed side by side on a shared surface — a wooden charcuterie board or slate serving platter.
-LEFT: the EXACT jar from the reference photo (${leftItem}) with some of its contents spilled on the board.
-RIGHT: ${rightItem}, styled beautifully — if cheese, a wedge with a knife; if bread, a torn rustic chunk; if meat, thin slices fanned; if another product, its own presentation.
+LEFT: the EXACT jar from the first reference photo (${leftItem}) with some of its contents spilled on the board.
+RIGHT: ${rightDescription}
 Between them: a small sprig of fresh herbs, a few crackers or slices, suggesting the pairing in action.
 LIGHTING: ${lighting}.
 COLOR PALETTE: ${palette}.
@@ -366,7 +415,7 @@ NO OVERLAY TEXT, NO BUTTONS, NO LOGOS. Pure editorial pairing photography — th
 
 ${product.promptHints || ''}
 
-RULES: Slightly elevated angle (30-45°), both items equally prominent, premium food photography, hyperrealistic, 8K, 9:16 vertical. Single jar only from reference, no duplicates.`;
+RULES: Slightly elevated angle (30-45°), both items equally prominent, premium food photography, hyperrealistic, 8K, 9:16 vertical. ${isDuo ? 'Both reference jars present, each rendered with its OWN label — do not duplicate one or merge labels.' : 'Single jar only from reference, no duplicates.'}`;
     }
 
     if (type === 'customer_love') {
