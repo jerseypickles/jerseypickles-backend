@@ -183,20 +183,20 @@ class PopupController {
       const now = new Date();
       const expiryDate = new Date(now.getTime() + (DISCOUNT_CONFIG.expirationDays * 24 * 60 * 60 * 1000));
 
-      // Si hay SKUs excluidos, restringir el descuento solo a las variantes elegibles.
-      // Si Shopify falla al traer productos, caemos a 'all' para no romper el signup.
+      // Si hay SKUs excluidos, restringir el descuento solo a los productos elegibles.
+      // Shopify limita entitled_product_ids a 100. Si excede o falla, caemos a 'all'.
       let targetSelection = 'all';
-      let entitledVariantIds = null;
+      let entitledProductIds = null;
       if (DISCOUNT_CONFIG.excludedSkus.length > 0) {
         try {
-          entitledVariantIds = await shopifyService.getEligibleVariantIds(DISCOUNT_CONFIG.excludedSkus);
-          if (entitledVariantIds && entitledVariantIds.length > 0) {
+          entitledProductIds = await shopifyService.getEligibleProductIds(DISCOUNT_CONFIG.excludedSkus);
+          if (entitledProductIds && entitledProductIds.length > 0) {
             targetSelection = 'entitled';
           } else {
-            console.warn('⚠️  Lista de variantes elegibles vacía, aplicando descuento a todo');
+            console.warn('⚠️  Lista de productos elegibles no usable, aplicando descuento a todo');
           }
         } catch (err) {
-          console.error('⚠️  Error obteniendo variantes elegibles, aplicando a todo:', err.message);
+          console.error('⚠️  Error obteniendo productos elegibles, aplicando a todo:', err.message);
         }
       }
 
@@ -214,7 +214,7 @@ class PopupController {
         ends_at: expiryDate.toISOString()
       };
       if (targetSelection === 'entitled') {
-        priceRuleData.entitled_variant_ids = entitledVariantIds;
+        priceRuleData.entitled_product_ids = entitledProductIds;
       }
       
       const priceRule = await shopifyService.createPriceRule(priceRuleData);

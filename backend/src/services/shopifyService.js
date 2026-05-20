@@ -199,28 +199,42 @@ class ShopifyService {
     return variants;
   }
 
-  // Cache de variant IDs elegibles (excluye SKUs especificados)
-  async getEligibleVariantIds(excludedSkus = []) {
+  // Cache de product IDs elegibles (excluye productos cuyo SKU está en la lista).
+  // Shopify limita entitled_product_ids a 100 — si excede, devolvemos null para caer a 'all'.
+  async getEligibleProductIds(excludedSkus = []) {
     if (!excludedSkus.length) return null;
 
     const cacheKey = excludedSkus.slice().sort().join(',');
     const now = Date.now();
-    const cached = this._eligibleVariantsCache?.[cacheKey];
+    const cached = this._eligibleProductsCache?.[cacheKey];
     if (cached && (now - cached.timestamp) < 60 * 60 * 1000) {
-      return cached.variantIds;
+      return cached.productIds;
     }
 
     const allVariants = await this.getAllProductVariants();
     const excludedSet = new Set(excludedSkus.map(s => s.trim().toLowerCase()));
-    const eligible = allVariants
-      .filter(v => !excludedSet.has((v.sku || '').toLowerCase()))
-      .map(v => v.variantId);
 
-    const excludedCount = allVariants.length - eligible.length;
-    console.log(`🎯 Elegibles para descuento popup: ${eligible.length} variantes (excluidas ${excludedCount} con SKUs: ${excludedSkus.join(', ')})`);
+    const excludedProductIds = new Set();
+    const allProductIds = new Set();
+    for (const v of allVariants) {
+      allProductIds.add(v.productId);
+      if (excludedSet.has((v.sku || '').toLowerCase())) {
+        excludedProductIds.add(v.productId);
+      }
+    }
 
-    if (!this._eligibleVariantsCache) this._eligibleVariantsCache = {};
-    this._eligibleVariantsCache[cacheKey] = { variantIds: eligible, timestamp: now };
+    const eligible = [...allProductIds].filter(id => !excludedProductIds.has(id));
+    console.log(`🎯 Elegibles para descuento popup: ${eligible.length} productos (excluidos ${excludedProductIds.size} por SKUs: ${excludedSkus.join(', ')})`);
+
+    if (eligible.length > 100) {
+      console.warn(`⚠️  Lista de productos elegibles (${eligible.length}) excede el límite de 100 de Shopify. Necesitas usar entitled_collection_ids con una smart collection.`);
+      if (!this._eligibleProductsCache) this._eligibleProductsCache = {};
+      this._eligibleProductsCache[cacheKey] = { productIds: null, timestamp: now };
+      return null;
+    }
+
+    if (!this._eligibleProductsCache) this._eligibleProductsCache = {};
+    this._eligibleProductsCache[cacheKey] = { productIds: eligible, timestamp: now };
     return eligible;
   }
 
