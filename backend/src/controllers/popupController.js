@@ -18,7 +18,11 @@ const DISCOUNT_CONFIG = {
   fallbackCode: 'PICKLE15',       // Código genérico de fallback
   codePrefix: 'JP',               // Jersey Pickles prefix
   campaignName: 'Build Your Box', // Nombre de la campaña
-  expirationDays: 30              // Días hasta que expire el código
+  expirationDays: 30,             // Días hasta que expire el código
+  // SKUs que NO deben recibir el descuento del popup.
+  // Override con POPUP_EXCLUDED_SKUS="Sku1,Sku2,Sku3" en env.
+  excludedSkus: (process.env.POPUP_EXCLUDED_SKUS || 'Ins-1,Ins-2,Ins-3')
+    .split(',').map(s => s.trim()).filter(Boolean)
 };
 
 // Función para generar código único
@@ -178,11 +182,28 @@ class PopupController {
       
       const now = new Date();
       const expiryDate = new Date(now.getTime() + (DISCOUNT_CONFIG.expirationDays * 24 * 60 * 60 * 1000));
-      
+
+      // Si hay SKUs excluidos, restringir el descuento solo a las variantes elegibles.
+      // Si Shopify falla al traer productos, caemos a 'all' para no romper el signup.
+      let targetSelection = 'all';
+      let entitledVariantIds = null;
+      if (DISCOUNT_CONFIG.excludedSkus.length > 0) {
+        try {
+          entitledVariantIds = await shopifyService.getEligibleVariantIds(DISCOUNT_CONFIG.excludedSkus);
+          if (entitledVariantIds && entitledVariantIds.length > 0) {
+            targetSelection = 'entitled';
+          } else {
+            console.warn('⚠️  Lista de variantes elegibles vacía, aplicando descuento a todo');
+          }
+        } catch (err) {
+          console.error('⚠️  Error obteniendo variantes elegibles, aplicando a todo:', err.message);
+        }
+      }
+
       const priceRuleData = {
         title: `${DISCOUNT_CONFIG.campaignName} Popup - ${generatedCode}`,
         target_type: 'line_item',
-        target_selection: 'all',
+        target_selection: targetSelection,
         allocation_method: 'across',
         value_type: 'percentage',
         value: DISCOUNT_CONFIG.percentage,  // ← 15% OFF
@@ -192,6 +213,9 @@ class PopupController {
         starts_at: now.toISOString(),
         ends_at: expiryDate.toISOString()
       };
+      if (targetSelection === 'entitled') {
+        priceRuleData.entitled_variant_ids = entitledVariantIds;
+      }
       
       const priceRule = await shopifyService.createPriceRule(priceRuleData);
       

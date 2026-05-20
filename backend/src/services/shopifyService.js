@@ -171,6 +171,59 @@ class ShopifyService {
     }
   }
 
+  async getAllProductVariants() {
+    const variants = [];
+    let nextPageUrl = `${this.baseUrl}/products.json?limit=250&fields=id,variants`;
+    let pageCount = 0;
+
+    while (nextPageUrl) {
+      pageCount++;
+      const response = await axios.get(nextPageUrl, { headers: this.getHeaders() });
+      const products = response.data.products || [];
+
+      for (const product of products) {
+        for (const variant of (product.variants || [])) {
+          variants.push({
+            variantId: variant.id,
+            productId: product.id,
+            sku: variant.sku || ''
+          });
+        }
+      }
+
+      nextPageUrl = this.getNextPageUrl(response.headers.link);
+      if (nextPageUrl) await this.delay(500);
+    }
+
+    console.log(`📦 ${variants.length} variantes obtenidas (${pageCount} páginas)`);
+    return variants;
+  }
+
+  // Cache de variant IDs elegibles (excluye SKUs especificados)
+  async getEligibleVariantIds(excludedSkus = []) {
+    if (!excludedSkus.length) return null;
+
+    const cacheKey = excludedSkus.slice().sort().join(',');
+    const now = Date.now();
+    const cached = this._eligibleVariantsCache?.[cacheKey];
+    if (cached && (now - cached.timestamp) < 60 * 60 * 1000) {
+      return cached.variantIds;
+    }
+
+    const allVariants = await this.getAllProductVariants();
+    const excludedSet = new Set(excludedSkus.map(s => s.trim().toLowerCase()));
+    const eligible = allVariants
+      .filter(v => !excludedSet.has((v.sku || '').toLowerCase()))
+      .map(v => v.variantId);
+
+    const excludedCount = allVariants.length - eligible.length;
+    console.log(`🎯 Elegibles para descuento popup: ${eligible.length} variantes (excluidas ${excludedCount} con SKUs: ${excludedSkus.join(', ')})`);
+
+    if (!this._eligibleVariantsCache) this._eligibleVariantsCache = {};
+    this._eligibleVariantsCache[cacheKey] = { variantIds: eligible, timestamp: now };
+    return eligible;
+  }
+
   // ✅ Crear Price Rule para descuentos
   async createPriceRule(data) {
     try {
