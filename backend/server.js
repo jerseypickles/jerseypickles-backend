@@ -419,7 +419,13 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🍪 Cookie Parser: Enabled`);
   console.log(`🔒 Webhook Validation: ${process.env.SHOPIFY_WEBHOOK_SECRET ? '✅ Enabled' : '⚠️  Disabled'}`);
   console.log(`📧 Email Queue: ${process.env.REDIS_URL ? '✅ Redis Connected' : '⚠️  Direct Send Mode'}`);
-  console.log(`📱 SMS Provider: ${process.env.TELNYX_API_KEY ? '✅ Telnyx Configured' : '⚠️  Not Configured'}`);
+  // Tener TELNYX_API_KEY ya no significa que los SMS salgan: la cuenta fue
+  // dada de baja. Manda SMS_ENABLED, no la presencia de la key.
+  console.log(`📱 SMS Provider: ${
+    process.env.SMS_ENABLED === 'true'
+      ? (process.env.TELNYX_API_KEY ? '✅ Telnyx Configured' : '⚠️  SMS_ENABLED=true pero falta TELNYX_API_KEY')
+      : '⛔ DESHABILITADO (SMS_ENABLED != true) — no se intenta ningún envío'
+  }`);
   console.log(`✅ Server ready - Payload limit: 10MB`);
   console.log(`🔧 Shopify webhooks: express.raw() enabled`);
   console.log(`🔧 Telnyx webhooks: express.json() enabled`);

@@ -42,6 +42,22 @@ class TelnyxService {
    * @returns {object} - Telnyx response
    */
   async sendSms(to, text, options = {}) {
+    // ==================== KILL SWITCH ====================
+    // Cuenta de Telnyx dada de baja: el número emisor no existe y la API
+    // responde 10004 "Invalid source number" en cada intento. Cortamos ANTES
+    // de llamar a la API para no ensuciar los logs ni registrar envíos que
+    // nunca ocurrieron. Cubre también campañas de marketing, que entran por
+    // este mismo método.
+    // Reactivar: proveedor funcionando + SMS_ENABLED=true en Render.
+    if (process.env.SMS_ENABLED !== 'true') {
+      return {
+        success: false,
+        skipped: true,
+        reason: 'sms_disabled',
+        error: 'SMS deshabilitado (SMS_ENABLED != true)'
+      };
+    }
+
     const formattedTo = this.formatPhoneNumber(to);
 
     try {

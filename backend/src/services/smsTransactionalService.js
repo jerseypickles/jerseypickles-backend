@@ -130,9 +130,22 @@ const replaceVariables = (template, data) => {
 
 // ==================== TRIGGER SETTINGS ====================
 // In-memory settings (can be moved to DB later for dashboard control)
+//
+// ⛔ APAGADO GLOBAL: la cuenta de Telnyx fue dada de baja y el número emisor ya no existe.
+// Desde el 2026-03-31 no se entregó un solo SMS transaccional: cada intento
+// fallaba con 10004 "Invalid source number" (~500/día) y aun así dejaba un
+// registro en smstransactionals y en el historial de conversaciones, como si
+// se hubiera enviado. Mientras SMS_ENABLED != 'true' los triggers arrancan
+// apagados y ni siquiera se crea el registro.
+//
+// Para reactivar: configurar un proveedor que funcione y poner SMS_ENABLED=true
+// en las variables de entorno de Render. Los triggers que abajo están en false
+// ya lo estaban antes de apagar todo; esos se dejaron como estaban.
+const SMS_ENABLED = process.env.SMS_ENABLED === 'true';
+
 let triggerSettings = {
-  order_confirmation: { enabled: true, template: null },
-  shipping_notification: { enabled: true, template: null },
+  order_confirmation: { enabled: SMS_ENABLED, template: null },
+  shipping_notification: { enabled: SMS_ENABLED, template: null },
   delivery_confirmation: { enabled: false, template: null },
   order_cancelled: { enabled: false, template: null },
   delayed_shipment: { enabled: false, template: null, delayHours: 72 }
