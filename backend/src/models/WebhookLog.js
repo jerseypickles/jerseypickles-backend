@@ -38,10 +38,15 @@ const webhookLogSchema = new mongoose.Schema({
     index: true
   },
   
-  // The raw payload received
+  // The raw payload received.
+  // Solo se persiste cuando el webhook FALLA (ver logWebhook/markFailed).
+  // En los que salen bien no aporta nada: el 99.5% termina en 'processed',
+  // y para los topics orders/* el mismo objeto ya se guarda en
+  // Order.shopifyData. Guardarlo siempre hacía crecer esta colección
+  // ~107 MB/día (llegó a 19.3 GB = 71% de toda la base).
   payload: {
     type: mongoose.Schema.Types.Mixed,
-    required: true
+    required: false
   },
   
   // Headers received (for debugging)
@@ -116,25 +121,40 @@ webhookLogSchema.statics.logWebhook = async function(data) {
   const log = new this({
     topic: data.topic,
     source: data.source || 'shopify',
-    status: 'received',
+    // Arrancamos ya en 'processing': markProcessing() ya no escribe.
+    status: 'processing',
     shopifyId: data.shopifyId,
     email: data.email,
-    payload: data.payload,
+    // payload: NO se persiste de entrada. Se guarda solo si falla.
     headers: data.headers,
     metadata: data.metadata,
-    cartDetails: data.cartDetails
+    cartDetails: data.cartDetails,
+    processing: { startedAt: new Date() }
   });
-  
+
+  // El payload viaja en memoria por si markFailed() lo necesita.
+  // No enumerable para que no lo agarre toObject()/JSON.stringify.
+  Object.defineProperty(log, '_rawPayload', {
+    value: data.payload,
+    enumerable: false,
+    writable: true,
+    configurable: true
+  });
+
   await log.save();
   return log;
 };
 
 // Method to mark as processing
+// Antes hacía un save() aquí: una escritura entera por webhook solo para
+// dejar el estado 'processing' durante los ~180 ms que dura el proceso.
+// Nadie consulta ese estado intermedio, así que ahora solo toca memoria —
+// logWebhook() ya arranca el registro en 'processing'. Se mantiene el método
+// (lo llaman 14 sitios) para no tocar los controladores.
 webhookLogSchema.methods.markProcessing = async function() {
   this.status = 'processing';
   this.processing = this.processing || {};
-  this.processing.startedAt = new Date();
-  await this.save();
+  this.processing.startedAt = this.processing.startedAt || new Date();
 };
 
 // Method to mark as processed
@@ -153,6 +173,10 @@ webhookLogSchema.methods.markProcessed = async function(actions = [], flows = []
 // Method to mark as failed
 webhookLogSchema.methods.markFailed = async function(error) {
   this.status = 'failed';
+  // Aquí SÍ guardamos el payload: es el único caso donde sirve para depurar.
+  if (this._rawPayload !== undefined && this.payload === undefined) {
+    this.payload = this._rawPayload;
+  }
   this.error = {
     message: error.message,
     stack: error.stack,
